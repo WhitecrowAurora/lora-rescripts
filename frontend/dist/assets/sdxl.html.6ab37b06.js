@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-53c99f50","path":"/lora/sdxl.html","title":"SDXL","lang":"en-US","frontmatter":{"example":true,"trainType":"sdxl-lora"},"excerpt":"","headers":[],"filePathRelative":"lora/sdxl.md"}');export{e as data};

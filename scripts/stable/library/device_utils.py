@@ -1,7 +1,17 @@
 import functools
 import gc
+from typing import Optional, Union
 
 import torch
+
+
+try:
+    # intel gpu support for pytorch older than 2.5
+    # ipex is not needed after pytorch 2.5
+    import intel_extension_for_pytorch as ipex  # noqa
+except Exception:
+    pass
+
 
 try:
     HAS_CUDA = torch.cuda.is_available()
@@ -14,8 +24,6 @@ except Exception:
     HAS_MPS = False
 
 try:
-    import intel_extension_for_pytorch as ipex  # noqa
-
     HAS_XPU = torch.xpu.is_available()
 except Exception:
     HAS_XPU = False
@@ -31,12 +39,15 @@ def clean_memory():
         torch.mps.empty_cache()
 
 
-def clean_memory_on_device(device: torch.device):
+def clean_memory_on_device(device: Optional[Union[str, torch.device]]):
     r"""
     Clean memory on the specified device, will be called from training scripts.
     """
     gc.collect()
-
+    if device is None:
+        return
+    if isinstance(device, str):
+        device = torch.device(device)
     # device may "cuda" or "cuda:0", so we need to check the type of device
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -44,6 +55,19 @@ def clean_memory_on_device(device: torch.device):
         torch.xpu.empty_cache()
     if device.type == "mps":
         torch.mps.empty_cache()
+
+
+def synchronize_device(device: Optional[Union[str, torch.device]]):
+    if device is None:
+        return
+    if isinstance(device, str):
+        device = torch.device(device)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "xpu":
+        torch.xpu.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 @functools.lru_cache(maxsize=None)
@@ -69,7 +93,7 @@ def init_ipex():
 
     This function should run right after importing torch and before doing anything else.
 
-    If IPEX is not available, this function does nothing.
+    If xpu is not available, this function does nothing.
     """
     try:
         if HAS_XPU:

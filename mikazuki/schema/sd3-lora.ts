@@ -11,6 +11,16 @@ Schema.intersect([
     Schema.object({
         t5xxl_max_token_length: Schema.number().step(1).description("T5XXL 最大 token 长度（不填写使用自动）"),
         train_t5xxl: Schema.boolean().default(false).description("训练 T5XXL（不推荐）"),
+        weighting_scheme: Schema.union(["sigma_sqrt", "logit_normal", "mode", "cosmap", "none", "uniform"]).default("uniform").description("时间步分布权重策略"),
+        logit_mean: Schema.number().step(0.01).description("logit_normal 权重策略的均值"),
+        logit_std: Schema.number().step(0.01).description("logit_normal 权重策略的标准差"),
+        mode_scale: Schema.number().step(0.01).description("mode 权重策略的缩放系数"),
+        apply_lg_attn_mask: Schema.boolean().default(false).description("对 CLIP-L / CLIP-G 应用注意力掩码"),
+        clip_l_dropout_rate: Schema.number().min(0).max(1).step(0.01).description("CLIP-L dropout 概率"),
+        clip_g_dropout_rate: Schema.number().min(0).max(1).step(0.01).description("CLIP-G dropout 概率"),
+        t5_dropout_rate: Schema.number().min(0).max(1).step(0.01).description("T5XXL dropout 概率"),
+        pos_emb_random_crop_rate: Schema.number().min(0).max(1).step(0.01).description("位置编码随机裁切概率"),
+        enable_scaled_pos_embed: Schema.boolean().default(false).description("启用缩放位置编码"),
     }).description("SD3 专用参数"),
 
     Schema.object(
@@ -44,6 +54,7 @@ Schema.intersect([
             network_weights: Schema.string().role('filepicker').description("从已有的 LoRA 模型上继续训练，填写路径"),
             network_dim: Schema.number().min(1).default(4).description("网络维度，常用 4~128，不是越大越好, 低dim可以降低显存占用"),
             network_alpha: Schema.number().min(1).default(1).description("常用值：等于 network_dim 或 network_dim*1/2 或 1。使用较小的 alpha 需要提升学习率"),
+            dim_from_weights: Schema.boolean().default(false).description("从已有 network_weights 自动推断 rank / dim"),
             network_args_custom: Schema.array(String).role('table').description('自定义 network_args，一行一个'),
             enable_base_weight: Schema.boolean().default(false).description('启用基础权重（差异炼丹）'),
         }).description("网络设置"),
@@ -82,6 +93,9 @@ Schema.intersect([
             sdpa: Schema.boolean().default(true).description("启用 sdpa"),
             cache_text_encoder_outputs: Schema.boolean().default(true).description("缓存文本编码器的输出，减少显存使用。使用时需要关闭 shuffle_caption"),
             cache_text_encoder_outputs_to_disk: Schema.boolean().default(true).description("缓存文本编码器的输出到磁盘"),
+            text_encoder_batch_size: Schema.number().min(1).description("文本编码器缓存批量大小"),
+            disable_mmap_load_safetensors: Schema.boolean().default(false).description("禁用 safetensors 的 mmap 加载"),
+            blocks_to_swap: Schema.number().min(1).description("在 CPU/GPU 间交换的 Transformer block 数量，用于进一步省显存"),
         }, ["xformers"])
     ).description("速度优化选项"),
 

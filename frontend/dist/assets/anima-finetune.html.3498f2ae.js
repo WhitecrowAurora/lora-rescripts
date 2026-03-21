@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-3e4b2f19","path":"/lora/anima-finetune.html","title":"Anima 完整训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"anima-finetune"},"excerpt":"","headers":[],"filePathRelative":"lora/anima-finetune.md"}');export{e as data};

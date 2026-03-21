@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-5ce84551","path":"/lora/sdxl-controlnet.html","title":"SDXL ControlNet 训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"sdxl-controlnet"},"excerpt":"","headers":[],"filePathRelative":"lora/sdxl-controlnet.md"}');export{e as data};

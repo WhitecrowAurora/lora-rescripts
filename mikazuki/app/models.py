@@ -1,5 +1,6 @@
+from typing import Any, Dict, Optional
+
 from pydantic import BaseModel, Field
-from typing import List, Optional, Union, Dict, Any
 
 
 class TaggerInterrogateRequest(BaseModel):
@@ -32,8 +33,8 @@ class TaggerInterrogateRequest(BaseModel):
 
 class APIResponse(BaseModel):
     status: str
-    message: Optional[str]
-    data: Optional[Dict]
+    message: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
 
 
 class APIResponseSuccess(APIResponse):

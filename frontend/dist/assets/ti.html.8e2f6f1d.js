@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-2e5cfb9a","path":"/lora/ti.html","title":"Textual Inversion 训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"sd-textual-inversion"},"excerpt":"","headers":[],"filePathRelative":"lora/ti.md"}');export{e as data};

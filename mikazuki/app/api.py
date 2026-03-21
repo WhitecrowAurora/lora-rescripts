@@ -2,8 +2,8 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import random
+import re
 
 from glob import glob
 from datetime import datetime
@@ -12,7 +12,6 @@ from typing import Tuple, Optional
 
 import toml
 from fastapi import APIRouter, BackgroundTasks, Request
-from starlette.requests import Request
 
 import mikazuki.process as process
 from mikazuki import launch_utils
@@ -24,7 +23,7 @@ from mikazuki.tagger.interrogator import (available_interrogators,
                                           on_interrogate)
 from mikazuki.tasks import tm
 from mikazuki.utils import train_utils
-from mikazuki.utils.devices import printable_devices
+from mikazuki.utils.devices import get_xformers_status, printable_devices
 from mikazuki.utils.tk_window import (open_directory_selector,
                                       open_file_selector)
 
@@ -34,11 +33,37 @@ avaliable_scripts = [
     "networks/extract_lora_from_models.py",
     "networks/extract_lora_from_dylora.py",
     "networks/merge_lora.py",
+    "networks/sdxl_merge_lora.py",
+    "networks/svd_merge_lora.py",
+    "networks/flux_extract_lora.py",
+    "networks/resize_lora.py",
+    "networks/lora_interrogator.py",
+    "networks/flux_merge_lora.py",
+    "networks/convert_flux_lora.py",
+    "networks/convert_hunyuan_image_lora_to_comfy.py",
+    "networks/convert_anima_lora_to_comfy.py",
+    "networks/check_lora_weights.py",
     "tools/merge_models.py",
+    "tools/merge_sd3_safetensors.py",
+    "tools/convert_diffusers_to_flux.py",
+    "tools/convert_diffusers20_original_sd.py",
+    "tools/show_metadata.py",
+    "tools/resize_images_to_resolution.py",
+    "tools/canny.py",
+    "tools/detect_face_rotate.py",
+    "tools/latent_upscaler.py",
 ]
 
 avaliable_schemas = []
 avaliable_presets = []
+
+script_positional_args = {
+    "networks/convert_hunyuan_image_lora_to_comfy.py": ["src_path", "dst_path"],
+    "networks/convert_anima_lora_to_comfy.py": ["src_path", "dst_path"],
+    "networks/check_lora_weights.py": ["file"],
+    "tools/resize_images_to_resolution.py": ["src_img_folder", "dst_img_folder"],
+    "tools/convert_diffusers20_original_sd.py": ["model_to_load", "model_to_save"],
+}
 
 trainer_mapping = {
     "sd-lora": "./scripts/stable/train_network.py",
@@ -46,27 +71,40 @@ trainer_mapping = {
 
     "sd-dreambooth": "./scripts/stable/train_db.py",
     "sdxl-finetune": "./scripts/stable/sdxl_train.py",
+    "sd-controlnet": "./scripts/stable/train_control_net.py",
+    "sdxl-controlnet": "./scripts/stable/sdxl_train_control_net.py",
+    "sdxl-controlnet-lllite": "./scripts/stable/sdxl_train_control_net_lllite.py",
+    "flux-controlnet": "./scripts/stable/flux_train_control_net.py",
+    "sd-textual-inversion": "./scripts/stable/train_textual_inversion.py",
+    "sd-textual-inversion-xti": "./scripts/stable/train_textual_inversion_XTI.py",
+    "sdxl-textual-inversion": "./scripts/stable/sdxl_train_textual_inversion.py",
 
     "sd3-lora": "./scripts/dev/sd3_train_network.py",
+    "sd3-finetune": "./scripts/stable/sd3_train.py",
     "flux-lora": "./scripts/dev/flux_train_network.py",
     "flux-finetune": "./scripts/dev/flux_train.py",
+    "lumina-lora": "./scripts/stable/lumina_train_network.py",
+    "lumina-finetune": "./scripts/stable/lumina_train.py",
+    "hunyuan-image-lora": "./scripts/stable/hunyuan_image_train_network.py",
+    "anima-lora": "./scripts/stable/anima_train_network.py",
+    "anima-finetune": "./scripts/stable/anima_train.py",
 }
 
 
 async def load_schemas():
     avaliable_schemas.clear()
 
-    schema_dir = os.path.join(os.getcwd(), "mikazuki", "schema")
-    schemas = os.listdir(schema_dir)
+    schema_dir = Path(os.getcwd()) / "mikazuki" / "schema"
+    schemas = sorted(p for p in schema_dir.iterdir() if p.is_file() and p.suffix == ".ts")
 
     def lambda_hash(x):
         return hashlib.md5(x.encode()).hexdigest()
 
-    for schema_name in schemas:
-        with open(os.path.join(schema_dir, schema_name), encoding="utf-8") as f:
+    for schema_path in schemas:
+        with open(schema_path, encoding="utf-8") as f:
             content = f.read()
             avaliable_schemas.append({
-                "name": schema_name.rstrip(".ts"),
+                "name": schema_path.stem,
                 "schema": content,
                 "hash": lambda_hash(content)
             })
@@ -75,11 +113,13 @@ async def load_schemas():
 async def load_presets():
     avaliable_presets.clear()
 
-    preset_dir = os.path.join(os.getcwd(), "config", "presets")
-    presets = os.listdir(preset_dir)
+    preset_dir = Path(os.getcwd()) / "config" / "presets"
+    if not preset_dir.exists():
+        return
+    presets = sorted(p for p in preset_dir.iterdir() if p.is_file() and p.suffix == ".toml")
 
-    for preset_name in presets:
-        with open(os.path.join(preset_dir, preset_name), encoding="utf-8") as f:
+    for preset_path in presets:
+        with open(preset_path, encoding="utf-8") as f:
             content = f.read()
             avaliable_presets.append(toml.loads(content))
 
@@ -118,6 +158,35 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
     return positive_prompts, f'{positive_prompts} --n {negative_prompts}  --w {sample_width} --h {sample_height} --l {sample_cfg}  --s {sample_steps}  --d {sample_seed}'
 
 
+def apply_attention_backend_fallback(config: dict, gpu_ids) -> Optional[str]:
+    if config.get("mem_eff_attn", False):
+        return None
+
+    if not config.get("xformers", False):
+        return None
+
+    xformers_info = get_xformers_status(gpu_ids)
+    if xformers_info.get("selected_supported", xformers_info.get("supported", False)):
+        return None
+
+    config["xformers"] = False
+
+    if "sdpa" in config:
+        config["sdpa"] = True
+        message = (
+            f"检测到当前显卡或环境暂不支持 xformers（{xformers_info['reason']}），"
+            "已自动切换为 sdpa 训练。"
+        )
+    else:
+        message = (
+            f"检测到当前显卡或环境暂不支持 xformers（{xformers_info['reason']}），"
+            "已自动禁用 xformers。"
+        )
+
+    log.warning(message)
+    return message
+
+
 @router.post("/run")
 async def create_toml_file(request: Request):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -128,18 +197,30 @@ async def create_toml_file(request: Request):
     train_utils.fix_config_types(config)
 
     gpu_ids = config.pop("gpu_ids", None)
+    start_warnings = []
 
     suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
     model_train_type = config.pop("model_train_type", "sd-lora")
+    if model_train_type not in trainer_mapping:
+        return APIResponseFail(message=f"Unsupported trainer type: {model_train_type}")
     trainer_file = trainer_mapping[model_train_type]
 
     if model_train_type != "sdxl-finetune":
         if not train_utils.validate_data_dir(config["train_data_dir"]):
             return APIResponseFail(message="训练数据集路径不存在或没有图片，请检查目录。")
 
+    if model_train_type in {"sd-controlnet", "sdxl-controlnet", "flux-controlnet"}:
+        conditioning_data_dir = config.get("conditioning_data_dir", "")
+        if not conditioning_data_dir or not train_utils.validate_data_dir(conditioning_data_dir):
+            return APIResponseFail(message="条件图数据集路径不存在或没有图片，请检查目录。")
+
     validated, message = train_utils.validate_model(config["pretrained_model_name_or_path"], model_train_type)
     if not validated:
         return APIResponseFail(message=message)
+
+    attention_fallback_message = apply_attention_backend_fallback(config, gpu_ids)
+    if attention_fallback_message:
+        start_warnings.append(attention_fallback_message)
 
     if "prompt_file" in config and config["prompt_file"].strip() != "":
         prompt_file = config["prompt_file"].strip()
@@ -151,7 +232,7 @@ async def create_toml_file(request: Request):
             positive_prompt, sample_prompts_arg = get_sample_prompts(config=config)
 
             if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
-                sample_prompts_file = os.path.join(os.getcwd(), f"config", "autosave", f"{timestamp}-promopt.txt")
+                sample_prompts_file = os.path.join(os.getcwd(), f"config", "autosave", f"{timestamp}-prompt.txt")
                 with open(sample_prompts_file, "w", encoding="utf-8") as f:
                     f.write(sample_prompts_arg)
                 config["sample_prompts"] = sample_prompts_file
@@ -166,6 +247,14 @@ async def create_toml_file(request: Request):
 
     result = process.run_train(toml_file, trainer_file, gpu_ids, suggest_cpu_threads)
 
+    if start_warnings:
+        result.data = result.data or {}
+        result.data["warnings"] = start_warnings
+        if result.message:
+            result.message = f"{result.message} {' '.join(start_warnings)}"
+        else:
+            result.message = " ".join(start_warnings)
+
     return result
 
 
@@ -177,23 +266,51 @@ async def run_script(request: Request, background_tasks: BackgroundTasks):
     if script_name not in avaliable_scripts:
         return APIResponseFail(message="Script not found")
     del j["script_name"]
-    result = []
-    for k, v in j.items():
-        result.append(f"--{k}")
-        if not isinstance(v, bool):
-            value = str(v)
-            if " " in value:
-                value = f'"{v}"'
-            result.append(value)
-    script_args = " ".join(result)
+
     script_path = Path(os.getcwd()) / "scripts" / script_name
-    cmd = f"{launch_utils.python_bin} {script_path} {script_args}"
-    background_tasks.add_task(launch_utils.run, cmd)
+    if not script_path.exists():
+        for candidate_root in ["stable", "dev"]:
+            candidate = Path(os.getcwd()) / "scripts" / candidate_root / script_name
+            if candidate.exists():
+                script_path = candidate
+                break
+
+    if not script_path.exists():
+        return APIResponseFail(message=f"Script path not found: {script_name}")
+
+    script_path, script_env = process.prepare_python_script(script_path)
+    cmd = [str(launch_utils.python_bin), str(process.get_script_runner_path()), str(script_path)]
+
+    positional_args = script_positional_args.get(script_name, [])
+    for arg_name in positional_args:
+        value = j.pop(arg_name, None)
+        if value is not None and value != "":
+            cmd.append(str(value))
+
+    for k, v in j.items():
+        if isinstance(v, bool):
+            if v:
+                cmd.append(f"--{k}")
+        elif isinstance(v, list):
+            if len(v) > 0:
+                cmd.append(f"--{k}")
+                cmd.extend(str(item) for item in v)
+        else:
+            if v is None or v == "":
+                continue
+            cmd.append(f"--{k}")
+            cmd.append(str(v))
+    background_tasks.add_task(launch_utils.run, cmd, custom_env=script_env)
     return APIResponseSuccess()
 
 
 @router.post("/interrogate")
 async def run_interrogate(req: TaggerInterrogateRequest, background_tasks: BackgroundTasks):
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return APIResponseFail(message="onnxruntime is not installed, please reinstall dependencies and try again.")
+
     interrogator = available_interrogators.get(req.interrogator_model, available_interrogators["wd14-convnextv2-v2"])
     background_tasks.add_task(
         on_interrogate,
@@ -229,6 +346,8 @@ async def pick_file(picker_type: str):
     elif picker_type == "model-file":
         file_types = [("checkpoints", "*.safetensors;*.ckpt;*.pt"), ("all files", "*.*")]
         coro = asyncio.to_thread(open_file_selector, "", "Select file", file_types)
+    else:
+        return APIResponseFail(message="Invalid picker type")
 
     result = await coro
     if result == "":
@@ -266,6 +385,9 @@ async def get_files(pick_type) -> APIResponse:
         file_type = preset_info["type"]
         regex_filter = preset_info["filter"]
         result_list = []
+
+        if not path.exists():
+            return result_list
 
         if file_type == "file":
             if regex_filter:
@@ -317,10 +439,16 @@ async def terminate_task(task_id: str):
 @router.get("/graphic_cards")
 async def list_avaliable_cards() -> APIResponse:
     if not printable_devices:
-        return APIResponse(status="pending")
+        return APIResponse(status="pending", message="GPU detection is still in progress.")
 
+    xformers_info = get_xformers_status()
     return APIResponseSuccess(data={
-        "cards": printable_devices
+        "cards": printable_devices,
+        "xformers": {
+            "installed": xformers_info["installed"],
+            "supported": xformers_info["supported"],
+            "reason": xformers_info["reason"],
+        }
     })
 
 

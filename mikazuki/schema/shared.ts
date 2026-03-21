@@ -31,6 +31,7 @@
                 full_fp16: Schema.boolean().description("完全使用 FP16 精度"),
                 full_bf16: Schema.boolean().description("完全使用 BF16 精度"),
                 no_half_vae: Schema.boolean().description("不使用半精度 VAE"),
+                mem_eff_attn: Schema.boolean().description("启用省显存 attention（比 xformers 更兼容，但通常更慢）"),
                 xformers: Schema.boolean().default(true).description("启用 xformers"),
                 sdpa: Schema.boolean().description("启用 sdpa"),
                 lowram: Schema.boolean().default(false).description("低内存模式 该模式下会将 U-net、文本编码器、VAE 直接加载到显存中"),
@@ -40,6 +41,7 @@
                 cache_text_encoder_outputs_to_disk: Schema.boolean().description("缓存文本编码器的输出到磁盘"),
                 persistent_data_loader_workers: Schema.boolean().default(true).description("保留加载训练集的worker，减少每个 epoch 之间的停顿。"),
                 vae_batch_size: Schema.number().min(1).description("vae 编码批量大小"),
+                cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：梯度检查点时将部分张量卸载到 CPU，节省显存"),
             }
         },
 
@@ -98,12 +100,18 @@
                 save_model_as: Schema.union(["safetensors", "pt", "ckpt"]).default("safetensors").description("模型保存格式"),
                 save_precision: Schema.union(["fp16", "float", "bf16"]).default("fp16").description("模型保存精度"),
                 save_every_n_epochs: Schema.number().default(2).description("每 N epoch（轮）自动保存一次模型"),
+                save_every_n_steps: Schema.number().min(1).description("每 N 步自动保存一次模型"),
+                save_n_epoch_ratio: Schema.number().min(1).description("按 epoch 比例保存，保证整个训练阶段至少保存 N 份模型"),
+                save_last_n_epochs: Schema.number().min(1).description("仅保留最近 N 个按 epoch 保存的模型"),
+                save_last_n_steps: Schema.number().min(1).description("仅保留最近 N 步范围内的按 step 保存模型"),
                 save_state: Schema.boolean().default(false).description("保存训练状态 配合 `resume` 参数可以继续从某个状态训练"),
+                save_state_on_train_end: Schema.boolean().default(false).description("训练结束时额外保存一次训练状态"),
             }).description("保存设置"),
             Schema.union([
                 Schema.object({
                     save_state: Schema.const(true).required(),
                     save_last_n_epochs_state: Schema.number().min(1).description("仅保存最后 n epoch 的训练状态"),
+                    save_last_n_steps_state: Schema.number().min(1).description("仅保留最近 N 步范围内的训练状态"),
                 }),
                 Schema.object({})
             ])
@@ -122,6 +130,8 @@
                     "constant",
                     "constant_with_warmup",
                 ]).default("cosine_with_restarts").description("学习率调度器设置"),
+                lr_scheduler_type: Schema.string().description("自定义学习率调度器类路径。填写后会优先于上方调度器，例如 `torch.optim.lr_scheduler.CosineAnnealingLR`"),
+                lr_scheduler_args: Schema.array(String).role('table').description("自定义学习率调度器参数，一行一个 `key=value`，例如 `T_max=1000`"),
                 lr_warmup_steps: Schema.number().default(0).description('学习率预热步数'),
                 loss_type: Schema.union(["l1", "l2", "huber", "smooth_l1"]).description("损失函数类型"),
             }).description("学习率与优化器设置"),
@@ -154,7 +164,9 @@
                     "AdaFactor",
                     "Prodigy",
                     "prodigyplus.ProdigyPlusScheduleFree",
-                    "pytorch_optimizer.CAME"
+                    "pytorch_optimizer.CAME",
+                    "bitsandbytes.optim.AdEMAMix8bit",
+                    "bitsandbytes.optim.PagedAdEMAMix8bit"
                 ]).default("AdamW8bit").description("优化器设置"),
                 min_snr_gamma: Schema.number().step(0.1).description("最小信噪比伽马值, 如果启用推荐为 5"),
             }),
@@ -191,7 +203,9 @@
                     sample_seed: Schema.number().default(2333).description('种子'),
                     sample_steps: Schema.number().min(1).max(300).default(24).description('迭代步数'),
                     sample_sampler: Schema.union(["ddim", "pndm", "lms", "euler", "euler_a", "heun", "dpm_2", "dpm_2_a", "dpmsolver", "dpmsolver++", "dpmsingle", "k_lms", "k_euler", "k_euler_a", "k_dpm_2", "k_dpm_2_a"]).default("euler_a").description("生成预览图所用采样器"),
+                    sample_every_n_steps: Schema.number().min(1).description("每 N 步生成一次预览图"),
                     sample_every_n_epochs: Schema.number().default(2).description("每 N 个 epoch 生成一次预览图"),
+                    sample_at_first: Schema.boolean().default(false).description("训练开始前先生成一次预览图"),
                 }),
                 Schema.object({}),
             ]),
@@ -202,6 +216,8 @@
                 log_with: Schema.union(["tensorboard", "wandb"]).default("tensorboard").description("日志模块"),
                 log_prefix: Schema.string().description("日志前缀"),
                 log_tracker_name: Schema.string().description("日志追踪器名称"),
+                wandb_run_name: Schema.string().description("wandb 单次运行显示名称"),
+                log_tracker_config: Schema.string().role('filepicker', { type: "model-file" }).description("日志追踪器配置文件路径"),
                 logging_dir: Schema.string().default("./logs").description("日志保存文件夹"),
             }).description('日志设置'),
 
@@ -214,10 +230,27 @@
             ]),
         ]),
 
+        VALIDATION_SETTINGS: Schema.object({
+            validation_split: Schema.number().min(0).max(1).step(0.01).default(0).description("验证集划分比例。会从训练集中自动切出一部分做验证"),
+            validation_seed: Schema.number().description("验证集切分随机种子。不填写时沿用训练随机种子"),
+            validate_every_n_steps: Schema.number().min(1).description("每 N 步执行一次验证"),
+            validate_every_n_epochs: Schema.number().min(1).description("每 N 个 epoch 执行一次验证"),
+            max_validation_steps: Schema.number().min(1).description("每次验证最多处理多少个验证批次"),
+        }).description("验证设置"),
+
         NOISE_SETTINGS: Schema.object({
             noise_offset: Schema.number().step(0.01).description("在训练中添加噪声偏移来改良生成非常暗或者非常亮的图像，如果启用推荐为 0.1"),
+            noise_offset_random_strength: Schema.boolean().default(false).description("噪声偏移强度在 0 到 noise_offset 间随机变化"),
             multires_noise_iterations: Schema.number().step(1).description("多分辨率（金字塔）噪声迭代次数 推荐 6-10。无法与 noise_offset 一同启用"),
             multires_noise_discount: Schema.number().step(0.01).description("多分辨率（金字塔）衰减率 推荐 0.3-0.8，须同时与上方参数 multires_noise_iterations 一同启用"),
+            ip_noise_gamma: Schema.number().step(0.01).description("输入扰动噪声强度，常用于正则化"),
+            ip_noise_gamma_random_strength: Schema.boolean().default(false).description("输入扰动噪声强度在 0 到 ip_noise_gamma 间随机变化"),
+            adaptive_noise_scale: Schema.number().step(0.01).description("自适应噪声缩放，会按 latent 平均绝对值动态追加 noise_offset"),
+            min_timestep: Schema.number().min(0).description("训练时允许的最小 timestep"),
+            max_timestep: Schema.number().min(1).description("训练时允许的最大 timestep"),
+            huber_schedule: Schema.union(["constant", "exponential", "snr"]).description("Huber / Smooth L1 损失调度方式"),
+            huber_c: Schema.number().step(0.01).description("Huber / Smooth L1 的衰减参数"),
+            huber_scale: Schema.number().step(0.01).description("Huber / Smooth L1 的缩放参数"),
         }).description("噪声设置"),
 
         DATA_ENCHANCEMENT: Schema.object({
@@ -229,12 +262,19 @@
         OTHER: Schema.object({
             seed: Schema.number().default(1337).description("随机种子"),
             clip_skip: Schema.number().role("slider").min(0).max(12).step(1).default(2).description("CLIP 跳过层数 *玄学*"),
+            masked_loss: Schema.boolean().default(false).description("启用 Masked Loss。训练带透明蒙版 / alpha 的图像时可用"),
+            no_metadata: Schema.boolean().default(false).description("不向输出模型写入完整训练元数据"),
+            training_comment: Schema.string().role('textarea').description("写入模型元数据的训练备注"),
+            initial_epoch: Schema.number().min(1).description("从指定 epoch 编号开始计数"),
+            initial_step: Schema.number().min(0).description("从指定 step 编号开始计数，会覆盖 initial_epoch"),
+            skip_until_initial_step: Schema.boolean().default(false).description("配合 initial_step 使用，真正跳过前面的训练步数"),
             ui_custom_params: Schema.string().role('textarea').description("**危险** 自定义参数，请输入 TOML 格式，将会直接覆盖当前界面内任何参数。实时更新，推荐写完后再粘贴过来"),
         }).description("其他设置"),
 
         DISTRIBUTED_TRAINING: Schema.object({
             ddp_timeout: Schema.number().min(0).description("分布式训练超时时间"),
             ddp_gradient_as_bucket_view: Schema.boolean(),
+            ddp_static_graph: Schema.boolean().description("启用 DDP static_graph 优化"),
         }).description("分布式训练"),
 
     }

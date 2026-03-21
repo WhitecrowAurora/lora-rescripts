@@ -14,6 +14,10 @@ Schema.intersect([
         sigmoid_scale: Schema.number().step(0.001).default(1.0).description("sigmoid 缩放"),
         model_prediction_type: Schema.union(["raw", "additive", "sigma_scaled"]).default("raw").description("模型预测类型"),
         discrete_flow_shift: Schema.number().step(0.001).default(1.0).description("Euler 调度器离散流位移"),
+        weighting_scheme: Schema.union(["sigma_sqrt", "logit_normal", "mode", "cosmap", "none", "uniform"]).default("uniform").description("时间步分布权重策略"),
+        logit_mean: Schema.number().step(0.01).description("logit_normal 权重策略的均值"),
+        logit_std: Schema.number().step(0.01).description("logit_normal 权重策略的标准差"),
+        mode_scale: Schema.number().step(0.01).description("mode 权重策略的缩放系数"),
         loss_type: Schema.union(["l1", "l2", "huber", "smooth_l1"]).default("l2").description("损失函数类型"),
         guidance_scale: Schema.number().step(0.01).default(1.0).description("CFG 引导缩放"),
         t5xxl_max_token_length: Schema.number().step(1).description("T5XXL 最大 token 长度（不填写使用自动）"),
@@ -54,6 +58,7 @@ Schema.intersect([
             network_dim: Schema.number().min(1).default(2).description("网络维度，常用 4~128，不是越大越好, 低dim可以降低显存占用"),
             network_alpha: Schema.number().min(1).default(16).description("常用值：等于 network_dim 或 network_dim*1/2 或 1。使用较小的 alpha 需要提升学习率"),
             network_dropout: Schema.number().step(0.01).default(0).description('dropout 概率 （与 lycoris 不兼容，需要用 lycoris 自带的）'),
+            dim_from_weights: Schema.boolean().default(false).description("从已有 network_weights 自动推断 rank / dim"),
             scale_weight_norms: Schema.number().step(0.01).min(0).description("最大范数正则化。如果使用，推荐为 1"),
             network_args_custom: Schema.array(String).role('table').description('自定义 network_args，一行一个'),
             enable_base_weight: Schema.boolean().default(false).description('启用基础权重（差异炼丹）'),
@@ -93,6 +98,9 @@ Schema.intersect([
             sdpa: Schema.boolean().default(true).description("启用 sdpa"),
             cache_text_encoder_outputs: Schema.boolean().default(true).description("缓存文本编码器的输出，减少显存使用。使用时需要关闭 shuffle_caption"),
             cache_text_encoder_outputs_to_disk: Schema.boolean().default(true).description("缓存文本编码器的输出到磁盘"),
+            text_encoder_batch_size: Schema.number().min(1).description("文本编码器缓存批量大小"),
+            disable_mmap_load_safetensors: Schema.boolean().default(false).description("禁用 safetensors 的 mmap 加载"),
+            blocks_to_swap: Schema.number().min(1).description("在 CPU/GPU 间交换的 Transformer block 数量，用于进一步省显存"),
         }, ["xformers"])
     ).description("速度优化选项"),
 

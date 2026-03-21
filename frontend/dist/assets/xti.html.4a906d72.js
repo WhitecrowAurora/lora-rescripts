@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-c3a87b91","path":"/lora/xti.html","title":"Textual Inversion XTI 训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"sd-textual-inversion-xti"},"excerpt":"","headers":[],"filePathRelative":"lora/xti.md"}');export{e as data};

@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-91be2f77","path":"/lora/sdxl-ti.html","title":"SDXL Textual Inversion 训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"sdxl-textual-inversion"},"excerpt":"","headers":[],"filePathRelative":"lora/sdxl-ti.md"}');export{e as data};

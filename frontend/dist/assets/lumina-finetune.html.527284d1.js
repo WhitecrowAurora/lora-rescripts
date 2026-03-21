@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-8d0db1af","path":"/lora/lumina-finetune.html","title":"Lumina 完整训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"lumina-finetune"},"excerpt":"","headers":[],"filePathRelative":"lora/lumina-finetune.md"}');export{e as data};

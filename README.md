@@ -1,39 +1,56 @@
 <div align="center">
 
-<img src="https://github.com/Akegarasu/lora-scripts/assets/36563862/3b177f4a-d92a-4da4-85c8-a0d163061a40" width="200" height="200" alt="SD-Trainer" style="border-radius: 25px">
+<img src="https://github.com/Akegarasu/lora-scripts/assets/36563862/3b177f4a-d92a-4da4-85c8-a0d163061a40" width="200" height="200" alt="SD-reScripts" style="border-radius: 25px">
 
-# SD-Trainer
+# SD-reScripts
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
+
+**v1.0.1**
+
+Fork from 秋葉 `aaaki/lora-scripts`  
+Modify By `Lulynx`
 
 </div>
 
 <p align="center">
-  <a href="https://github.com/Akegarasu/lora-scripts" style="margin: 2px;">
-    <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/Akegarasu/lora-scripts">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts" style="margin: 2px;">
+    <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/WhitecrowAurora/lora-rescripts">
   </a>
-  <a href="https://github.com/Akegarasu/lora-scripts" style="margin: 2px;">
-    <img alt="GitHub forks" src="https://img.shields.io/github/forks/Akegarasu/lora-scripts">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts" style="margin: 2px;">
+    <img alt="GitHub forks" src="https://img.shields.io/github/forks/WhitecrowAurora/lora-rescripts">
   </a>
-  <a href="https://raw.githubusercontent.com/Akegarasu/lora-scripts/master/LICENSE" style="margin: 2px;">
-    <img src="https://img.shields.io/github/license/Akegarasu/lora-scripts" alt="license">
+  <a href="https://raw.githubusercontent.com/WhitecrowAurora/lora-rescripts/main/LICENSE" style="margin: 2px;">
+    <img src="https://img.shields.io/github/license/WhitecrowAurora/lora-rescripts" alt="license">
   </a>
-  <a href="https://github.com/Akegarasu/lora-scripts/releases" style="margin: 2px;">
-    <img src="https://img.shields.io/github/v/release/Akegarasu/lora-scripts?color=blueviolet&include_prereleases" alt="release">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/releases" style="margin: 2px;">
+    <img src="https://img.shields.io/github/v/release/WhitecrowAurora/lora-rescripts?color=blueviolet&include_prereleases" alt="release">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/Akegarasu/lora-scripts/releases">Download</a>
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/releases">Download</a>
   ·
-  <a href="https://github.com/Akegarasu/lora-scripts/blob/main/README.md">Documents</a>
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README.md">Documents</a>
   ·
-  <a href="https://github.com/Akegarasu/lora-scripts/blob/main/README-zh.md">中文README</a>
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README-zh.md">中文README</a>
 </p>
 
-LoRA-scripts (a.k.a SD-Trainer)
+SD-reScripts is a maintained fork / continuation of LoRA-scripts (a.k.a. SD-Trainer).
 
 LoRA & Dreambooth training GUI & scripts preset & one key training environment for [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts.git)
+
+## v1.0.1
+
+Current maintenance notes for this fork:
+
+- Fork from 秋葉 `aaaki/lora-scripts` and continue maintenance in this branch
+- syncing newer kohya / sd-scripts core pieces into the current repo layout
+- restoring training entries for Flux, SD3 / SD3.5, Lumina, HunyuanImage, Anima, ControlNet, Textual Inversion, and XTI
+- expanding the LoRA tools page with more merge, conversion, inspection, and dataset utilities
+- supporting ready-to-run portable Python in the repo root for Windows packaging builds
+- supporting a dedicated `python_tageditor` runtime for the tag editor
+- automatically falling back to `sdpa` when a trainer enables `xformers` but the current environment or GPU does not support it
 
 ## ✨NEW: Train WebUI
 
@@ -52,22 +69,31 @@ Follow the installation guide below to install the GUI, then run `run_gui.ps1`(w
 
 ### Required Dependencies
 
-Python 3.10 and Git
+If you use the bundled portable Python runtime in the repo root, system Python is optional.
+
+Otherwise you need:
+
+- Python 3.10+
+- Git
 
 ### Clone repo with submodules
 
 ```sh
-git clone --recurse-submodules https://github.com/Akegarasu/lora-scripts
+git clone --recurse-submodules https://github.com/WhitecrowAurora/lora-rescripts.git
 ```
 
-## ✨ SD-Trainer GUI
+## ✨ SD-reScripts GUI
 
 ### Windows
 
 #### Installation
 
-Run `install.ps1` will automatically create a venv for you and install necessary deps. 
-If you are in China mainland, please use `install-cn.ps1`
+Run `install.ps1`.
+If you are in China mainland, please use `install-cn.ps1`.
+
+- If a ready-to-run `python` folder already exists in the repo root, the installer will use it first
+- Otherwise it falls back to creating a virtual environment
+- `setup_embeddable_python.bat` is now mainly a repair helper for broken raw embeddable Python installs, not a normal first-run requirement
 
 #### Train
 

@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-0dc76a3b","path":"/lora/sd3.html","title":"SD3.5","lang":"en-US","frontmatter":{"example":true,"trainType":"sd3-lora"},"excerpt":"","headers":[],"filePathRelative":"lora/sd3.md"}');export{e as data};

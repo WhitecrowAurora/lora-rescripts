@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-3e43d6e2","path":"/lora/basic.html","title":"SD1.5","lang":"en-US","frontmatter":{"example":true,"trainType":"lora-basic"},"excerpt":"","headers":[],"filePathRelative":"lora/basic.md"}');export{e as data};

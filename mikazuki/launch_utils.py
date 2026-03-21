@@ -7,11 +7,13 @@ import subprocess
 import sys
 import socket
 import sysconfig
-from typing import List
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-import pkg_resources
+from importlib import metadata
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import Version
 
 from mikazuki.log import log
 
@@ -59,8 +61,7 @@ def prepare_submodules():
         if not prepare_git():
             log.error("git not found, please install git first")
             sys.exit(1)
-        subprocess.run(["git", "submodule", "init"])
-        subprocess.run(["git", "submodule", "update"])
+        subprocess.run(["git", "submodule", "update", "--init", "--recursive"], check=False)
 
 
 def git_tag(path: str) -> str:
@@ -114,70 +115,56 @@ stderr: {result.stderr.decode(encoding="utf8", errors="ignore") if len(result.st
 
 
 def is_installed(package, friendly: str = None):
-    #
-    # This function was adapted from code written by vladimandic: https://github.com/vladmandic/automatic/commits/master
-    #
-
-    # Remove brackets and their contents from the line using regular expressions
-    # e.g., diffusers[torch]==0.10.2 becomes diffusers==0.10.2
-    package = re.sub(r'\[.*?\]', '', package)
-
-    try:
-        if friendly:
-            pkgs = friendly.split()
-        else:
-            pkgs = [
-                p
-                for p in package.split()
-                if not p.startswith('-') and not p.startswith('=')
-            ]
-            pkgs = [
-                p.split('/')[-1] for p in pkgs
-            ]   # get only package name if installing from URL
-
-        for pkg in pkgs:
-            if '>=' in pkg:
-                pkg_name, pkg_version = [x.strip() for x in pkg.split('>=')]
-            elif '==' in pkg:
-                pkg_name, pkg_version = [x.strip() for x in pkg.split('==')]
-            else:
-                pkg_name, pkg_version = pkg.strip(), None
-
-            spec = pkg_resources.working_set.by_key.get(pkg_name, None)
-            if spec is None:
-                spec = pkg_resources.working_set.by_key.get(pkg_name.lower(), None)
-            if spec is None:
-                spec = pkg_resources.working_set.by_key.get(pkg_name.replace('_', '-'), None)
-
-            if spec is not None:
-                version = pkg_resources.get_distribution(pkg_name).version
-                # log.debug(f'Package version found: {pkg_name} {version}')
-
-                if pkg_version is not None:
-                    if '>=' in pkg:
-                        ok = version >= pkg_version
-                    else:
-                        ok = version == pkg_version
-
-                    if not ok:
-                        log.info(f'Package wrong version: {pkg_name} {version} required {pkg_version}')
-                        return False
-            else:
-                log.warning(f'Package version not found: {pkg_name}')
-                return False
-
+    requirement_text = package.split("#", 1)[0].strip()
+    if requirement_text == "":
         return True
-    except ModuleNotFoundError:
-        log.warning(f'Package not installed: {pkgs}')
+
+    package_names = friendly.split() if friendly else []
+    requirement = None
+    try:
+        requirement = Requirement(requirement_text)
+        package_names = [requirement.name]
+    except InvalidRequirement:
+        if not package_names:
+            package_names = [re.sub(r'\[.*?\]', '', requirement_text).split()[0]]
+
+    installed_version = None
+    matched_name = None
+    for pkg_name in package_names:
+        normalized_names = [
+            pkg_name,
+            pkg_name.lower(),
+            pkg_name.replace("_", "-"),
+        ]
+        for candidate in normalized_names:
+            try:
+                installed_version = metadata.version(candidate)
+                matched_name = candidate
+                break
+            except metadata.PackageNotFoundError:
+                continue
+        if installed_version is not None:
+            break
+
+    if installed_version is None:
+        log.warning(f'Package version not found: {" ".join(package_names)}')
         return False
+
+    if requirement and requirement.specifier and Version(installed_version) not in requirement.specifier:
+        log.info(
+            f'Package wrong version: {matched_name or requirement.name} {installed_version} required {requirement.specifier}'
+        )
+        return False
+
+    return True
 
 
 def validate_requirements(requirements_file: str):
     with open(requirements_file, 'r', encoding='utf8') as f:
         lines = [
-            line.strip()
+            line.split("#", 1)[0].strip()
             for line in f.readlines()
-            if line.strip() != ''
+            if line.split("#", 1)[0].strip() != ''
             and not line.startswith("#")
             and not (line.startswith("-") and not line.startswith("--index-url "))
             and line is not None
@@ -201,17 +188,22 @@ def setup_windows_bitsandbytes():
     if sys.platform != "win32":
         return
 
-    # bnb_windows_index = os.environ.get("BNB_WINDOWS_INDEX", "https://jihulab.com/api/v4/projects/140618/packages/pypi/simple")
-    bnb_package = "bitsandbytes==0.46.0"
+    min_bnb_version = Version("0.46.0")
     bnb_path = os.path.join(sysconfig.get_paths()["purelib"], "bitsandbytes")
 
-    installed_bnb = is_installed("bitsandbytes")  # don't check version here
-    bnb_cuda_setup = len([f for f in os.listdir(bnb_path) if re.findall(r"libbitsandbytes_cuda.+?\.dll", f)]) != 0
+    try:
+        installed_version = Version(metadata.version("bitsandbytes"))
+    except metadata.PackageNotFoundError:
+        installed_version = None
 
-    if not installed_bnb or not bnb_cuda_setup:
+    bnb_cuda_setup = os.path.isdir(bnb_path) and len(
+        [f for f in os.listdir(bnb_path) if re.findall(r"libbitsandbytes_cuda.+?\.dll", f)]
+    ) != 0
+
+    if installed_version is None or installed_version < min_bnb_version or not bnb_cuda_setup:
         log.error("detected wrong install of bitsandbytes, reinstall it")
         run_pip(f"uninstall bitsandbytes -y", "bitsandbytes", live=True)
-        run_pip(f"install {bnb_package}", bnb_package, live=True)
+        run_pip("install bitsandbytes", "bitsandbytes", live=True)
 
 
 def setup_onnxruntime(

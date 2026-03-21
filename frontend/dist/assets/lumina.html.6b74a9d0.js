@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-9b5b0c2a","path":"/lora/lumina.html","title":"Lumina LoRA 训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"lumina-lora"},"excerpt":"","headers":[],"filePathRelative":"lora/lumina.md"}');export{e as data};

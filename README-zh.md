@@ -1,39 +1,56 @@
 <div align="center">
 
-<img src="https://github.com/Akegarasu/lora-scripts/assets/36563862/3b177f4a-d92a-4da4-85c8-a0d163061a40" width="200" height="200" alt="SD-Trainer" style="border-radius: 25px">
+<img src="https://github.com/Akegarasu/lora-scripts/assets/36563862/3b177f4a-d92a-4da4-85c8-a0d163061a40" width="200" height="200" alt="SD-reScripts" style="border-radius: 25px">
 
-# SD-Trainer
+# SD-reScripts
 
 _✨ 享受 Stable Diffusion 训练！ ✨_
+
+**v1.0.1**
+
+Fork from 秋葉 `aaaki/lora-scripts`  
+Modify By `Lulynx`
 
 </div>
 
 <p align="center">
-  <a href="https://github.com/Akegarasu/lora-scripts" style="margin: 2px;">
-    <img alt="GitHub 仓库星标" src="https://img.shields.io/github/stars/Akegarasu/lora-scripts">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts" style="margin: 2px;">
+    <img alt="GitHub 仓库星标" src="https://img.shields.io/github/stars/WhitecrowAurora/lora-rescripts">
   </a>
-  <a href="https://github.com/Akegarasu/lora-scripts" style="margin: 2px;">
-    <img alt="GitHub 仓库分支" src="https://img.shields.io/github/forks/Akegarasu/lora-scripts">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts" style="margin: 2px;">
+    <img alt="GitHub 仓库分支" src="https://img.shields.io/github/forks/WhitecrowAurora/lora-rescripts">
   </a>
-  <a href="https://raw.githubusercontent.com/Akegarasu/lora-scripts/master/LICENSE" style="margin: 2px;">
-    <img src="https://img.shields.io/github/license/Akegarasu/lora-scripts" alt="许可证">
+  <a href="https://raw.githubusercontent.com/WhitecrowAurora/lora-rescripts/main/LICENSE" style="margin: 2px;">
+    <img src="https://img.shields.io/github/license/WhitecrowAurora/lora-rescripts" alt="许可证">
   </a>
-  <a href="https://github.com/Akegarasu/lora-scripts/releases" style="margin: 2px;">
-    <img src="https://img.shields.io/github/v/release/Akegarasu/lora-scripts?color=blueviolet&include_prereleases" alt="发布版本">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/releases" style="margin: 2px;">
+    <img src="https://img.shields.io/github/v/release/WhitecrowAurora/lora-rescripts?color=blueviolet&include_prereleases" alt="发布版本">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/Akegarasu/lora-scripts/releases">下载</a>
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/releases">下载</a>
   ·
-  <a href="https://github.com/Akegarasu/lora-scripts/blob/main/README.md">文档</a>
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README.md">文档</a>
   ·
-  <a href="https://github.com/Akegarasu/lora-scripts/blob/main/README-zh.md">中文README</a>
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README-zh.md">中文README</a>
 </p>
 
-LoRA-scripts（又名 SD-Trainer）
+SD-reScripts 是基于 LoRA-scripts（又名 SD-Trainer）继续维护的分支版本。
 
 LoRA & Dreambooth 训练图形界面 & 脚本预设 & 一键训练环境，用于 [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts.git)
+
+## v1.0.1
+
+当前这个分支的接手维护说明如下：
+
+- Fork from 秋葉 `aaaki/lora-scripts`，并在当前分支继续维护
+- 同步并迁移了较新的 kohya / sd-scripts 核心到当前仓库结构
+- 补回了 Flux、SD3 / SD3.5、Lumina、HunyuanImage、Anima、ControlNet、Textual Inversion、XTI 等训练入口
+- 扩展了 LoRA 相关工具页，加入更多模型转换、合并、检查和数据集处理工具
+- Windows 便携打包场景下，支持直接使用根目录准备好的 `python` 运行时
+- 标签编辑器支持独立的 `python_tageditor` 运行时
+- 当训练配置启用了 `xformers` 但当前环境未安装或显卡暂不支持时，会自动降级到 `sdpa`（若该训练器支持）
 
 ## ✨新特性: 训练 WebUI
 
@@ -52,21 +69,30 @@ Stable Diffusion 训练工作台。一切集成于一个 WebUI 中。
 
 ### 必要依赖
 
-Python 3.10 和 Git
+如果你使用仓库内已经准备好的便携 Python，可以不依赖系统 Python。
+
+否则需要：
+
+- Python 3.10+
+- Git
 
 ### 克隆带子模块的仓库
 
 ```sh
-git clone --recurse-submodules https://github.com/Akegarasu/lora-scripts
+git clone --recurse-submodules https://github.com/WhitecrowAurora/lora-rescripts.git
 ```
 
-## ✨ SD-Trainer GUI
+## ✨ SD-reScripts GUI
 
 ### Windows
 
 #### 安装
 
-运行 `install-cn.ps1` 将自动为您创建虚拟环境并安装必要的依赖。 
+运行 `install-cn.ps1` 或 `install.ps1`。
+
+- 如果根目录已经有可直接运行的 `python` 文件夹，安装脚本会优先使用它
+- 如果没有，脚本会按原有方式创建虚拟环境并安装依赖
+- `setup_embeddable_python.bat` 现在主要用于修复“原始嵌入式 Python 缺少 pip”这类异常情况，不再是正常安装的必经步骤
 
 #### 训练
 

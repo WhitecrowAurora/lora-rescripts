@@ -6,6 +6,7 @@ import os
 
 import torch
 from library.device_utils import init_ipex
+
 init_ipex()
 
 import diffusers
@@ -14,8 +15,10 @@ from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline  # ,
 from safetensors.torch import load_file, save_file
 from library.original_unet import UNet2DConditionModel
 from library.utils import setup_logging
+
 setup_logging()
 import logging
+
 logger = logging.getLogger(__name__)
 
 # DiffUsers版StableDiffusionのモデルパラメータ
@@ -643,16 +646,15 @@ def convert_ldm_clip_checkpoint_v2(checkpoint, max_length):
             new_sd[key_pfx + "k_proj" + key_suffix] = values[1]
             new_sd[key_pfx + "v_proj" + key_suffix] = values[2]
 
-    # rename or add position_ids
+    # remove position_ids for newer transformer, which causes error :(
     ANOTHER_POSITION_IDS_KEY = "text_model.encoder.text_model.embeddings.position_ids"
     if ANOTHER_POSITION_IDS_KEY in new_sd:
         # waifu diffusion v1.4
-        position_ids = new_sd[ANOTHER_POSITION_IDS_KEY]
         del new_sd[ANOTHER_POSITION_IDS_KEY]
-    else:
-        position_ids = torch.Tensor([list(range(max_length))]).to(torch.int64)
 
-    new_sd["text_model.embeddings.position_ids"] = position_ids
+    if "text_model.embeddings.position_ids" in new_sd:
+        del new_sd["text_model.embeddings.position_ids"]
+
     return new_sd
 
 
@@ -975,7 +977,7 @@ def load_checkpoint_with_text_encoder_conversion(ckpt_path, device="cpu"):
         checkpoint = None
         state_dict = load_file(ckpt_path)  # , device) # may causes error
     else:
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
         else:

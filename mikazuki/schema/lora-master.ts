@@ -20,7 +20,32 @@ Schema.intersect([
                 model_train_type: Schema.const("sd-lora"),
                 v2: Schema.const(true).required(),
                 v_parameterization: Schema.boolean().default(false).description("v-parameterization 学习"),
-                scale_v_pred_loss_like_noise_pred: Schema.boolean().default(false).description("缩放 v-prediction 损失（与v-parameterization配合使用）"),
+            }),
+            Schema.object({}),
+        ]),
+
+        // SDXL v预测模型训练选项
+        Schema.union([
+            Schema.object({
+                model_train_type: Schema.const("sdxl-lora"),
+                v_parameterization: Schema.boolean().default(false).description("v-parameterization 学习（训练Illustrious等v-pred模型时需要开启）"),
+            }),
+            Schema.object({}),
+        ]),
+
+        Schema.union([
+            Schema.object({
+                model_train_type: Schema.const("sdxl-lora"),
+                v_parameterization: Schema.const(true).required(),
+                zero_terminal_snr: Schema.boolean().default(true).description("Zero Terminal SNR（v-pred模型训练推荐开启）"),
+            }),
+            Schema.object({}),
+        ]),
+
+        Schema.union([
+            Schema.object({
+                v_parameterization: Schema.const(true).required(),
+                scale_v_pred_loss_like_noise_pred: Schema.boolean().default(true).description("缩放 v-prediction 损失（v-pred模型训练推荐开启）"),
             }),
             Schema.object({}),
         ]),
@@ -51,7 +76,9 @@ Schema.intersect([
             network_dim: Schema.number().min(1).default(32).description("网络维度，常用 4~128，不是越大越好, 低dim可以降低显存占用"),
             network_alpha: Schema.number().min(1).default(32).description("常用值：等于 network_dim 或 network_dim*1/2 或 1。使用较小的 alpha 需要提升学习率"),
             network_dropout: Schema.number().step(0.01).default(0).description('dropout 概率 （与 lycoris 不兼容，需要用 lycoris 自带的）'),
+            dim_from_weights: Schema.boolean().default(false).description("从已有 network_weights 自动推断 rank / dim"),
             scale_weight_norms: Schema.number().step(0.01).min(0).description("最大范数正则化。如果使用，推荐为 1"),
+            dora_wd: Schema.boolean().default(false).description('启用 DoRA 训练'),
             network_args_custom: Schema.array(String).role('table').description('自定义 network_args，一行一个'),
             enable_block_weights: Schema.boolean().default(false).description('启用分层学习率训练（只支持网络模块 networks.lora）'),
             enable_base_weight: Schema.boolean().default(false).description('启用基础权重（差异炼丹）'),
@@ -75,6 +102,9 @@ Schema.intersect([
 
     // 日志设置
     SHARED_SCHEMAS.LOG_SETTINGS,
+
+    // 验证设置
+    SHARED_SCHEMAS.VALIDATION_SETTINGS,
 
     // caption 选项
     Schema.object(SHARED_SCHEMAS.RAW.CAPTION_SETTINGS).description("caption（Tag）选项"),

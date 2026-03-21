@@ -71,7 +71,7 @@ class Task:
 
     def terminate(self):
         try:
-            kill_proc_tree(self.process.pid, False)
+            kill_proc_tree(self.process.pid, True)
         except Exception as e:
             log.error(f"Error when killing process: {e}")
             return

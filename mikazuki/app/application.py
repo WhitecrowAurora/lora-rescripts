@@ -41,7 +41,10 @@ async def app_startup():
     await asyncio.to_thread(check_torch_gpu)
 
     if sys.platform == "win32" and os.environ.get("MIKAZUKI_DEV", "0") != "1":
-        webbrowser.open(f'http://{os.environ["MIKAZUKI_HOST"]}:{os.environ["MIKAZUKI_PORT"]}')
+        browser_host = os.environ.get("MIKAZUKI_HOST", "127.0.0.1")
+        if browser_host == "0.0.0.0":
+            browser_host = "127.0.0.1"
+        webbrowser.open(f'http://{browser_host}:{os.environ["MIKAZUKI_PORT"]}')
 
 
 @asynccontextmanager

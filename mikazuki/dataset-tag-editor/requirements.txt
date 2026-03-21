@@ -1,0 +1,15 @@
+gradio==4.28.3
+gradio-client==0.16.0
+fastapi<0.113
+starlette<0.39
+pydantic<2.11
+transformers>=4.27.4
+huggingface_hub<1
+requests
+pillow
+numpy
+torch>=1.7
+torchvision
+tqdm
+timm>=1.0.8
+print-color

@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-a1d60318","path":"/lora/anima.html","title":"Anima LoRA 训练 专家模式","lang":"en-US","frontmatter":{"example":true,"trainType":"anima-lora"},"excerpt":"","headers":[],"filePathRelative":"lora/anima.md"}');export{e as data};
