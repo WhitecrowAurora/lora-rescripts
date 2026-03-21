@@ -2,6 +2,10 @@
 
 <img src="https://github.com/Akegarasu/lora-scripts/assets/36563862/3b177f4a-d92a-4da4-85c8-a0d163061a40" width="200" height="200" alt="SD-reScripts" style="border-radius: 25px">
 
+## 下载
+
+**[点击下载](https://github.com/WhitecrowAurora/lora-rescripts/releases/)**
+
 # SD-reScripts
 
 _✨ 享受 Stable Diffusion 训练！ ✨_
