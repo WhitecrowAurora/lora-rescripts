@@ -2,7 +2,8 @@ param(
     [ValidateSet("stable", "nightly")]
     [string]$TorchChannel = "stable",
     [string]$XformersWheel = "",
-    [switch]$SkipXformers
+    [switch]$SkipXformers,
+    [switch]$AllowOfficialXformersFallback
 )
 
 $ErrorActionPreference = "Stop"
@@ -160,10 +161,15 @@ if (-not $SkipXformers) {
             & $blackwellPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
         }
     }
-    else {
+    elseif ($AllowOfficialXformersFallback) {
         Invoke-OptionalStep "Installing official xformers wheel as fallback..." {
             & $blackwellPython -m pip install --upgrade --no-warn-script-location --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
         } "Official xformers installation failed. Blackwell users can still use SDPA or install a community cp312 wheel later."
+    }
+    else {
+        Write-Host -ForegroundColor Yellow "No Blackwell-specific xformers wheel was provided."
+        Write-Host -ForegroundColor Yellow "Skipping xformers installation to avoid silently falling back to the official wheel."
+        Write-Host -ForegroundColor Yellow "You can still use SDPA, or rerun install_blackwell.ps1 with -XformersWheel <path-or-url>."
     }
 }
 

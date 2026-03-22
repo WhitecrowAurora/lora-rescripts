@@ -63,6 +63,7 @@ def using_project_local_main_python() -> bool:
     executable = Path(sys.executable).resolve()
     allowed_roots = [
         (repo_root / "python").resolve(),
+        (repo_root / "python_blackwell").resolve(),
         (repo_root / "venv").resolve(),
     ]
     return any(path_is_within(executable, root) for root in allowed_roots)
@@ -81,7 +82,7 @@ def ensure_project_local_main_python():
 
     raise RuntimeError(
         "This build is locked to project-local Python by default. "
-        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python or ./venv. "
+        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python, ./python_blackwell, or ./venv. "
         "For development only, set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 to override this guard intentionally."
     )
 
