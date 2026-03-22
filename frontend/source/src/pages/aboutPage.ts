@@ -13,7 +13,7 @@ export function renderAboutPage() {
         "Project identity",
         `
           <p><strong>Product name:</strong> SD-reScripts</p>
-          <p><strong>Version target:</strong> v1.0.1</p>
+          <p><strong>Version target:</strong> v1.0.2</p>
           <p><strong>Lineage:</strong> Fork from 秋葉 aaaki/lora-scripts</p>
           <p><strong>Maintainer:</strong> Modify By Lulynx</p>
         `,
@@ -34,7 +34,7 @@ export function renderAboutPage() {
       <ul>
         <li>project branding and maintainer links</li>
         <li>fork lineage and compatibility expectations</li>
-        <li>release notes for v1.0.1 and later</li>
+        <li>release notes for v1.0.2 and later</li>
         <li>known runtime constraints such as separate tag-editor Python support</li>
       </ul>
       <p><a class="text-link" href="${runtimeUrl("/other/about.html")}" target="_blank" rel="noreferrer">Open current shipped about page</a></p>

@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.0.1**
+**v1.0.2**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -52,17 +52,14 @@ SD-reScripts is a maintained fork / continuation of LoRA-scripts (a.k.a. SD-Trai
 
 LoRA & Dreambooth training GUI & scripts preset & one key training environment for [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts.git)
 
-## v1.0.1
+## v1.0.2
 
 Current maintenance notes for this fork:
 
-- Fork from 秋葉 `aaaki/lora-scripts` and continue maintenance in this branch
-- syncing newer kohya / sd-scripts core pieces into the current repo layout
-- restoring training entries for Flux, SD3 / SD3.5, Lumina, HunyuanImage, Anima, ControlNet, Textual Inversion, and XTI
-- expanding the LoRA tools page with more merge, conversion, inspection, and dataset utilities
-- supporting ready-to-run portable Python in the repo root for Windows packaging builds
-- supporting a dedicated `python_tageditor` runtime for the tag editor
-- automatically falling back to `sdpa` when a trainer enables `xformers` but the current environment or GPU does not support it
+- polished portable startup and project-local Python handling
+- fixed tag editor startup, dependency compatibility, and UI theme consistency
+- improved training compatibility for config parsing, SDXL checkpoint loading, and xformers to sdpa fallback
+- refreshed packaging details, docs, and download guidance
 
 ## ✨NEW: Train WebUI
 
