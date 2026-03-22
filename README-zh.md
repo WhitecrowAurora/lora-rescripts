@@ -212,3 +212,8 @@ TensorBoard 已经集成到 GUI 启动流程中。
 | `--tensorboard-port`         | int   | 6006         | 运行 TensorBoard 的端口                          |
 | `--localization`             | str   |              | 界面的本地化设置                                |
 | `--dev`                      | bool  | false        | 开发者模式，用于禁用某些检查                     |
+
+## 鸣谢
+
+特别感谢<p><a href="https://github.com/DrRelax599">DrRelax599</a>
+</p> 在开发过程中参与测试，并帮助改进稳定性。
