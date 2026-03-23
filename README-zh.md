@@ -220,6 +220,7 @@ TensorBoard 已经集成到 GUI 启动流程中。
 - [aaaki/lora-scripts](https://github.com/aaaki/lora-scripts)：本仓库的直接上游 Fork 基础。
 - [Akegarasu/lora-scripts](https://github.com/Akegarasu/lora-scripts)：早期脚本工作流与 GUI 形态的重要基础。
 - [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts)：本项目所使用的核心训练后端。
+- [kozistr/pytorch_optimizer](https://github.com/kozistr/pytorch_optimizer)：本项目扩展优化器与调度器选项所使用的核心集合来源。
 
 ## 鸣谢
 
