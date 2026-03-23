@@ -158,6 +158,14 @@ TensorBoard is already integrated into the GUI startup path.
 | `--localization`              | str   |               | Localization settings for the interface          |
 | `--dev`                       | bool  | false         | Developer mode to disale some checks             |
 
-## Acknowledgements 
+## Open-source Credits
+
+This project stands on the work of multiple open-source communities. Respect and thanks to:
+
+- [aaaki/lora-scripts](https://github.com/aaaki/lora-scripts): direct upstream fork base for this repository.
+- [Akegarasu/lora-scripts](https://github.com/Akegarasu/lora-scripts): earlier foundation of the script-first and GUI workflow.
+- [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts): core training backend used by this project.
+
+## Acknowledgements
 
 Special thanks to <p><a href="https://github.com/DrRelax599">DrRelax599</a></p> for testing the project and helping improve stability during development.

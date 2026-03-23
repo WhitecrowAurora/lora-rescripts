@@ -213,6 +213,14 @@ TensorBoard 已经集成到 GUI 启动流程中。
 | `--localization`             | str   |              | 界面的本地化设置                                |
 | `--dev`                      | bool  | false        | 开发者模式，用于禁用某些检查                     |
 
+## 开源致敬
+
+本项目基于多个开源社区的成果，向以下项目与维护者致敬：
+
+- [aaaki/lora-scripts](https://github.com/aaaki/lora-scripts)：本仓库的直接上游 Fork 基础。
+- [Akegarasu/lora-scripts](https://github.com/Akegarasu/lora-scripts)：早期脚本工作流与 GUI 形态的重要基础。
+- [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts)：本项目所使用的核心训练后端。
+
 ## 鸣谢
 
 特别感谢<p><a href="https://github.com/DrRelax599">DrRelax599</a></p> 在开发过程中参与测试，并帮助改进稳定性。
