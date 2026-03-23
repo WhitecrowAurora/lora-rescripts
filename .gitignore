@@ -32,3 +32,4 @@ tests/
 
 huggingface/hub/models*
 huggingface/hub/version_diffusers_cache.txt
+lora-rescripts.zip
