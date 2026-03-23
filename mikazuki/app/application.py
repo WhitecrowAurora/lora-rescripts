@@ -23,14 +23,34 @@ mimetypes.add_type("text/css", ".css")
 
 
 class SPAStaticFiles(StaticFiles):
+    def __init__(self, *args, spa_fallback: str = "index.html", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.spa_fallback = spa_fallback
+
     async def get_response(self, path: str, scope):
         try:
             return await super().get_response(path, scope)
         except HTTPException as ex:
             if ex.status_code == 404:
-                return await super().get_response("index.html", scope)
+                return await super().get_response(self.spa_fallback, scope)
             else:
                 raise ex
+
+
+def _resolve_frontend_mode() -> str:
+    mode = os.environ.get("MIKAZUKI_UI_MODE", "legacy").strip().lower()
+    if mode not in {"legacy", "workspace"}:
+        return "legacy"
+    return mode
+
+
+FRONTEND_MODE = _resolve_frontend_mode()
+LEGACY_ENTRY = "lora/index.html"
+WORKSPACE_ENTRY = "index.html"
+FRONTEND_ENTRY = WORKSPACE_ENTRY if FRONTEND_MODE == "workspace" else LEGACY_ENTRY
+
+if not os.path.exists(os.path.join("frontend", "dist", FRONTEND_ENTRY)):
+    FRONTEND_ENTRY = WORKSPACE_ENTRY
 
 
 async def app_startup():
@@ -84,11 +104,17 @@ app.include_router(api_router, prefix="/api")
 
 @app.get("/")
 async def index():
-    return FileResponse("./frontend/dist/index.html")
+    return FileResponse(f"./frontend/dist/{FRONTEND_ENTRY}")
+
+
+@app.get("/workspace")
+@app.get("/workspace/")
+async def workspace_index():
+    return FileResponse(f"./frontend/dist/{WORKSPACE_ENTRY}")
 
 
 @app.get("/favicon.ico", response_class=FileResponse)
 async def favicon():
     return FileResponse("assets/favicon.ico")
 
-app.mount("/", SPAStaticFiles(directory="frontend/dist", html=True), name="static")
+app.mount("/", SPAStaticFiles(directory="frontend/dist", html=True, spa_fallback=FRONTEND_ENTRY), name="static")
