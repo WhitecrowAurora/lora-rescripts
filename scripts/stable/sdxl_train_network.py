@@ -79,7 +79,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         return latents_caching_strategy
 
     def get_text_encoding_strategy(self, args):
-        return strategy_sdxl.SdxlTextEncodingStrategy()
+        return strategy_sdxl.SdxlTextEncodingStrategy(args.clip_skip)
 
     def get_models_for_text_encoding(self, args, accelerator, text_encoders):
         return text_encoders + [accelerator.unwrap_model(text_encoders[-1])]

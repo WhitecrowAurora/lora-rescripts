@@ -263,6 +263,7 @@
             seed: Schema.number().default(1337).description("随机种子"),
             clip_skip: Schema.number().role("slider").min(0).max(12).step(1).default(2).description("CLIP 跳过层数 *玄学*"),
             masked_loss: Schema.boolean().default(false).description("启用 Masked Loss。训练带透明蒙版 / alpha 的图像时可用"),
+            alpha_mask: Schema.boolean().default(false).description("读取训练图像的 alpha 通道作为 loss mask。做透明背景 / 抠图训练时通常要和 masked loss 一起检查"),
             no_metadata: Schema.boolean().default(false).description("不向输出模型写入完整训练元数据"),
             training_comment: Schema.string().role('textarea').description("写入模型元数据的训练备注"),
             initial_epoch: Schema.number().min(1).description("从指定 epoch 编号开始计数"),

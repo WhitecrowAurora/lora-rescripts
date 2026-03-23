@@ -95,6 +95,19 @@ export function renderWorkspacePage() {
 
     <section class="section-head">
       <div>
+        <p class="eyebrow">Training catalog</p>
+        <h2>Source-side trainer coverage</h2>
+      </div>
+      <p class="section-note">
+        This catalog tracks which trainer families already have source-side routes, schema coverage and preset coverage.
+      </p>
+    </section>
+    <section class="panel coverage-panel">
+      <div id="training-catalog" class="coverage-list loading">Preparing training route catalog...</div>
+    </section>
+
+    <section class="section-head">
+      <div>
         <p class="eyebrow">Route inventory</p>
         <h2>Current UI surfaces</h2>
       </div>

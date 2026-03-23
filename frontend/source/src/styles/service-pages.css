@@ -10,6 +10,59 @@
   gap: 0.9rem;
 }
 
+.tool-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.tool-field {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.tool-field span {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.tool-field-wide {
+  grid-column: 1 / -1;
+}
+
+.tool-inline-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tool-inline-actions .field-input {
+  flex: 1 1 420px;
+}
+
+.tool-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.tool-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--ink);
+  font-size: 0.92rem;
+}
+
+.tool-toggle input {
+  width: 1rem;
+  height: 1rem;
+}
+
 .tool-card {
   padding: 1rem;
   border: 1px solid rgba(31, 29, 26, 0.1);
@@ -27,4 +80,88 @@
 .tool-card-head h3 {
   margin: 0;
   font-size: 0.98rem;
+}
+
+.dataset-analysis-empty {
+  margin: 0;
+  padding: 1rem 1.1rem;
+  border: 1px dashed rgba(31, 29, 26, 0.16);
+  border-radius: 1rem;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.dataset-analysis-grid,
+.dataset-analysis-columns,
+.dataset-analysis-stack {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.dataset-analysis-grid {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  margin-bottom: 1rem;
+}
+
+.dataset-analysis-columns {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin-top: 1rem;
+}
+
+.dataset-analysis-stat,
+.dataset-analysis-block {
+  padding: 1rem;
+  border: 1px solid rgba(31, 29, 26, 0.1);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.dataset-analysis-stat-value {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 1.3rem;
+  line-height: 1.1;
+}
+
+.dataset-analysis-warning {
+  background: color-mix(in srgb, var(--accent-soft) 38%, white 62%);
+}
+
+.dataset-analysis-selected {
+  border-color: color-mix(in srgb, var(--accent) 35%, rgba(31, 29, 26, 0.1) 65%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent 84%);
+}
+
+.dataset-analysis-sublist + .dataset-analysis-sublist {
+  margin-top: 1rem;
+}
+
+.dataset-analysis-sublist h4 {
+  margin: 0 0 0.45rem;
+}
+
+.dataset-analysis-list-plain {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.dataset-analysis-list-plain li + li {
+  margin-top: 0.38rem;
+}
+
+.dataset-cleanup-diff {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.9rem;
+}
+
+.dataset-cleanup-diff pre {
+  margin: 0;
+  padding: 0.85rem;
+  border-radius: 0.9rem;
+  background: rgba(31, 29, 26, 0.05);
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 0.84rem/1.45 "Cascadia Code", "Consolas", monospace;
 }

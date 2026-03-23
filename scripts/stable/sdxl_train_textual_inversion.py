@@ -57,7 +57,7 @@ class SdxlTextualInversionTrainer(train_textual_inversion.TextualInversionTraine
         return latents_caching_strategy
 
     def get_text_encoding_strategy(self, args):
-        return strategy_sdxl.SdxlTextEncodingStrategy()
+        return strategy_sdxl.SdxlTextEncodingStrategy(args.clip_skip)
 
     def call_unet(self, args, accelerator, unet, noisy_latents, timesteps, text_conds, batch, weight_dtype):
         noisy_latents = noisy_latents.to(weight_dtype)  # TODO check why noisy_latents is not weight_dtype

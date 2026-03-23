@@ -287,7 +287,7 @@ def train(args):
     train_text_encoder1 = False
     train_text_encoder2 = False
 
-    text_encoding_strategy = strategy_sdxl.SdxlTextEncodingStrategy()
+    text_encoding_strategy = strategy_sdxl.SdxlTextEncodingStrategy(args.clip_skip)
     strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
 
     if args.train_text_encoder:

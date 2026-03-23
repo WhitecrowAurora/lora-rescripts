@@ -10,9 +10,11 @@ import {
   splitArgPair,
   toStringValue,
 } from "./trainingPayloadHelpers";
+import { restoreManagedSchedulerSelection } from "./trainingOptionRegistry";
 
 export function expandTrainingPayloadToEditableValues(rawPayload: Record<string, unknown>) {
   const payload = cloneValues(rawPayload);
+  restoreManagedSchedulerSelection(payload);
 
   if (Array.isArray(payload.network_args)) {
     const networkArgsCustom: string[] = [];

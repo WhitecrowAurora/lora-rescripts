@@ -9,13 +9,18 @@ export {
 export {
   renderTrainSubmitStatus,
   renderTrainValidationStatus,
+  renderTrainingPreflightReport,
+  renderTrainingAutosaveStatus,
   setTrainingUtilityNote,
 } from "./trainingStatusUi";
 
 export {
   getSnapshotName,
+  getPresetCompatibility,
+  getRecipeCompatibility,
   getTrainingHistoryPreview,
   renderHistoryPanel,
+  renderRecipePanel,
   renderPresetPanel,
   filterPresetsForRoute,
   toggleTrainingPanel,

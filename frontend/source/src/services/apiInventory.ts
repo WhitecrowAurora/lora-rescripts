@@ -39,13 +39,31 @@ export const apiInventory: ApiRecord[] = [
   {
     method: "GET",
     path: "/api/graphic_cards",
-    purpose: "List GPUs plus xformers support state.",
+    purpose: "List GPUs plus runtime dependency and xformers support state.",
     migrationPriority: "high",
   },
   {
     method: "POST",
     path: "/api/run",
     purpose: "Start schema-driven training jobs.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/train/preflight",
+    purpose: "Run backend-aware training preflight checks before launch.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/train/sample_prompt",
+    purpose: "Resolve and preview the effective training sample prompt text without launching a run.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/dataset/masked_loss_audit",
+    purpose: "Inspect alpha-channel mask readiness for masked-loss training workflows.",
     migrationPriority: "high",
   },
   {
@@ -58,6 +76,42 @@ export const apiInventory: ApiRecord[] = [
     method: "POST",
     path: "/api/interrogate",
     purpose: "Run the built-in tagger/interrogator flow.",
+    migrationPriority: "high",
+  },
+  {
+    method: "GET",
+    path: "/api/interrogators",
+    purpose: "List available batch tagger/interrogator models for the rebuilt tools workspace.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/captions/cleanup/preview",
+    purpose: "Preview bulk caption cleanup rules before touching files.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/captions/cleanup/apply",
+    purpose: "Apply bulk caption cleanup rules to caption files.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/captions/backups/create",
+    purpose: "Create a snapshot archive of caption files for later restore.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/captions/backups/list",
+    purpose: "List caption snapshots associated with a folder.",
+    migrationPriority: "high",
+  },
+  {
+    method: "POST",
+    path: "/api/captions/backups/restore",
+    purpose: "Restore caption files from a saved snapshot archive.",
     migrationPriority: "high",
   },
   {

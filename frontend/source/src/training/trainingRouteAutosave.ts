@@ -7,6 +7,7 @@ import {
   applySelectedGpuIds,
   getSnapshotName,
   readSelectedGpuIds,
+  renderTrainingAutosaveStatus,
   setTrainingUtilityNote,
 } from "./trainingUi";
 import { cloneJson } from "../shared/textUtils";
@@ -20,12 +21,14 @@ type RestoreTrainingAutosaveOptions = {
 };
 
 export function persistTrainingAutosave(config: TrainingRouteConfig, state: SchemaBridgeState) {
-  saveTrainingAutosave(config.routeId, {
+  const record = {
     time: new Date().toLocaleString(),
     name: getSnapshotName(config, state),
     value: cloneJson(state.values),
     gpu_ids: readSelectedGpuIds(`${config.prefix}-gpu-selector`),
-  });
+  };
+  saveTrainingAutosave(config.routeId, record);
+  renderTrainingAutosaveStatus(config.prefix, record);
 }
 
 export function restoreTrainingAutosave(options: RestoreTrainingAutosaveOptions) {
@@ -36,6 +39,7 @@ export function restoreTrainingAutosave(options: RestoreTrainingAutosaveOptions)
   } = options;
 
   const autosaveRecord = loadTrainingAutosave(config.routeId);
+  renderTrainingAutosaveStatus(config.prefix, autosaveRecord);
   const initialState = autosaveRecord?.value
     ? buildTrainingStateWithImportedValues(createDefaultState(), expandTrainingPayloadToEditableValues(autosaveRecord.value))
     : createDefaultState();

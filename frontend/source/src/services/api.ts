@@ -1,13 +1,23 @@
 import type {
   ApiEnvelope,
+  CaptionBackupRecord,
+  CaptionBackupRestoreRecord,
+  CaptionCleanupRecord,
+  DatasetAnalysisRecord,
+  MaskedLossAuditRecord,
   ConfigSummary,
-  GraphicCardRecord,
+  GraphicCardEntry,
+  InterrogatorRecord,
+  InterrogateLaunchRecord,
   PresetRecord,
   SchemaRecord,
   SchemaHashRecord,
   ScriptRecord,
   TagEditorStatus,
   TaskRecord,
+  TrainingPreflightRecord,
+  TrainingSamplePromptRecord,
+  RuntimeStatusRecord,
   XformersStatus,
 } from "../shared/types";
 
@@ -87,7 +97,7 @@ export async function terminateTask(taskId: string) {
 }
 
 export async function fetchGraphicCards() {
-  return request<{ cards: GraphicCardRecord[]; xformers: XformersStatus }>("/api/graphic_cards");
+  return request<{ cards: GraphicCardEntry[]; xformers: XformersStatus; runtime: RuntimeStatusRecord }>("/api/graphic_cards");
 }
 
 export async function fetchTagEditorStatus() {
@@ -98,12 +108,57 @@ export async function fetchScripts() {
   return request<{ scripts: ScriptRecord[] }>("/api/scripts");
 }
 
+export async function analyzeDataset(payload: {
+  path: string;
+  caption_extension: string;
+  top_tags: number;
+  sample_limit: number;
+}) {
+  return requestPost<DatasetAnalysisRecord>("/api/dataset/analyze", payload);
+}
+
+export async function analyzeMaskedLossDataset(payload: {
+  path: string;
+  recursive: boolean;
+  sample_limit: number;
+}) {
+  return requestPost<MaskedLossAuditRecord>("/api/dataset/masked_loss_audit", payload);
+}
+
+export async function fetchInterrogators() {
+  return request<{ default?: string; interrogators: InterrogatorRecord[] }>("/api/interrogators");
+}
+
 export async function pickFile(pickerType: string) {
   const result = await request<{ path?: string }>(`/api/pick_file?picker_type=${encodeURIComponent(pickerType)}`);
   if (result.status !== "success" || !result.data?.path) {
     throw new Error(result.message || "File picker did not return a path.");
   }
   return result.data.path;
+}
+
+export async function runInterrogate(payload: Record<string, unknown>) {
+  return requestPost<InterrogateLaunchRecord>("/api/interrogate", payload);
+}
+
+export async function previewCaptionCleanup(payload: Record<string, unknown>) {
+  return requestPost<CaptionCleanupRecord>("/api/captions/cleanup/preview", payload);
+}
+
+export async function applyCaptionCleanup(payload: Record<string, unknown>) {
+  return requestPost<CaptionCleanupRecord>("/api/captions/cleanup/apply", payload);
+}
+
+export async function createCaptionBackup(payload: Record<string, unknown>) {
+  return requestPost<CaptionBackupRecord>("/api/captions/backups/create", payload);
+}
+
+export async function listCaptionBackups(payload: Record<string, unknown>) {
+  return requestPost<{ backups: CaptionBackupRecord[] }>("/api/captions/backups/list", payload);
+}
+
+export async function restoreCaptionBackup(payload: Record<string, unknown>) {
+  return requestPost<CaptionBackupRestoreRecord>("/api/captions/backups/restore", payload);
 }
 
 export async function runScript(scriptName: string, payload: Record<string, unknown> = {}) {
@@ -115,4 +170,12 @@ export async function runScript(scriptName: string, payload: Record<string, unkn
 
 export async function startTraining(payload: Record<string, unknown>) {
   return requestPost<{ task_id?: string; warnings?: string[] }>("/api/run", payload);
+}
+
+export async function runTrainingPreflight(payload: Record<string, unknown>) {
+  return requestPost<TrainingPreflightRecord>("/api/train/preflight", payload);
+}
+
+export async function previewTrainingSamplePrompt(payload: Record<string, unknown>) {
+  return requestPost<TrainingSamplePromptRecord>("/api/train/sample_prompt", payload);
 }

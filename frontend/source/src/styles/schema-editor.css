@@ -88,7 +88,8 @@
 
 .picker-control,
 .slider-editor,
-.table-editor {
+.table-editor,
+.enum-field-control {
   display: grid;
   gap: 0.65rem;
 }
@@ -153,6 +154,12 @@
   padding: 0.72rem 0.85rem;
   border-radius: 0.8rem;
   background: rgba(31, 29, 26, 0.06);
+}
+
+.field-helper-note {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
 }
 
 .checkbox-row {

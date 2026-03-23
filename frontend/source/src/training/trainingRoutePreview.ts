@@ -6,12 +6,14 @@ import { renderTrainValidationStatus } from "./trainingUi";
 
 type PrepareTrainingPayload = (state: SchemaBridgeState) => PreparedTrainingPayload;
 type PersistTrainingAutosave = (state: SchemaBridgeState) => void;
+type AfterTrainingStateChange = () => void;
 
 export function createTrainingStateChangeHandler(
   config: TrainingRouteConfig,
   domIds: SchemaEditorDomIds,
   prepareTrainingPayload: PrepareTrainingPayload,
-  persistTrainingAutosave: PersistTrainingAutosave
+  persistTrainingAutosave: PersistTrainingAutosave,
+  afterTrainingStateChange?: AfterTrainingStateChange
 ) {
   return (state: SchemaBridgeState) => {
     try {
@@ -31,5 +33,6 @@ export function createTrainingStateChangeHandler(
     }
 
     persistTrainingAutosave(state);
+    afterTrainingStateChange?.();
   };
 }

@@ -19,11 +19,14 @@ import {
   valueIsTruthy,
 } from "./trainingPayloadHelpers";
 import { parseLooseTomlObject } from "./trainingPayloadToml";
+import { normalizeManagedSchedulerSelection } from "./trainingOptionRegistry";
 
 export function normalizeTrainingPayload(rawValues: Record<string, unknown>, trainType = String(rawValues.model_train_type ?? "")) {
   const payload = trainType === "lora-basic"
     ? { ...BASIC_LORA_DEFAULTS, ...cloneValues(rawValues) }
     : cloneValues(rawValues);
+
+  normalizeManagedSchedulerSelection(payload);
 
   const networkArgs: string[] = [];
   const optimizerArgs: string[] = [];
@@ -42,7 +45,13 @@ export function normalizeTrainingPayload(rawValues: Record<string, unknown>, tra
     payload.train_text_encoder = true;
   }
 
-  for (const key of sdxlModel || sd3Finetune ? SD12_EXCLUSIVE_PARAMS : SDXL_EXCLUSIVE_PARAMS) {
+  const exclusiveKeys = sdxlModel
+    ? SD12_EXCLUSIVE_PARAMS.filter((key) => key !== "clip_skip")
+    : sd3Finetune
+      ? SD12_EXCLUSIVE_PARAMS
+      : SDXL_EXCLUSIVE_PARAMS;
+
+  for (const key of exclusiveKeys) {
     if (hasOwn(payload, key)) {
       delete payload[key];
     }

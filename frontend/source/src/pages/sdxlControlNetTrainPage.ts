@@ -12,5 +12,11 @@ export function renderSdxlControlNetTrainPage() {
     legacyPath: "/lora/sdxl-controlnet.html",
     legacyLabel: "Open current shipped SDXL ControlNet page",
     renderedTitle: "SDXL ControlNet form bridge",
+    routeNotice: {
+      kicker: "experimental",
+      title: "SDXL clip_skip remains experimental here as well",
+      detail:
+        "ControlNet still shares the SDXL text-encoding path. If you enable clip_skip on this route, keep your inference stack aligned with the same SDXL clip-skip behavior.",
+    },
   });
 }

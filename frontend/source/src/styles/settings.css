@@ -1,0 +1,89 @@
+.settings-callout p:last-child {
+  margin-bottom: 0;
+}
+
+.settings-option-sections {
+  align-items: start;
+}
+
+.settings-option-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0.9rem 0;
+}
+
+.settings-option-coverage {
+  margin-bottom: 1rem;
+}
+
+.settings-option-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.85rem;
+}
+
+.settings-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.settings-runtime-card {
+  padding: 0.9rem;
+  border: 1px solid rgba(31, 29, 26, 0.08);
+  border-radius: 0.95rem;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.settings-option-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.95rem;
+  border: 1px solid rgba(31, 29, 26, 0.08);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.46);
+}
+
+.settings-option-card.is-enabled {
+  border-color: rgba(47, 108, 99, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(47, 108, 99, 0.08);
+}
+
+.settings-option-card.is-disabled {
+  opacity: 0.78;
+}
+
+.settings-option-card-head {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.settings-option-check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.settings-option-check input {
+  margin-top: 0.2rem;
+}
+
+.settings-option-check strong {
+  display: block;
+}
+
+.settings-option-description,
+.settings-option-meta {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.settings-option-runtime-note {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #8d2c13;
+}

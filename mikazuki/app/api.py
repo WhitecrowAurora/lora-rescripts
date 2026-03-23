@@ -17,13 +17,32 @@ import mikazuki.process as process
 from mikazuki import launch_utils
 from mikazuki.app.config import app_config
 from mikazuki.app.models import (APIResponse, APIResponseFail,
-                                 APIResponseSuccess, TaggerInterrogateRequest)
+                                 APIResponseSuccess, CaptionBackupListRequest,
+                                 CaptionBackupRequest,
+                                 CaptionBackupRestoreRequest,
+                                 CaptionCleanupRequest,
+                                 DatasetAnalysisRequest,
+                                 MaskedLossAuditRequest,
+                                 TaggerInterrogateRequest)
 from mikazuki.log import log
 from mikazuki.tagger.interrogator import (available_interrogators,
                                           on_interrogate)
 from mikazuki.tasks import tm
+from mikazuki.utils.caption_backup import (create_caption_backup,
+                                           list_caption_backups,
+                                           NO_CAPTIONS_TO_BACKUP_MESSAGE,
+                                           restore_caption_backup)
+from mikazuki.utils.caption_cleanup import (apply_caption_cleanup,
+                                            preview_caption_cleanup)
+from mikazuki.utils.training_preflight import analyze_training_preflight
 from mikazuki.utils import train_utils
+from mikazuki.utils.dataset_analysis import analyze_dataset
+from mikazuki.utils.masked_loss_audit import analyze_masked_loss_dataset
 from mikazuki.utils.devices import get_xformers_status, printable_devices
+from mikazuki.utils.runtime_dependencies import (
+    analyze_training_runtime_dependencies,
+    build_runtime_status_payload,
+)
 from mikazuki.utils.tk_window import (open_directory_selector,
                                       open_file_selector)
 
@@ -158,6 +177,105 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
     return positive_prompts, f'{positive_prompts} --n {negative_prompts}  --w {sample_width} --h {sample_height} --l {sample_cfg}  --s {sample_steps}  --d {sample_seed}'
 
 
+def read_prompt_text_file(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8", errors="ignore")
+
+
+def build_sample_prompt_file_name(config: dict) -> str:
+    base_name = str(config.get("output_name", "")).strip() or str(config.get("model_train_type", "")).strip() or "sample-prompts"
+    safe_name = re.sub(r"[^0-9A-Za-z._-]+", "-", base_name).strip("._-") or "sample-prompts"
+    return f"{safe_name}-sample-prompts.txt"
+
+
+def build_prompt_preview_text(content: str, max_lines: int = 3) -> Tuple[str, int]:
+    non_empty_lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not non_empty_lines:
+        return "(prompt text is empty)", 0
+    return "\n".join(non_empty_lines[:max_lines]), len(non_empty_lines)
+
+
+def build_sample_prompt_record(config: dict) -> Optional[dict]:
+    enable_preview = bool(config.get("enable_preview"))
+    notes: list[str] = []
+    warnings: list[str] = []
+
+    if not enable_preview:
+        notes.append("Preview images are currently disabled. This prompt will only be used after enable_preview is turned on.")
+
+    prompt_file = str(config.get("prompt_file", "")).strip()
+    if prompt_file:
+        if not os.path.exists(prompt_file):
+            raise ValueError(f"Prompt 文件 {prompt_file} 不存在，请检查路径。")
+
+        content = read_prompt_text_file(prompt_file)
+        preview, line_count = build_prompt_preview_text(content)
+        return {
+            "enabled": enable_preview,
+            "source": "prompt_file",
+            "detail": prompt_file,
+            "preview": preview,
+            "content": content,
+            "line_count": line_count,
+            "suggested_file_name": Path(prompt_file).name or build_sample_prompt_file_name(config),
+            "warnings": warnings,
+            "notes": notes,
+        }
+
+    legacy_sample_prompts = str(config.get("sample_prompts", "")).strip()
+    if legacy_sample_prompts and "positive_prompts" not in config:
+        if os.path.isfile(legacy_sample_prompts):
+            content = read_prompt_text_file(legacy_sample_prompts)
+            preview, line_count = build_prompt_preview_text(content)
+            return {
+                "enabled": enable_preview,
+                "source": "legacy_sample_prompts_file",
+                "detail": legacy_sample_prompts,
+                "preview": preview,
+                "content": content,
+                "line_count": line_count,
+                "suggested_file_name": Path(legacy_sample_prompts).name or build_sample_prompt_file_name(config),
+                "warnings": warnings,
+                "notes": notes + ["Using imported legacy sample_prompts file."],
+            }
+
+        preview, line_count = build_prompt_preview_text(legacy_sample_prompts)
+        return {
+            "enabled": enable_preview,
+            "source": "legacy_sample_prompts_inline",
+            "detail": "Imported legacy sample_prompts value",
+            "preview": preview,
+            "content": legacy_sample_prompts,
+            "line_count": line_count,
+            "suggested_file_name": build_sample_prompt_file_name(config),
+            "warnings": warnings,
+            "notes": notes + ["Using imported legacy sample_prompts text."],
+        }
+
+    config_copy = dict(config)
+    _, sample_prompt = get_sample_prompts(config_copy)
+    if sample_prompt is None:
+        return None
+
+    source = "generated"
+    detail = "Current positive / negative prompt fields"
+    if config.get("randomly_choice_prompt"):
+        source = "random_dataset_prompt_preview"
+        detail = "Random caption-derived preview from dataset"
+
+    preview, line_count = build_prompt_preview_text(sample_prompt)
+    return {
+        "enabled": enable_preview,
+        "source": source,
+        "detail": detail,
+        "preview": preview,
+        "content": sample_prompt,
+        "line_count": line_count,
+        "suggested_file_name": build_sample_prompt_file_name(config),
+        "warnings": warnings,
+        "notes": notes,
+    }
+
+
 def apply_attention_backend_fallback(config: dict, gpu_ids) -> Optional[str]:
     if config.get("mem_eff_attn", False):
         return None
@@ -187,6 +305,61 @@ def apply_attention_backend_fallback(config: dict, gpu_ids) -> Optional[str]:
     return message
 
 
+def simulate_attention_backend_fallback_warning(config: dict, gpu_ids) -> Optional[str]:
+    if config.get("mem_eff_attn", False):
+        return None
+    if not config.get("xformers", False):
+        return None
+
+    xformers_info = get_xformers_status(gpu_ids)
+    if xformers_info.get("selected_supported", xformers_info.get("supported", False)):
+        return None
+
+    if "sdpa" in config:
+        return (
+            f"Current GPU/runtime would fall back from xformers to sdpa ({xformers_info['reason']})."
+        )
+    return f"Current GPU/runtime would disable xformers ({xformers_info['reason']})."
+
+
+def maybe_create_caption_backup(
+    *,
+    path: str,
+    caption_extension: str,
+    recursive: bool,
+    snapshot_name: str,
+    allow_missing_captions: bool = False,
+) -> tuple[Optional[dict], list[str]]:
+    warnings: list[str] = []
+    try:
+        backup = create_caption_backup(
+            path=path,
+            caption_extension=caption_extension,
+            recursive=recursive,
+            snapshot_name=snapshot_name,
+        )
+    except ValueError as exc:
+        if allow_missing_captions and str(exc) == NO_CAPTIONS_TO_BACKUP_MESSAGE:
+            warnings.append("No existing caption files were found, so no backup snapshot was created.")
+            return None, warnings
+        raise
+
+    return backup, warnings
+
+
+def build_sample_prompt_preview(config: dict) -> Optional[dict]:
+    record = build_sample_prompt_record(config)
+    if not record:
+        return None
+    return {
+        "source": record["source"],
+        "detail": record["detail"],
+        "preview": record["preview"],
+        "warnings": record.get("warnings", []),
+        "notes": record.get("notes", []),
+    }
+
+
 @router.post("/run")
 async def create_toml_file(request: Request):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -194,7 +367,10 @@ async def create_toml_file(request: Request):
     json_data = await request.body()
 
     config: dict = json.loads(json_data.decode("utf-8"))
-    train_utils.fix_config_types(config)
+    try:
+        train_utils.fix_config_types(config)
+    except (TypeError, ValueError) as exc:
+        return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
     gpu_ids = config.pop("gpu_ids", None)
     start_warnings = []
@@ -221,6 +397,18 @@ async def create_toml_file(request: Request):
     attention_fallback_message = apply_attention_backend_fallback(config, gpu_ids)
     if attention_fallback_message:
         start_warnings.append(attention_fallback_message)
+
+    dependency_report = analyze_training_runtime_dependencies(config)
+    if not dependency_report["ready"]:
+        missing_details = []
+        for dependency in dependency_report["missing"]:
+            package_label = dependency["display_name"]
+            reason = dependency.get("reason") or "Package is not importable."
+            requirement = ", ".join(dependency.get("required_for", []))
+            missing_details.append(f"{package_label} ({requirement}): {reason}")
+        return APIResponseFail(
+            message="Required runtime dependencies are missing or broken: " + " | ".join(missing_details)
+        )
 
     if "prompt_file" in config and config["prompt_file"].strip() != "":
         prompt_file = config["prompt_file"].strip()
@@ -256,6 +444,52 @@ async def create_toml_file(request: Request):
             result.message = " ".join(start_warnings)
 
     return result
+
+
+@router.post("/train/preflight")
+async def training_preflight(request: Request) -> APIResponse:
+    json_data = await request.body()
+    config: dict = json.loads(json_data.decode("utf-8"))
+    try:
+        train_utils.fix_config_types(config)
+    except (TypeError, ValueError) as exc:
+        return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
+
+    gpu_ids = config.get("gpu_ids")
+    training_type = str(config.get("model_train_type", "sd-lora"))
+
+    result = analyze_training_preflight(
+        config,
+        training_type=training_type,
+        trainer_supported=training_type in trainer_mapping,
+        conditioning_required=training_type in {"sd-controlnet", "sdxl-controlnet", "flux-controlnet"},
+        sample_prompt_builder=build_sample_prompt_preview,
+        attention_fallback_checker=lambda payload: simulate_attention_backend_fallback_warning(payload, gpu_ids),
+    )
+
+    return APIResponseSuccess(data=result)
+
+
+@router.post("/train/sample_prompt")
+async def training_sample_prompt(request: Request) -> APIResponse:
+    json_data = await request.body()
+    config: dict = json.loads(json_data.decode("utf-8"))
+    try:
+        train_utils.fix_config_types(config)
+    except (TypeError, ValueError) as exc:
+        return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
+
+    try:
+        result = build_sample_prompt_record(config)
+        if not result:
+            return APIResponseFail(message="Current config does not expose a sample prompt preview.")
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Training sample prompt preview failed")
+        return APIResponseFail(message="Sample prompt preview failed.")
+
+    return APIResponseSuccess(data=result)
 
 
 @router.post("/run_script")
@@ -311,11 +545,29 @@ async def run_interrogate(req: TaggerInterrogateRequest, background_tasks: Backg
     except ImportError:
         return APIResponseFail(message="onnxruntime is not installed, please reinstall dependencies and try again.")
 
+    batch_path = req.path.strip()
+    if not batch_path:
+        return APIResponseFail(message="Input folder is empty / 输入的图片文件夹为空。")
+    if not os.path.isdir(batch_path):
+        return APIResponseFail(message="Input path is not a valid folder / 输入路径不是有效文件夹。")
+
+    response_warnings: list[str] = []
+    backup_result = None
+    if req.create_backup_before_write and req.batch_output_action_on_conflict != "ignore":
+        backup_result, backup_warnings = maybe_create_caption_backup(
+            path=batch_path,
+            caption_extension=".txt",
+            recursive=req.batch_input_recursive,
+            snapshot_name=req.backup_snapshot_name.strip() or f"pre-batch-tagger-{req.interrogator_model}",
+            allow_missing_captions=True,
+        )
+        response_warnings.extend(backup_warnings)
+
     interrogator = available_interrogators.get(req.interrogator_model, available_interrogators["wd14-convnextv2-v2"])
     background_tasks.add_task(
         on_interrogate,
         image=None,
-        batch_input_glob=req.path,
+        batch_input_glob=batch_path,
         batch_input_recursive=req.batch_input_recursive,
         batch_output_dir="",
         batch_output_filename_format="[name].[output_extension]",
@@ -336,7 +588,155 @@ async def run_interrogate(req: TaggerInterrogateRequest, background_tasks: Backg
         escape_tag=req.escape_tag,
         unload_model_after_running=True
     )
-    return APIResponseSuccess()
+    message = f"Batch interrogate started for {batch_path}"
+    if backup_result is not None:
+        message = f"{message} Created backup {backup_result['archive_name']} first."
+    elif response_warnings:
+        message = f"{message} {response_warnings[0]}"
+
+    data = {}
+    if backup_result is not None:
+        data["backup"] = backup_result
+    if response_warnings:
+        data["warnings"] = response_warnings
+
+    return APIResponseSuccess(message=message, data=data or None)
+
+
+@router.post("/dataset/analyze")
+async def dataset_analyze(req: DatasetAnalysisRequest) -> APIResponse:
+    try:
+        result = analyze_dataset(
+            path=req.path,
+            caption_extension=req.caption_extension,
+            top_tags=req.top_tags,
+            sample_limit=req.sample_limit,
+        )
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Dataset analysis failed")
+        return APIResponseFail(message="Dataset analysis failed / 数据集分析失败，请查看日志。")
+
+    return APIResponseSuccess(data=result)
+
+
+@router.post("/dataset/masked_loss_audit")
+async def dataset_masked_loss_audit(req: MaskedLossAuditRequest) -> APIResponse:
+    try:
+        result = analyze_masked_loss_dataset(
+            path=req.path,
+            recursive=req.recursive,
+            sample_limit=req.sample_limit,
+        )
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Masked-loss dataset audit failed")
+        return APIResponseFail(message="Masked-loss dataset audit failed / 蒙版损失数据集检查失败，请查看日志。")
+
+    return APIResponseSuccess(data=result)
+
+
+@router.get("/interrogators")
+async def get_interrogators() -> APIResponse:
+    default_interrogator = TaggerInterrogateRequest.model_fields["interrogator_model"].default
+    return APIResponseSuccess(data={
+        "default": default_interrogator,
+        "interrogators": [
+            {
+                "name": name,
+                "kind": "cl" if name.startswith("cl_") else "wd",
+                "repo_id": getattr(interrogator, "repo_id", None),
+                "is_default": name == default_interrogator,
+            }
+            for name, interrogator in available_interrogators.items()
+        ],
+    })
+
+
+@router.post("/captions/cleanup/preview")
+async def captions_cleanup_preview(req: CaptionCleanupRequest) -> APIResponse:
+    try:
+        preview_payload = req.model_dump(exclude={"create_backup_before_apply", "backup_snapshot_name"})
+        result = preview_caption_cleanup(**preview_payload)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Caption cleanup preview failed")
+        return APIResponseFail(message="Caption cleanup preview failed / Caption 清洗预览失败，请查看日志。")
+
+    return APIResponseSuccess(data=result)
+
+
+@router.post("/captions/cleanup/apply")
+async def captions_cleanup_apply(req: CaptionCleanupRequest) -> APIResponse:
+    try:
+        backup_result = None
+        backup_warnings: list[str] = []
+        if req.create_backup_before_apply:
+            backup_result, backup_warnings = maybe_create_caption_backup(
+                path=req.path,
+                caption_extension=req.caption_extension,
+                recursive=req.recursive,
+                snapshot_name=req.backup_snapshot_name.strip() or "pre-caption-cleanup",
+            )
+
+        cleanup_payload = req.model_dump(exclude={"create_backup_before_apply", "backup_snapshot_name"})
+        result = apply_caption_cleanup(**cleanup_payload)
+        if backup_result is not None:
+            result["backup"] = backup_result
+        if backup_warnings:
+            result["warnings"] = [*result.get("warnings", []), *backup_warnings]
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Caption cleanup apply failed")
+        return APIResponseFail(message="Caption cleanup apply failed / Caption 清洗应用失败，请查看日志。")
+
+    message = f"Updated {result['summary']['changed_file_count']} caption files."
+    if backup_result is not None:
+        message = f"{message} Created backup {backup_result['archive_name']} first."
+    return APIResponseSuccess(message=message, data=result)
+
+
+@router.post("/captions/backups/create")
+async def captions_backup_create(req: CaptionBackupRequest) -> APIResponse:
+    try:
+        result = create_caption_backup(**req.model_dump())
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Caption backup creation failed")
+        return APIResponseFail(message="Caption backup creation failed / Caption 备份创建失败，请查看日志。")
+
+    return APIResponseSuccess(message=f"Created caption backup {result['archive_name']}", data=result)
+
+
+@router.post("/captions/backups/list")
+async def captions_backup_list(req: CaptionBackupListRequest) -> APIResponse:
+    try:
+        result = list_caption_backups(path=req.path.strip() or None)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Caption backup listing failed")
+        return APIResponseFail(message="Caption backup listing failed / Caption 备份列表读取失败，请查看日志。")
+
+    return APIResponseSuccess(data={"backups": result})
+
+
+@router.post("/captions/backups/restore")
+async def captions_backup_restore(req: CaptionBackupRestoreRequest) -> APIResponse:
+    try:
+        result = restore_caption_backup(**req.model_dump())
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Caption backup restore failed")
+        return APIResponseFail(message="Caption backup restore failed / Caption 备份恢复失败，请查看日志。")
+
+    return APIResponseSuccess(message=f"Restored {result['restored_file_count']} caption files.", data=result)
 
 
 @router.get("/pick_file")
@@ -346,6 +746,9 @@ async def pick_file(picker_type: str):
     elif picker_type == "model-file":
         file_types = [("checkpoints", "*.safetensors;*.ckpt;*.pt"), ("all files", "*.*")]
         coro = asyncio.to_thread(open_file_selector, "", "Select file", file_types)
+    elif picker_type == "text-file":
+        file_types = [("text files", "*.txt;*.text;*.prompt"), ("all files", "*.*")]
+        coro = asyncio.to_thread(open_file_selector, "", "Select prompt file", file_types)
     else:
         return APIResponseFail(message="Invalid picker type")
 
@@ -438,8 +841,22 @@ async def terminate_task(task_id: str):
 
 @router.get("/graphic_cards")
 async def list_avaliable_cards() -> APIResponse:
+    runtime_info = build_runtime_status_payload()
     if not printable_devices:
-        return APIResponse(status="pending", message="GPU detection is still in progress.")
+        return APIResponse(
+            status="pending",
+            message="GPU detection is still in progress.",
+            data={
+                "cards": [],
+                "xformers": {
+                    "version": None,
+                    "installed": False,
+                    "supported": False,
+                    "reason": "GPU detection is still in progress.",
+                },
+                "runtime": runtime_info,
+            },
+        )
 
     xformers_info = get_xformers_status()
     return APIResponseSuccess(data={
@@ -449,7 +866,8 @@ async def list_avaliable_cards() -> APIResponse:
             "installed": xformers_info["installed"],
             "supported": xformers_info["supported"],
             "reason": xformers_info["reason"],
-        }
+        },
+        "runtime": runtime_info,
     })
 
 

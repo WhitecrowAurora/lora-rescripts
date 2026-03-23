@@ -7,6 +7,7 @@ import { expandTrainingPayloadToEditableValues } from "./trainingPayload";
 import type { TrainingRouteConfig } from "./trainingRouteConfig";
 import { persistTrainingAutosave, restoreTrainingAutosave } from "./trainingRouteAutosave";
 import { createTrainingStateChangeHandler } from "./trainingRoutePreview";
+import { invalidateTrainingSamplePromptWorkspace } from "./trainingPromptWorkspace";
 import {
   buildPreparedTrainingPayload,
   buildTrainingStateWithImportedValues,
@@ -30,7 +31,8 @@ export function createTrainingRouteSession(
     config,
     domIds,
     prepareTrainingPayload,
-    (state) => persistTrainingAutosave(config, state)
+    (state) => persistTrainingAutosave(config, state),
+    () => invalidateTrainingSamplePromptWorkspace(config.prefix)
   );
 
   const mountTrainingState = (nextState: SchemaBridgeState | null) => {

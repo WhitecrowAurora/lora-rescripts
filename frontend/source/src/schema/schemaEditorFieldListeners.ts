@@ -1,4 +1,5 @@
 import { pickFile } from "../services/api";
+import { syncManagedSchedulerFields } from "../training/trainingOptionRegistry";
 import type { SchemaField } from "./schemaRuntime";
 import { getTableRows, renderSchemaPreview } from "./schemaEditorFieldRendering";
 import type { SchemaBridgeState, SchemaEditorDomIds } from "./schemaEditorTypes";
@@ -122,7 +123,13 @@ export function attachSchemaEditorFieldListeners(
         const rawValue =
           element instanceof HTMLInputElement && element.type === "checkbox" ? element.checked : element.value;
         state.values[path] = coerceFieldValue(sectionField, rawValue);
+        syncManagedSchedulerFields(state.values, path);
         syncFieldMirrorInputs(container, path, state.values[path], element);
+        if (path === "lr_scheduler") {
+          syncFieldMirrorInputs(container, "lr_scheduler_type", state.values.lr_scheduler_type);
+        } else if (path === "lr_scheduler_type") {
+          syncFieldMirrorInputs(container, "lr_scheduler", state.values.lr_scheduler);
+        }
       }
 
       if (conditionalKeys.has(path)) {

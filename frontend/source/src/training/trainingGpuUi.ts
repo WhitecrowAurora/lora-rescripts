@@ -1,8 +1,30 @@
 import { setHtml } from "../shared/domUtils";
-import type { GraphicCardRecord } from "../shared/types";
+import type { GraphicCardEntry, GraphicCardRecord } from "../shared/types";
 import { escapeHtml } from "../shared/textUtils";
 
-export function renderGpuSelector(containerId: string, cards: GraphicCardRecord[]) {
+function isGraphicCardRecord(card: GraphicCardEntry): card is GraphicCardRecord {
+  return typeof card === "object" && card !== null;
+}
+
+function normalizeGpuCard(card: GraphicCardEntry, index: number) {
+  if (!isGraphicCardRecord(card)) {
+    const match = card.match(/GPU\s+(\d+):/i);
+    const value = match ? match[1] : String(index);
+    return {
+      value,
+      label: card,
+    };
+  }
+
+  const label = card.index ?? card.id ?? index;
+  const value = String(label);
+  return {
+    value,
+    label: `GPU ${value}: ${card.name}`,
+  };
+}
+
+export function renderGpuSelector(containerId: string, cards: GraphicCardEntry[]) {
   if (cards.length === 0) {
     setHtml(containerId, "<p>No GPUs reported. Training will use the backend default environment.</p>");
     return;
@@ -10,12 +32,11 @@ export function renderGpuSelector(containerId: string, cards: GraphicCardRecord[
 
   const items = cards
     .map((card, index) => {
-      const label = card.index ?? card.id ?? index;
-      const value = String(label);
+      const normalized = normalizeGpuCard(card, index);
       return `
         <label class="gpu-chip">
-          <input type="checkbox" data-gpu-id="${escapeHtml(value)}" />
-          <span>GPU ${escapeHtml(value)}: ${escapeHtml(card.name)}</span>
+          <input type="checkbox" data-gpu-id="${escapeHtml(normalized.value)}" />
+          <span>${escapeHtml(normalized.label)}</span>
         </label>
       `;
     })

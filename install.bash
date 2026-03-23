@@ -23,6 +23,7 @@ portable_python="$script_dir/python/bin/python"
 venv_python="$script_dir/venv/bin/python"
 portable_marker="$script_dir/python/.deps_installed"
 venv_marker="$script_dir/venv/.deps_installed"
+main_required_modules=(accelerate torch fastapi toml transformers diffusers lion_pytorch dadaptation schedulefree prodigyopt prodigyplus pytorch_optimizer)
 
 python_exe=""
 deps_marker=""
@@ -56,6 +57,23 @@ find_system_python() {
 test_pip_ready() {
     local python_bin="$1"
     "$python_bin" -m pip --version >/dev/null 2>&1
+}
+
+test_modules_ready() {
+    local python_bin="$1"
+    shift
+
+    if [[ "$#" -eq 0 ]]; then
+        return 0
+    fi
+
+    "$python_bin" -c "import importlib, sys; failed=[]
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        failed.append(name)
+raise SystemExit(1 if failed else 0)" "$@" >/dev/null 2>&1
 }
 
 invoke_step() {
@@ -156,6 +174,11 @@ invoke_optional_step \
 
 invoke_step "Installing project dependencies..." \
     "$python_exe" -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
+
+if ! test_modules_ready "$python_exe" "${main_required_modules[@]}"; then
+    echo "Project dependencies did not finish installing correctly. One or more required runtime modules are still missing." >&2
+    exit 1
+fi
 
 if [[ -n "$deps_marker" ]]; then
     : > "$deps_marker"

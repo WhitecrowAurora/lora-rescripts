@@ -8,6 +8,11 @@ import {
 } from "./schemaRuntime";
 import type { SchemaBridgeState } from "./schemaEditorTypes";
 import { escapeHtml } from "../shared/textUtils";
+import {
+  buildTrainingOptionChoices,
+  type TrainingOptionChoice,
+  type TrainingOptionKind,
+} from "../training/trainingOptionRegistry";
 
 function pathToDomId(path: string) {
   return `field-${path.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
@@ -28,6 +33,45 @@ function getEnumOptions(schema: RuntimeSchemaNode) {
   }
 
   return options;
+}
+
+function getTrackedTrainingOptionKind(field: SchemaField): TrainingOptionKind | null {
+  if (field.path === "optimizer_type") {
+    return "optimizer";
+  }
+
+  if (field.path === "lr_scheduler") {
+    return "scheduler";
+  }
+
+  return null;
+}
+
+function getEnumChoices(field: SchemaField, value: unknown): TrainingOptionChoice[] | null {
+  const enumOptions = getEnumOptions(field.schema);
+  if (!enumOptions) {
+    return null;
+  }
+
+  const trackedKind = getTrackedTrainingOptionKind(field);
+  if (!trackedKind) {
+    return enumOptions.map((option) => ({
+      value: String(option),
+      label: String(option),
+      description: "",
+      hiddenBySettings: false,
+    }));
+  }
+
+  return buildTrainingOptionChoices(trackedKind, enumOptions, value);
+}
+
+function renderEnumChoiceNote(choice: TrainingOptionChoice | undefined) {
+  if (!choice?.selectionNote) {
+    return "";
+  }
+
+  return `<p class="field-helper-note">${escapeHtml(choice.selectionNote)}</p>`;
 }
 
 function getRoleConfigValue(schema: RuntimeSchemaNode, key: string) {
@@ -106,7 +150,7 @@ function renderSchemaFieldControl(field: SchemaField, value: unknown) {
   const schema = field.schema;
   const domId = pathToDomId(field.path);
   const escapedPath = escapeHtml(field.path);
-  const enumOptions = getEnumOptions(schema);
+  const enumChoices = getEnumChoices(field, value);
   const disabledAttr = schema.disabledFlag ? "disabled" : "";
   const roleName = schema.roleName || "";
 
@@ -128,13 +172,20 @@ function renderSchemaFieldControl(field: SchemaField, value: unknown) {
     return `<textarea id="${domId}" class="field-input field-textarea" data-field-path="${escapedPath}" data-field-kind="array" ${disabledAttr}>${escapeHtml(currentValue)}</textarea>`;
   }
 
-  if (enumOptions) {
-    const options = enumOptions
+  if (enumChoices) {
+    const selectedChoice = enumChoices.find((choice) => choice.value === String(value));
+    const options = enumChoices
       .map(
-        (option) => `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option)}</option>`
+        (choice) =>
+          `<option value="${escapeHtml(choice.value)}" ${choice.value === String(value) ? "selected" : ""}>${escapeHtml(choice.label)}</option>`
       )
       .join("");
-    return `<select id="${domId}" class="field-input" data-field-path="${escapedPath}" data-field-kind="enum" ${disabledAttr}>${options}</select>`;
+    return `
+      <div class="enum-field-control">
+        <select id="${domId}" class="field-input" data-field-path="${escapedPath}" data-field-kind="enum" ${disabledAttr}>${options}</select>
+        ${renderEnumChoiceNote(selectedChoice)}
+      </div>
+    `;
   }
 
   if (schema.kind === "number") {

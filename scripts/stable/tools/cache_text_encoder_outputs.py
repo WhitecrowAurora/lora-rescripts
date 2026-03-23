@@ -172,7 +172,7 @@ def cache_to_disk(args: argparse.Namespace) -> None:
 
     # build text encoding strategy
     if is_sdxl:
-        text_encoding_strategy = strategy_sdxl.SdxlTextEncodingStrategy()
+        text_encoding_strategy = strategy_sdxl.SdxlTextEncodingStrategy(args.clip_skip)
     else:
         text_encoding_strategy = strategy_flux.FluxTextEncodingStrategy(args.apply_t5_attn_mask)
     strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)

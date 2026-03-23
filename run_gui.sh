@@ -15,6 +15,7 @@ venv_marker="$script_dir/venv/.deps_installed"
 tageditor_portable_python="$script_dir/python_tageditor/bin/python"
 tageditor_venv_python="$script_dir/venv-tageditor/bin/python"
 allow_external_python="${MIKAZUKI_ALLOW_SYSTEM_PYTHON:-0}"
+main_modules=(accelerate torch fastapi toml transformers diffusers lion_pytorch dadaptation schedulefree prodigyopt prodigyplus pytorch_optimizer)
 
 python_exe=""
 deps_marker=""
@@ -61,7 +62,13 @@ test_modules_ready() {
         return 0
     fi
 
-    "$python_bin" -c "import importlib.util, sys; missing=[m for m in sys.argv[1:] if importlib.util.find_spec(m) is None]; raise SystemExit(1 if missing else 0)" "$@" >/dev/null 2>&1
+    "$python_bin" -c "import importlib, sys; failed=[]
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        failed.append(name)
+raise SystemExit(1 if failed else 0)" "$@" >/dev/null 2>&1
 }
 
 test_package_constraints() {
@@ -179,7 +186,6 @@ done
 
 select_main_python
 
-main_modules=(accelerate torch fastapi toml)
 main_install_needed=0
 
 if ! test_modules_ready "$python_exe" "${main_modules[@]}"; then

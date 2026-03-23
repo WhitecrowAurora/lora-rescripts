@@ -12,5 +12,11 @@ export function renderSdxlLlliteTrainPage() {
     legacyPath: "/lora/sdxl-lllite.html",
     legacyLabel: "Open current shipped SDXL LLLite page",
     renderedTitle: "SDXL LLLite form bridge",
+    routeNotice: {
+      kicker: "experimental",
+      title: "SDXL clip_skip is experimental on LLLite too",
+      detail:
+        "The SDXL-side text encoding path is shared here, so clip_skip support is available but still experimental. Keep training and inference behavior matched if you use it.",
+    },
   });
 }

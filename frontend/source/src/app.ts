@@ -7,14 +7,23 @@ import {
   bindWorkspaceData,
 } from "./binders/pageBinders";
 import { renderAboutPage } from "./pages/aboutPage";
+import { renderAnimaFinetuneTrainPage } from "./pages/animaFinetuneTrainPage";
+import { renderAnimaTrainPage } from "./pages/animaTrainPage";
 import { renderDreamboothTrainPage } from "./pages/dreamboothTrainPage";
 import { renderFluxControlNetTrainPage } from "./pages/fluxControlNetTrainPage";
+import { renderFluxFinetuneTrainPage } from "./pages/fluxFinetuneTrainPage";
 import { renderFluxTrainPage } from "./pages/fluxTrainPage";
+import { renderHunyuanImageTrainPage } from "./pages/hunyuanImageTrainPage";
+import { renderLuminaFinetuneTrainPage } from "./pages/luminaFinetuneTrainPage";
+import { renderLuminaTrainPage } from "./pages/luminaTrainPage";
 import { renderSchemaBridgePage } from "./pages/schemaBridgePage";
+import { renderSd3FinetuneTrainPage } from "./pages/sd3FinetuneTrainPage";
 import { renderSd3TrainPage } from "./pages/sd3TrainPage";
 import { renderSdControlNetTrainPage } from "./pages/sdControlNetTrainPage";
+import { renderSdTextualInversionTrainPage } from "./pages/sdTextualInversionTrainPage";
 import { renderSdxlControlNetTrainPage } from "./pages/sdxlControlNetTrainPage";
 import { renderSdxlLlliteTrainPage } from "./pages/sdxlLlliteTrainPage";
+import { renderSdxlTextualInversionTrainPage } from "./pages/sdxlTextualInversionTrainPage";
 import { renderSdxlTrainPage } from "./pages/sdxlTrainPage";
 import { renderSettingsPage } from "./pages/settingsPage";
 import { renderTagEditorPage } from "./pages/tagEditorPage";
@@ -22,6 +31,7 @@ import { renderTasksPage } from "./pages/tasksPage";
 import { renderTensorBoardPage } from "./pages/tensorboardPage";
 import { renderToolsPage } from "./pages/toolsPage";
 import { renderWorkspacePage } from "./pages/workspacePage";
+import { renderXtiTrainPage } from "./pages/xtiTrainPage";
 import { createAppShell } from "./renderers/render";
 import { appRoutes, ensureRoute, getCurrentRoute } from "./routing/router";
 import { type TrainingRouteConfig, trainingRouteConfigs } from "./training/trainingRouteConfig";
@@ -39,11 +49,21 @@ const pageRenderers: Record<string, () => string> = {
   "sdxl-train": renderSdxlTrainPage,
   "flux-train": renderFluxTrainPage,
   "sd3-train": renderSd3TrainPage,
+  "sd3-finetune-train": renderSd3FinetuneTrainPage,
   "dreambooth-train": renderDreamboothTrainPage,
+  "flux-finetune-train": renderFluxFinetuneTrainPage,
   "sd-controlnet-train": renderSdControlNetTrainPage,
   "sdxl-controlnet-train": renderSdxlControlNetTrainPage,
   "flux-controlnet-train": renderFluxControlNetTrainPage,
   "sdxl-lllite-train": renderSdxlLlliteTrainPage,
+  "sd-ti-train": renderSdTextualInversionTrainPage,
+  "xti-train": renderXtiTrainPage,
+  "sdxl-ti-train": renderSdxlTextualInversionTrainPage,
+  "anima-train": renderAnimaTrainPage,
+  "anima-finetune-train": renderAnimaFinetuneTrainPage,
+  "lumina-train": renderLuminaTrainPage,
+  "lumina-finetune-train": renderLuminaFinetuneTrainPage,
+  "hunyuan-image-train": renderHunyuanImageTrainPage,
 };
 
 function buildNav(activeRouteHash: string) {

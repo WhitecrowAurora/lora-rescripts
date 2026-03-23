@@ -1,12 +1,19 @@
-import type { GraphicCardRecord, TagEditorStatus, TaskRecord } from "./types";
+import type { GraphicCardEntry, GraphicCardRecord, TagEditorStatus, TaskRecord } from "./types";
 
-export function formatGpuList(cards: GraphicCardRecord[]) {
+function isGraphicCardRecord(card: GraphicCardEntry): card is GraphicCardRecord {
+  return typeof card === "object" && card !== null;
+}
+
+export function formatGpuList(cards: GraphicCardEntry[]) {
   if (cards.length === 0) {
     return "No cards reported yet.";
   }
 
   return cards
     .map((card, index) => {
+      if (!isGraphicCardRecord(card)) {
+        return card;
+      }
       const label = card.index ?? card.id ?? index;
       return `GPU ${label}: ${card.name}`;
     })

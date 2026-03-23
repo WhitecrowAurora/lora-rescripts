@@ -1,8 +1,10 @@
 import type { SchemaBridgeState } from "../schema/schemaEditor";
 import type { TrainingRouteConfig } from "./trainingRouteConfig";
 import { wireTrainingStartControl, wireTrainingStopControl } from "./trainingRouteActions";
-import { saveCurrentSnapshotToHistory, wireTrainingConfigFileControls, wireTrainingHistoryFileImportControl } from "./trainingRouteFiles";
-import { applySelectedGpuIds, setTrainingUtilityNote } from "./trainingUi";
+import { saveCurrentSnapshotToHistory, saveCurrentTrainingRecipe, wireTrainingConfigFileControls, wireTrainingHistoryFileImportControl, wireTrainingRecipeFileImportControl } from "./trainingRouteFiles";
+import { wireTrainingSamplePromptWorkspace } from "./trainingPromptWorkspace";
+import { clearTrainingAutosave } from "./trainingStorage";
+import { applySelectedGpuIds, renderTrainingAutosaveStatus, setTrainingUtilityNote } from "./trainingUi";
 import type { EditableRecordMode, PreparedTrainingPayload } from "./trainingRouteState";
 
 type ApplyEditableRecord = (
@@ -20,7 +22,9 @@ type TrainingRouteControlsOptions = {
   applyEditableRecord: ApplyEditableRecord;
   buildPreparedTrainingPayload: (state: SchemaBridgeState) => PreparedTrainingPayload;
   bindHistoryPanel: () => void;
+  bindRecipePanel: () => void;
   openHistoryPanel: () => void;
+  openRecipePanel: () => void;
   openPresetPanel: () => Promise<void>;
 };
 
@@ -34,7 +38,9 @@ export function wireTrainingRouteControls(options: TrainingRouteControlsOptions)
     applyEditableRecord,
     buildPreparedTrainingPayload,
     bindHistoryPanel,
+    bindRecipePanel,
     openHistoryPanel,
+    openRecipePanel,
     openPresetPanel,
   } = options;
 
@@ -68,12 +74,50 @@ export function wireTrainingRouteControls(options: TrainingRouteControlsOptions)
     openHistoryPanel();
   });
 
+  document.querySelector<HTMLButtonElement>(`#${config.prefix}-clear-autosave`)?.addEventListener("click", () => {
+    if (!window.confirm("Clear the local autosave for this training route?")) {
+      return;
+    }
+
+    clearTrainingAutosave(config.routeId);
+    renderTrainingAutosaveStatus(config.prefix, null);
+    setTrainingUtilityNote(config.prefix, "Cleared local autosave for this route.", "warning");
+  });
+
+  document.querySelector<HTMLButtonElement>(`#${config.prefix}-save-recipe`)?.addEventListener("click", () => {
+    const currentState = getCurrentState();
+    if (!currentState) {
+      return;
+    }
+
+    const prepared = buildPreparedTrainingPayload(currentState);
+    const saved = saveCurrentTrainingRecipe(config, currentState, prepared, bindRecipePanel);
+    if (saved) {
+      setTrainingUtilityNote(config.prefix, "Current config saved to the local recipe library.", "success");
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>(`#${config.prefix}-read-recipes`)?.addEventListener("click", () => {
+    openRecipePanel();
+  });
+
+  document.querySelector<HTMLButtonElement>(`#${config.prefix}-import-recipe`)?.addEventListener("click", () => {
+    document.querySelector<HTMLInputElement>(`#${config.prefix}-recipe-file-input`)?.click();
+  });
+
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-load-presets`)?.addEventListener("click", () => {
     void openPresetPanel();
   });
 
   wireTrainingConfigFileControls(config, getCurrentState, buildPreparedTrainingPayload, applyEditableRecord);
   wireTrainingHistoryFileImportControl(config, openHistoryPanel);
+  wireTrainingRecipeFileImportControl(config, bindRecipePanel, openRecipePanel);
+  wireTrainingSamplePromptWorkspace({
+    config,
+    getCurrentState,
+    buildPreparedTrainingPayload,
+    applyEditableRecord,
+  });
   wireTrainingStopControl(config);
   wireTrainingStartControl(config, getCurrentState, buildPreparedTrainingPayload);
 }

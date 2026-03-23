@@ -13,6 +13,7 @@ $portableTagEditorPython = Join-Path $repoRoot "python_tageditor\python.exe"
 $venvTagEditorPython = Join-Path $repoRoot "venv-tageditor\Scripts\python.exe"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
 $preferBlackwellRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "blackwell"
+$mainRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
     param (
@@ -33,7 +34,13 @@ function Test-ModulesReady {
         return $true
     }
 
-    & $PythonExe -c "import importlib.util, sys; missing=[m for m in sys.argv[1:] if importlib.util.find_spec(m) is None]; raise SystemExit(1 if missing else 0)" @Modules 1>$null 2>$null
+    & $PythonExe -c "import importlib, sys; failed=[]; 
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        failed.append(name)
+raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
     return $LASTEXITCODE -eq 0
 }
 
@@ -177,7 +184,7 @@ $mainPython = Get-MainPythonSelection
 $pythonExe = $mainPython.PythonExe
 $depsMarker = $mainPython.DepsMarker
 $runtimeName = $mainPython.Runtime
-$mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("accelerate", "torch", "fastapi", "toml")
+$mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules $mainRuntimeModules
 if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
     if ($runtimeName -eq "blackwell") {
         Write-Host -ForegroundColor Yellow "Blackwell experimental dependencies are not installed yet. Running install_blackwell.ps1..."
@@ -191,7 +198,7 @@ if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
     $pythonExe = $mainPython.PythonExe
     $depsMarker = $mainPython.DepsMarker
     $runtimeName = $mainPython.Runtime
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not (Test-ModulesReady -PythonExe $pythonExe -Modules @("accelerate", "torch", "fastapi", "toml"))) {
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not (Test-ModulesReady -PythonExe $pythonExe -Modules $mainRuntimeModules)) {
         throw "Dependency installation failed."
     }
 }

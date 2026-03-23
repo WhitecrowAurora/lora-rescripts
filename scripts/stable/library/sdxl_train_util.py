@@ -349,7 +349,12 @@ def verify_sdxl_training_args(args: argparse.Namespace, support_text_encoder_cac
     assert not args.v2, "v2 cannot be enabled in SDXL training / SDXL学習ではv2を有効にすることはできません"
 
     if args.clip_skip is not None:
-        logger.warning("clip_skip will be unexpected / SDXL学習ではclip_skipは動作しません")
+        if args.clip_skip < 1:
+            raise ValueError("clip_skip must be 1 or higher / clip_skipは1以上である必要があります")
+        logger.warning(
+            "clip_skip support for SDXL is experimental in this build. Training and inference should use the same SDXL clip-skip behavior / "
+            "このビルドでのSDXL clip_skip対応は実験的です。学習時と推論時で同じSDXL clip_skip挙動を使ってください"
+        )
 
     # if args.multires_noise_iterations:
     #     logger.info(

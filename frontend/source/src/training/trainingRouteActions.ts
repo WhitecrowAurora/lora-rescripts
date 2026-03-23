@@ -1,10 +1,36 @@
-import { fetchTasks, startTraining, terminateTask } from "../services/api";
+import { fetchTasks, runTrainingPreflight, startTraining, terminateTask } from "../services/api";
 import type { SchemaBridgeState } from "../schema/schemaEditor";
 import type { TrainingRouteConfig } from "./trainingRouteConfig";
 import type { PreparedTrainingPayload } from "./trainingRouteState";
-import { renderTrainSubmitStatus, renderTrainValidationStatus, setTrainingUtilityNote } from "./trainingUi";
+import {
+  renderTrainSubmitStatus,
+  renderTrainValidationStatus,
+  renderTrainingPreflightReport,
+  setTrainingUtilityNote,
+} from "./trainingUi";
 
 type BuildPreparedTrainingPayload = (state: SchemaBridgeState) => PreparedTrainingPayload;
+
+async function performTrainingPreflight(
+  config: TrainingRouteConfig,
+  payload: Record<string, unknown>
+) {
+  try {
+    const result = await runTrainingPreflight(payload);
+    if (result.status !== "success") {
+      throw new Error(result.message || "Training preflight failed.");
+    }
+    renderTrainingPreflightReport(config.prefix, result.data ?? null);
+    return result.data ?? null;
+  } catch (error) {
+    renderTrainingPreflightReport(
+      config.prefix,
+      null,
+      error instanceof Error ? error.message : "Training preflight failed."
+    );
+    throw error;
+  }
+}
 
 export function wireTrainingStopControl(config: TrainingRouteConfig) {
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-stop-train`)?.addEventListener("click", async () => {
@@ -40,6 +66,23 @@ export function wireTrainingStartControl(
   getCurrentState: () => SchemaBridgeState | null,
   buildPreparedTrainingPayload: BuildPreparedTrainingPayload
 ) {
+  document.querySelector<HTMLButtonElement>(`#${config.prefix}-run-preflight`)?.addEventListener("click", async () => {
+    const currentState = getCurrentState();
+    if (!currentState) {
+      renderTrainSubmitStatus(config.prefix, "Editor not ready", `The ${config.modelLabel} schema editor state is not initialized yet.`, "error");
+      return;
+    }
+
+    try {
+      const prepared = buildPreparedTrainingPayload(currentState);
+      renderTrainValidationStatus(config.prefix, prepared.checks);
+      await performTrainingPreflight(config, prepared.payload);
+      setTrainingUtilityNote(config.prefix, "Training preflight completed.", "success");
+    } catch (error) {
+      setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "Training preflight failed.", "error");
+    }
+  });
+
   const startButton = document.querySelector<HTMLButtonElement>(`#${config.prefix}-start-train`);
   startButton?.addEventListener("click", async () => {
     const currentState = getCurrentState();
@@ -59,9 +102,20 @@ export function wireTrainingStartControl(
         return;
       }
 
+      const preflight = await performTrainingPreflight(config, prepared.payload);
+      if (preflight && !preflight.can_start) {
+        renderTrainSubmitStatus(
+          config.prefix,
+          "Resolve preflight errors first",
+          preflight.errors.join(" "),
+          "error"
+        );
+        return;
+      }
+
       const result = await startTraining(prepared.payload);
       if (result.status === "success") {
-        const warningParts = [...prepared.checks.warnings, ...(result.data?.warnings ?? [])];
+        const warningParts = [...prepared.checks.warnings, ...(preflight?.warnings ?? []), ...(result.data?.warnings ?? [])];
         const warnings = warningParts.join(" ");
         renderTrainSubmitStatus(
           config.prefix,

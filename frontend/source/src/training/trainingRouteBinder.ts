@@ -29,7 +29,9 @@ export async function bindTrainingRoute(config: TrainingRouteConfig) {
     applyEditableRecord: session.applyEditableRecord,
     buildPreparedTrainingPayload: session.prepareTrainingPayload,
     bindHistoryPanel: panels.bindHistoryPanel,
+    bindRecipePanel: panels.bindRecipePanel,
     openHistoryPanel: panels.openHistoryPanel,
+    openRecipePanel: panels.openRecipePanel,
     openPresetPanel: panels.openPresetPanel,
   });
 
@@ -40,5 +42,6 @@ export async function bindTrainingRoute(config: TrainingRouteConfig) {
     "success"
   );
   toggleTrainingPanel(config.prefix, "history", false);
+  toggleTrainingPanel(config.prefix, "recipes", false);
   toggleTrainingPanel(config.prefix, "presets", false);
 }

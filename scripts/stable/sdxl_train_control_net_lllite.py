@@ -189,7 +189,7 @@ def train(args):
 
         accelerator.wait_for_everyone()
 
-    text_encoding_strategy = strategy_sdxl.SdxlTextEncodingStrategy()
+    text_encoding_strategy = strategy_sdxl.SdxlTextEncodingStrategy(args.clip_skip)
     strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
 
     # TextEncoderの出力をキャッシュする

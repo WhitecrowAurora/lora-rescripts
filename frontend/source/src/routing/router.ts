@@ -87,11 +87,25 @@ export const appRoutes: AppRoute[] = [
     description: "Source-side SD3 LoRA training route using the same normalized payload workflow.",
   },
   {
+    id: "sd3-finetune-train",
+    label: "SD3 Finetune",
+    section: "reference",
+    hash: "#/sd3-finetune-train",
+    description: "Source-side SD3 finetune route on the shared training bridge.",
+  },
+  {
     id: "dreambooth-train",
     label: "Dreambooth",
     section: "reference",
     hash: "#/dreambooth-train",
     description: "Source-side Dreambooth and SDXL full-finetune route on the shared schema bridge.",
+  },
+  {
+    id: "flux-finetune-train",
+    label: "Flux Finetune",
+    section: "reference",
+    hash: "#/flux-finetune-train",
+    description: "Source-side Flux full-finetune route using the shared launch workflow.",
   },
   {
     id: "sd-controlnet-train",
@@ -120,6 +134,62 @@ export const appRoutes: AppRoute[] = [
     section: "reference",
     hash: "#/sdxl-lllite-train",
     description: "Source-side SDXL ControlNet-LLLite training route on the shared training bridge.",
+  },
+  {
+    id: "sd-ti-train",
+    label: "SD TI",
+    section: "reference",
+    hash: "#/sd-ti-train",
+    description: "Source-side SD textual inversion route on the shared training bridge.",
+  },
+  {
+    id: "xti-train",
+    label: "SD XTI",
+    section: "reference",
+    hash: "#/xti-train",
+    description: "Source-side SD XTI textual inversion route on the shared training bridge.",
+  },
+  {
+    id: "sdxl-ti-train",
+    label: "SDXL TI",
+    section: "reference",
+    hash: "#/sdxl-ti-train",
+    description: "Source-side SDXL textual inversion route on the shared training bridge.",
+  },
+  {
+    id: "anima-train",
+    label: "Anima LoRA",
+    section: "reference",
+    hash: "#/anima-train",
+    description: "Source-side Anima LoRA training route using the shared launch flow.",
+  },
+  {
+    id: "anima-finetune-train",
+    label: "Anima Finetune",
+    section: "reference",
+    hash: "#/anima-finetune-train",
+    description: "Source-side Anima finetune route using the shared launch flow.",
+  },
+  {
+    id: "lumina-train",
+    label: "Lumina LoRA",
+    section: "reference",
+    hash: "#/lumina-train",
+    description: "Source-side Lumina LoRA training route using the shared launch flow.",
+  },
+  {
+    id: "lumina-finetune-train",
+    label: "Lumina Finetune",
+    section: "reference",
+    hash: "#/lumina-finetune-train",
+    description: "Source-side Lumina finetune route using the shared launch flow.",
+  },
+  {
+    id: "hunyuan-image-train",
+    label: "Hunyuan Image",
+    section: "reference",
+    hash: "#/hunyuan-image-train",
+    description: "Source-side Hunyuan Image LoRA training route using the shared launch flow.",
   },
 ];
 
@@ -163,11 +233,13 @@ function canonicalizeRootPath(pathname: string) {
 function inferLegacyLoraHash(pageName: string) {
   switch (pageName) {
     case "flux":
-    case "flux-finetune":
       return "#/flux-train";
+    case "flux-finetune":
+      return "#/flux-finetune-train";
     case "sd3":
-    case "sd3-finetune":
       return "#/sd3-train";
+    case "sd3-finetune":
+      return "#/sd3-finetune-train";
     case "controlnet":
       return "#/sd-controlnet-train";
     case "sdxl-controlnet":
@@ -182,15 +254,23 @@ function inferLegacyLoraHash(pageName: string) {
     case "master":
     case "params":
     case "sdxl":
-    case "sdxl-ti":
-    case "ti":
-    case "xti":
-    case "anima":
-    case "anima-finetune":
-    case "hunyuan":
-    case "lumina":
-    case "lumina-finetune":
       return "#/sdxl-train";
+    case "sdxl-ti":
+      return "#/sdxl-ti-train";
+    case "ti":
+      return "#/sd-ti-train";
+    case "xti":
+      return "#/xti-train";
+    case "anima":
+      return "#/anima-train";
+    case "anima-finetune":
+      return "#/anima-finetune-train";
+    case "hunyuan":
+      return "#/hunyuan-image-train";
+    case "lumina":
+      return "#/lumina-train";
+    case "lumina-finetune":
+      return "#/lumina-finetune-train";
     default:
       return null;
   }

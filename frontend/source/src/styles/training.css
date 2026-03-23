@@ -34,6 +34,38 @@
   border-top: 1px solid var(--line);
 }
 
+.training-inline-workspace {
+  margin-top: 0.9rem;
+}
+
+.training-library-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-bottom: 0.45rem;
+}
+
+.training-library-note {
+  margin: 0 0 0.9rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.training-autosave-status {
+  margin-top: 0.55rem;
+}
+
+.training-autosave-note,
+.training-card-note {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.training-card-compatibility {
+  margin-top: 0.7rem;
+}
+
 .training-side-panel[hidden] {
   display: none;
 }
@@ -66,6 +98,10 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
+}
+
+.training-inline-workspace .history-toolbar {
+  justify-content: flex-end;
 }
 
 .history-list,
@@ -162,6 +198,16 @@
 
 .submit-status-box p {
   margin: 0.35rem 0 0;
+}
+
+.submit-status-box > div + div {
+  margin-top: 0.7rem;
+}
+
+.training-preflight-meta {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .status-list {

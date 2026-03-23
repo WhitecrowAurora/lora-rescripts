@@ -55,8 +55,15 @@ class SdxlTokenizeStrategy(TokenizeStrategy):
 
 
 class SdxlTextEncodingStrategy(TextEncodingStrategy):
-    def __init__(self) -> None:
-        pass
+    def __init__(self, clip_skip: Optional[int] = None) -> None:
+        self.clip_skip = clip_skip
+
+    def _get_sdxl_hidden_state(self, enc_out, fallback_index: int):
+        if self.clip_skip is None:
+            return enc_out["hidden_states"][fallback_index]
+
+        clip_skip_index = -(self.clip_skip + 2)
+        return enc_out["hidden_states"][clip_skip_index]
 
     def _pool_workaround(
         self, text_encoder: CLIPTextModelWithProjection, last_hidden_state: torch.Tensor, input_ids: torch.Tensor, eos_token_id: int
@@ -125,11 +132,11 @@ class SdxlTextEncodingStrategy(TextEncodingStrategy):
 
         # text_encoder1
         enc_out = text_encoder1(input_ids1, output_hidden_states=True, return_dict=True)
-        hidden_states1 = enc_out["hidden_states"][11]
+        hidden_states1 = self._get_sdxl_hidden_state(enc_out, 11)
 
         # text_encoder2
         enc_out = text_encoder2(input_ids2, output_hidden_states=True, return_dict=True)
-        hidden_states2 = enc_out["hidden_states"][-2]  # penuultimate layer
+        hidden_states2 = self._get_sdxl_hidden_state(enc_out, -2)  # penultimate layer by default
 
         # pool2 = enc_out["text_embeds"]
         unwrapped_text_encoder2 = unwrapped_text_encoder2 or text_encoder2

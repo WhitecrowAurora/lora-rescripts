@@ -15,6 +15,7 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $blackwellPython = Join-Path $repoRoot "python_blackwell\python.exe"
 $blackwellMarker = Join-Path $repoRoot "python_blackwell\.deps_installed"
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
     param (
@@ -50,6 +51,26 @@ function Invoke-OptionalStep {
     if ($LASTEXITCODE -ne 0) {
         Write-Host -ForegroundColor Yellow $WarningMessage
     }
+}
+
+function Test-ModulesReady {
+    param (
+        [string]$PythonExe,
+        [string[]]$Modules
+    )
+
+    if (-not $Modules -or $Modules.Count -eq 0) {
+        return $true
+    }
+
+    & $PythonExe -c "import importlib, sys; failed=[]; 
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        failed.append(name)
+raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
+    return $LASTEXITCODE -eq 0
 }
 
 function Resolve-XformersWheel {
@@ -173,6 +194,10 @@ Invoke-Step "Installing PyTorch and torchvision for Blackwell environment ($Torc
 
 Invoke-Step "Installing project dependencies into python_blackwell..." {
     & $blackwellPython -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
+}
+
+if (-not (Test-ModulesReady -PythonExe $blackwellPython -Modules $mainRequiredModules)) {
+    throw "Project dependencies did not finish installing correctly in python_blackwell. One or more required runtime modules are still missing."
 }
 
 if (-not $SkipXformers) {

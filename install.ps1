@@ -10,6 +10,7 @@ $venvPython = Join-Path $repoRoot "venv\Scripts\python.exe"
 $portableMarker = Join-Path $repoRoot "python\.deps_installed"
 $venvMarker = Join-Path $repoRoot "venv\.deps_installed"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
     param (
@@ -60,6 +61,26 @@ function Invoke-OptionalStep {
     if ($LASTEXITCODE -ne 0) {
         Write-Host -ForegroundColor Yellow $WarningMessage
     }
+}
+
+function Test-ModulesReady {
+    param (
+        [string]$PythonExe,
+        [string[]]$Modules
+    )
+
+    if (-not $Modules -or $Modules.Count -eq 0) {
+        return $true
+    }
+
+    & $PythonExe -c "import importlib, sys; failed=[]; 
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        failed.append(name)
+raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
+    return $LASTEXITCODE -eq 0
 }
 
 if (Test-Path $portablePython) {
@@ -128,6 +149,10 @@ Invoke-OptionalStep "Installing xformers (optional)..." {
 
 Invoke-Step "Installing project dependencies..." {
     & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
+}
+
+if (-not (Test-ModulesReady -PythonExe $pythonExe -Modules $mainRequiredModules)) {
+    throw "Project dependencies did not finish installing correctly. One or more required runtime modules are still missing."
 }
 
 if ($markerPath) {
