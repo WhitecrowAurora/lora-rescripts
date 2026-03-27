@@ -81,32 +81,34 @@ echo.
 echo [2/3] Checking pip...
 "%PYTHON_EXE%" -m pip --version >nul 2>&1
 if errorlevel 1 (
-    set "GET_PIP=%TEMP%\get-pip.py"
-    echo pip not found, downloading bootstrap script...
-    "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '!GET_PIP!'"
+    echo pip not found, trying offline bootstrap from existing runtimes...
+    call :copy_bootstrap_runtime_packages
+    "%PYTHON_EXE%" -m pip --version >nul 2>&1
     if errorlevel 1 (
-        echo [ERROR] Failed to download get-pip.py
-        echo.
-        if "%AUTO_MODE%"=="0" pause
-        exit /b 1
-    )
+        set "GET_PIP=%TEMP%\get-pip.py"
+        echo offline bootstrap unavailable, downloading bootstrap script...
+        "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '!GET_PIP!'"
+        if errorlevel 1 (
+            echo [ERROR] Failed to download get-pip.py
+            echo.
+            if "%AUTO_MODE%"=="0" pause
+            exit /b 1
+        )
 
-    "%PYTHON_EXE%" "!GET_PIP!"
-    if errorlevel 1 (
-        echo [ERROR] Failed to install pip
-        echo.
-        if "%AUTO_MODE%"=="0" pause
-        exit /b 1
+        "%PYTHON_EXE%" "!GET_PIP!"
+        if errorlevel 1 (
+            echo [ERROR] Failed to install pip
+            echo.
+            if "%AUTO_MODE%"=="0" pause
+            exit /b 1
+        )
     )
 )
 
 echo [3/3] Upgrading build tools...
 "%PYTHON_EXE%" -m pip install --upgrade pip setuptools wheel
 if errorlevel 1 (
-    echo [ERROR] Failed to upgrade pip/setuptools/wheel
-    echo.
-    if "%AUTO_MODE%"=="0" pause
-    exit /b 1
+    echo [WARN] Failed to upgrade pip/setuptools/wheel, keeping current bootstrap packages.
 )
 
 echo.>"%PYTHON_DIR%\.portable_ready"
@@ -119,4 +121,32 @@ echo.
 "%PYTHON_EXE%" -m pip --version
 echo.
 if "%AUTO_MODE%"=="0" pause
+exit /b 0
+
+:copy_bootstrap_runtime_packages
+set "BOOTSTRAP_CANDIDATES=python python_tageditor python_blackwell python-sageattention python_sageattention python-sageattention-latest python_sageattention_latest python-sageattention-blackwell python_sageattention_blackwell"
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$repo = Get-Location;" ^
+  "$targetDir = '%TARGET_DIR%';" ^
+  "$targetSite = Join-Path (Join-Path $repo $targetDir) 'Lib\site-packages';" ^
+  "$patterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
+  "$candidates = @('python','python_tageditor','python_blackwell','python-sageattention','python_sageattention','python-sageattention-latest','python_sageattention_latest','python-sageattention-blackwell','python_sageattention_blackwell');" ^
+  "$copied = $false;" ^
+  "foreach($candidate in $candidates){" ^
+  "  if($candidate -ieq $targetDir){ continue }" ^
+  "  $candidateSite = Join-Path (Join-Path $repo $candidate) 'Lib\site-packages';" ^
+  "  if(-not (Test-Path $candidateSite)){ continue }" ^
+  "  if(-not (Test-Path (Join-Path $candidateSite 'pip'))){ continue }" ^
+  "  Write-Host ('Using offline bootstrap packages from ' + $candidate);" ^
+  "  foreach($item in Get-ChildItem -LiteralPath $candidateSite -Force){" ^
+  "    $name = $item.Name;" ^
+  "    $match = $false;" ^
+  "    foreach($pattern in $patterns){ if($name -like $pattern){ $match = $true; break } }" ^
+  "    if(-not $match){ continue }" ^
+  "    if($item.PSIsContainer){ Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $targetSite $name) -Recurse -Force } else { Copy-Item -LiteralPath $item.FullName -Destination $targetSite -Force }" ^
+  "  }" ^
+  "  $copied = $true;" ^
+  "  break" ^
+  "}" ^
+  "if(-not $copied){ exit 1 }"
 exit /b 0
