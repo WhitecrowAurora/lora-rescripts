@@ -133,8 +133,12 @@ class AnimaNetworkTrainer:
         counts: dict[str, int] = {}
         if hasattr(network, "text_encoder_loras"):
             counts["text_encoder"] = len(getattr(network, "text_encoder_loras"))
+        if hasattr(network, "text_encoder_norms"):
+            counts["text_encoder"] = counts.get("text_encoder", 0) + len(getattr(network, "text_encoder_norms"))
         if hasattr(network, "unet_loras"):
             counts["unet"] = len(getattr(network, "unet_loras"))
+        if hasattr(network, "unet_norms"):
+            counts["unet"] = counts.get("unet", 0) + len(getattr(network, "unet_norms"))
         return counts
 
     def validate_network_target_modules(self, args, network, train_text_encoder: bool, train_unet: bool):
@@ -233,7 +237,7 @@ class AnimaNetworkTrainer:
 
         if args.sample_prompts is not None:
             logger.info(f"cache Text Encoder outputs for sample prompts: {args.sample_prompts}")
-            prompts = train_util.load_prompts(args.sample_prompts)
+            prompts = anima_train_utils.load_sample_prompts_flexible(args.sample_prompts)
             cache = {}
             with accelerator.autocast(), torch.no_grad():
                 for prompt_dict in prompts:
@@ -249,19 +253,58 @@ class AnimaNetworkTrainer:
         text_encoders[0].to("cpu")
         clean_memory_on_device(accelerator.device)
 
-    def sample_images(self, accelerator, args, epoch, global_step, vae, text_encoder, dit, tokenize_strategy, text_encoding_strategy):
-        anima_train_utils.sample_images(
-            accelerator,
-            args,
-            epoch,
-            global_step,
-            dit,
-            vae,
-            text_encoder,
-            tokenize_strategy,
-            text_encoding_strategy,
-            self.sample_prompts_te_outputs,
-        )
+    def sample_images(
+        self,
+        accelerator,
+        args,
+        epoch,
+        global_step,
+        vae,
+        text_encoder,
+        dit,
+        tokenize_strategy,
+        text_encoding_strategy,
+        network=None,
+    ):
+        unwrapped_dit = accelerator.unwrap_model(dit)
+        unwrapped_network = accelerator.unwrap_model(network) if network is not None else None
+
+        text_encoder_modules = []
+        if isinstance(text_encoder, (list, tuple)):
+            text_encoder_modules = [accelerator.unwrap_model(module) for module in text_encoder if module is not None]
+        elif text_encoder is not None:
+            text_encoder_modules = [accelerator.unwrap_model(text_encoder)]
+
+        restore_states = []
+
+        def push_mode(module):
+            if module is None:
+                return
+            restore_states.append((module, module.training))
+            module.eval()
+
+        push_mode(unwrapped_dit)
+        push_mode(unwrapped_network)
+        push_mode(vae)
+        for module in text_encoder_modules:
+            push_mode(module)
+
+        try:
+            anima_train_utils.sample_images(
+                accelerator,
+                args,
+                epoch,
+                global_step,
+                dit,
+                vae,
+                text_encoder,
+                tokenize_strategy,
+                text_encoding_strategy,
+                self.sample_prompts_te_outputs,
+            )
+        finally:
+            for module, was_training in reversed(restore_states):
+                module.train(was_training)
 
     def get_noise_scheduler(self, args: argparse.Namespace, device: torch.device) -> Any:
         return sd3_train_utils.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=args.discrete_flow_shift)
@@ -509,6 +552,7 @@ class AnimaNetworkTrainer:
         args.text_encoder_lr = getattr(args, "text_encoder_lr", getattr(args, "learning_rate", None))
         args.unet_lr = getattr(args, "unet_lr", getattr(args, "learning_rate", None))
         args.network_dropout = getattr(args, "network_dropout", None)
+        args.validation_split = float(getattr(args, "validation_split", 0.0) or 0.0)
         args.torch_compile = bool(getattr(args, "torch_compile", False))
         args.dynamo_backend = str(getattr(args, "dynamo_backend", "inductor") or "inductor")
         args.opt_channels_last = bool(getattr(args, "opt_channels_last", False))
@@ -918,7 +962,10 @@ class AnimaNetworkTrainer:
 
         train_util.resume_from_local_or_hf_if_specified(accelerator, args)
         safeguard = train_util.create_training_safeguard(args)
-        ema_model = train_util.create_model_ema(args, [("network", accelerator.unwrap_model(network))])
+        ema_named_models = [("network", accelerator.unwrap_model(network))]
+        if hasattr(accelerator.unwrap_model(network), "get_extra_ema_modules"):
+            ema_named_models.extend(accelerator.unwrap_model(network).get_extra_ema_modules())
+        ema_model = train_util.create_model_ema(args, ema_named_models)
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -1009,6 +1056,7 @@ class AnimaNetworkTrainer:
             dit,
             tokenize_strategy,
             text_encoding_strategy,
+            network=network,
         )
         optimizer_train_fn()
         if len(accelerator.trackers) > 0:
@@ -1105,6 +1153,7 @@ class AnimaNetworkTrainer:
                         dit,
                         tokenize_strategy,
                         text_encoding_strategy,
+                        network=network,
                     )
 
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
@@ -1161,6 +1210,7 @@ class AnimaNetworkTrainer:
                 dit,
                 tokenize_strategy,
                 text_encoding_strategy,
+                network=network,
             )
             optimizer_train_fn()
 

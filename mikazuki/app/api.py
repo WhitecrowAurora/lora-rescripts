@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 import toml
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi.responses import FileResponse
 
 import mikazuki.process as process
 from mikazuki import launch_utils
@@ -23,9 +24,17 @@ from mikazuki.app.models import (APIResponse, APIResponseFail,
                                  CaptionBackupRestoreRequest,
                                  CaptionCleanupRequest,
                                  DatasetAnalysisRequest,
+                                 ImageResizeRequest,
                                  MaskedLossAuditRequest,
                                  TaggerInterrogateRequest)
 from mikazuki.log import log
+from mikazuki.tagger.llm import (
+    LLM_INTERROGATORS,
+    LLM_TEMPLATE_PRESETS,
+    get_llm_interrogator_meta,
+    is_llm_interrogator,
+    run_llm_interrogate,
+)
 from mikazuki.tagger.interrogator import (available_interrogators,
                                           on_interrogate)
 from mikazuki.tasks import tm
@@ -46,6 +55,12 @@ from mikazuki.utils.training_preflight import analyze_training_preflight
 from mikazuki.utils import train_utils
 from mikazuki.utils.dataset_analysis import analyze_dataset
 from mikazuki.utils.masked_loss_audit import analyze_masked_loss_dataset
+from mikazuki.utils.image_resize_runtime import (
+    build_image_resize_preview_manifest,
+    resolve_image_resize_file,
+    resolve_image_resize_path,
+    run_image_resize_job,
+)
 from mikazuki.utils.devices import (
     get_attention_runtime_mode,
     get_xformers_status,
@@ -225,7 +240,11 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
         except IOError:
             log.error(f"读取 {sample_prompt_file} 文件失败")
 
-    return positive_prompts, f'{positive_prompts} --n {negative_prompts}  --w {sample_width} --h {sample_height} --l {sample_cfg}  --s {sample_steps}  --d {sample_seed}'
+    sample_prompt = f'{positive_prompts} --n {negative_prompts}  --w {sample_width} --h {sample_height} --l {sample_cfg}  --s {sample_steps}'
+    normalized_seed = _normalize_preview_seed_value(sample_seed)
+    if normalized_seed is not None:
+        sample_prompt += f"  --d {normalized_seed}"
+    return positive_prompts, sample_prompt
 
 
 def read_prompt_text_file(path: str) -> str:
@@ -281,17 +300,91 @@ def apply_anima_ui_overrides(config: dict) -> None:
     if not model_train_type.startswith("anima"):
         return
 
+    def normalize_network_args(*values):
+        items = []
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    item_str = str(item).strip()
+                    if item_str:
+                        items.append(item_str)
+            else:
+                item_str = str(value).strip()
+                if item_str:
+                    items.append(item_str)
+        return items
+
+    def upsert_network_arg(args_list, key, value):
+        prefix = f"{key}="
+        filtered = [item for item in args_list if not str(item).startswith(prefix)]
+        if value is not None and str(value).strip() != "":
+            filtered.append(f"{key}={value}")
+        return filtered
+
+    def get_network_arg_value(args_list, key):
+        prefix = f"{key}="
+        for item in reversed(args_list):
+            item_str = str(item).strip()
+            if item_str.startswith(prefix):
+                return item_str.split("=", 1)[1].strip()
+        return None
+
     lora_type = str(config.pop("lora_type", "")).strip().lower()
-    if model_train_type == "anima-lora" and lora_type:
-        if lora_type == "lokr":
-            config["network_module"] = "lycoris.kohya"
-            config["lycoris_algo"] = "lokr"
-            config.pop("network_dropout", None)
+    network_args = normalize_network_args(config.get("network_args"), config.pop("network_args_custom", None))
+    raw_train_norm = config.pop("train_norm", None)
+    if raw_train_norm is None:
+        existing_train_norm = get_network_arg_value(network_args, "train_norm")
+        train_norm_enabled = parse_boolish(existing_train_norm) if existing_train_norm is not None else None
+    else:
+        train_norm_enabled = parse_boolish(raw_train_norm)
+    if model_train_type == "anima-lora" and not lora_type:
+        legacy_network_module = str(config.get("network_module", "")).strip().lower()
+        if legacy_network_module == "lycoris.kohya":
+            lora_type = "lokr"
+        elif str(get_network_arg_value(network_args, "algo") or "").strip().lower() == "lokr":
+            lora_type = "lokr"
         else:
-            config["network_module"] = "networks.lora_anima"
-            config.pop("lycoris_algo", None)
-            for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout", "train_norm"):
+            lora_type = "lora"
+    if model_train_type == "anima-lora" and lora_type:
+        config["network_module"] = "networks.lora_anima"
+        config.pop("lycoris_algo", None)
+
+        if lora_type == "lokr":
+            config["anima_adapter_type"] = "lokr"
+            legacy_factor = get_network_arg_value(network_args, "factor")
+            if legacy_factor not in (None, "") and "lokr_factor" not in config:
+                config["lokr_factor"] = legacy_factor
+            network_args = upsert_network_arg(network_args, "anima_adapter_type", "lokr")
+            network_args = upsert_network_arg(network_args, "lokr_factor", int(config.get("lokr_factor", 8) or 8))
+            if "dropout" in config:
+                config["network_dropout"] = config.get("dropout")
+            elif get_network_arg_value(network_args, "dropout") not in (None, ""):
+                try:
+                    config["network_dropout"] = float(get_network_arg_value(network_args, "dropout"))
+                except (TypeError, ValueError):
+                    config["network_dropout"] = 0
+            elif "network_dropout" not in config:
+                config["network_dropout"] = 0
+            for key in ("conv_dim", "conv_alpha"):
                 config.pop(key, None)
+            stale_prefixes = ("algo=", "factor=", "conv_dim=", "conv_alpha=", "train_norm=", "dropout=")
+            network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+        else:
+            config["anima_adapter_type"] = "lora"
+            network_args = upsert_network_arg(network_args, "anima_adapter_type", "lora")
+            network_args = [item for item in network_args if not str(item).startswith("lokr_factor=")]
+            for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
+                config.pop(key, None)
+
+        if train_norm_enabled is not None:
+            network_args = upsert_network_arg(network_args, "train_norm", "True" if train_norm_enabled else "False")
+
+    if network_args:
+        config["network_args"] = network_args
+    else:
+        config.pop("network_args", None)
 
     if "prefer_json_caption" in config:
         custom_attributes = config.get("custom_attributes")
@@ -399,6 +492,94 @@ def build_prompt_preview_text(content: str, max_lines: int = 3) -> Tuple[str, in
     return "\n".join(non_empty_lines[:max_lines]), len(non_empty_lines)
 
 
+def _has_prompt_cli_arg(line: str, flag: str) -> bool:
+    return re.search(rf"(?:^|\s)--{re.escape(flag)}(?:\s|$)", line, flags=re.IGNORECASE) is not None
+
+
+def should_use_inline_sample_prompts(sample_prompts: str, config: dict) -> bool:
+    sample_prompts = str(sample_prompts or "").strip()
+    if not sample_prompts:
+        return False
+    if os.path.isfile(sample_prompts):
+        return True
+
+    lines = [line.strip() for line in sample_prompts.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if len(lines) > 1:
+        return True
+
+    line = lines[0]
+    if " --" in line or line.startswith("--"):
+        return True
+
+    # A single plain prompt line is usually legacy/stale state when the user is
+    # actually using the dedicated positive/negative prompt fields below.
+    return not str(config.get("positive_prompts", "") or "").strip()
+
+
+def _normalize_preview_seed_value(value):
+    if value is None:
+        return None
+    try:
+        seed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return None if seed == 0 else seed
+
+
+def enrich_inline_sample_prompts(sample_prompts: str, config: dict) -> str:
+    lines = [line.strip() for line in str(sample_prompts or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    negative_prompt = str(config.get("negative_prompts", "") or "").strip()
+    sample_sampler = str(config.get("sample_sampler", "") or "").strip()
+    flow_shift = config.get("discrete_flow_shift", None)
+
+    try:
+        sample_width = int(config.get("sample_width", 0) or 0)
+    except (TypeError, ValueError):
+        sample_width = 0
+    try:
+        sample_height = int(config.get("sample_height", 0) or 0)
+    except (TypeError, ValueError):
+        sample_height = 0
+    try:
+        sample_cfg = float(config.get("sample_cfg", 0) or 0)
+    except (TypeError, ValueError):
+        sample_cfg = 0
+    try:
+        sample_steps = int(config.get("sample_steps", 0) or 0)
+    except (TypeError, ValueError):
+        sample_steps = 0
+
+    sample_seed = _normalize_preview_seed_value(config.get("sample_seed", None))
+
+    normalized_lines = []
+    for line in lines:
+        entry = line
+        if negative_prompt and not _has_prompt_cli_arg(entry, "n"):
+            entry += f" --n {negative_prompt}"
+        if sample_width > 0 and not _has_prompt_cli_arg(entry, "w"):
+            entry += f" --w {sample_width}"
+        if sample_height > 0 and not _has_prompt_cli_arg(entry, "h"):
+            entry += f" --h {sample_height}"
+        if sample_cfg > 0 and not _has_prompt_cli_arg(entry, "l"):
+            entry += f" --l {sample_cfg:g}"
+        if sample_steps > 0 and not _has_prompt_cli_arg(entry, "s"):
+            entry += f" --s {sample_steps}"
+        if sample_seed is not None and not _has_prompt_cli_arg(entry, "d"):
+            entry += f" --d {sample_seed}"
+        if sample_sampler and not _has_prompt_cli_arg(entry, "ss"):
+            entry += f" --ss {sample_sampler}"
+        if flow_shift not in (None, "") and not _has_prompt_cli_arg(entry, "fs"):
+            entry += f" --fs {flow_shift}"
+        normalized_lines.append(entry)
+
+    return "\n".join(normalized_lines)
+
+
 def build_sample_prompt_record(config: dict) -> Optional[dict]:
     enable_preview = parse_boolish(config.get("enable_preview"))
     notes: list[str] = []
@@ -427,7 +608,7 @@ def build_sample_prompt_record(config: dict) -> Optional[dict]:
         }
 
     legacy_sample_prompts = str(config.get("sample_prompts", "")).strip()
-    if legacy_sample_prompts:
+    if legacy_sample_prompts and should_use_inline_sample_prompts(legacy_sample_prompts, config):
         if str(config.get("positive_prompts", "")).strip():
             notes.append("多提示词轮换已启用，单提示词输入框会被忽略。")
         if os.path.isfile(legacy_sample_prompts):
@@ -445,18 +626,21 @@ def build_sample_prompt_record(config: dict) -> Optional[dict]:
                 "notes": notes + ["Using sample_prompts file."],
             }
 
-        preview, line_count = build_prompt_preview_text(legacy_sample_prompts)
+        enriched_sample_prompts = enrich_inline_sample_prompts(legacy_sample_prompts, config)
+        preview, line_count = build_prompt_preview_text(enriched_sample_prompts)
         return {
             "enabled": enable_preview,
             "source": "sample_prompts_inline",
             "detail": "Inline multi-prompt rotation",
             "preview": preview,
-            "content": legacy_sample_prompts,
+            "content": enriched_sample_prompts,
             "line_count": line_count,
             "suggested_file_name": build_sample_prompt_file_name(config),
             "warnings": warnings,
-            "notes": notes + ["Using inline sample_prompts text."],
+            "notes": notes + ["Using inline sample_prompts text with current preview defaults merged in when missing."],
         }
+    elif legacy_sample_prompts:
+        notes.append("检测到单行 sample_prompts 旧值；当前将优先使用下方单提示词字段，避免被残留值覆盖。")
 
     config_copy = dict(config)
     _, sample_prompt = get_sample_prompts(config_copy)
@@ -776,13 +960,13 @@ async def create_toml_file(request: Request):
         if not os.path.exists(prompt_file):
             return APIResponseFail(message=f"Prompt 文件 {prompt_file} 不存在，请检查路径。")
         config["sample_prompts"] = prompt_file
-    elif inline_sample_prompts:
+    elif inline_sample_prompts and should_use_inline_sample_prompts(inline_sample_prompts, config):
         if os.path.isfile(inline_sample_prompts):
             config["sample_prompts"] = inline_sample_prompts
         else:
             sample_prompts_file = str(autosave_dir / build_sample_prompt_file_name(config))
             with open(sample_prompts_file, "w", encoding="utf-8") as f:
-                normalized = "\n".join(line.strip() for line in inline_sample_prompts.splitlines() if line.strip())
+                normalized = enrich_inline_sample_prompts(inline_sample_prompts, config)
                 f.write(normalized)
             config["sample_prompts"] = sample_prompts_file
             log.info(f"Wrote inline sample_prompts to file {sample_prompts_file}")
@@ -949,18 +1133,77 @@ async def run_script(request: Request, background_tasks: BackgroundTasks):
     return APIResponseSuccess()
 
 
+@router.get("/image_resize/preview")
+async def get_image_resize_preview(input_dir: str, recursive: bool = False, limit: int = 8) -> APIResponse:
+    try:
+        manifest = build_image_resize_preview_manifest(
+            input_dir,
+            recursive=recursive,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Image resize preview manifest failed")
+        return APIResponseFail(message="Failed to load image preprocess preview / 图像预处理预览加载失败，请查看日志。")
+
+    return APIResponseSuccess(data=manifest)
+
+
+@router.get("/image_resize/file")
+async def get_image_resize_file(path: str):
+    try:
+        file_path = resolve_image_resize_file(path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f'Image not found: {exc.args[0]}') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return FileResponse(file_path)
+
+
+@router.post("/image_resize")
+async def run_image_resize(req: ImageResizeRequest, background_tasks: BackgroundTasks):
+    try:
+        input_dir = resolve_image_resize_path(req.input_dir)
+    except ValueError:
+        return APIResponseFail(message="Input folder is empty / 输入目录不能为空。")
+
+    if not input_dir.exists():
+        return APIResponseFail(message=f"Input folder does not exist / 输入目录不存在：{input_dir}")
+    if not input_dir.is_dir():
+        return APIResponseFail(message=f"Input path is not a folder / 输入路径不是文件夹：{input_dir}")
+
+    output_dir_raw = req.output_dir.strip()
+    if output_dir_raw:
+        try:
+            output_dir = resolve_image_resize_path(output_dir_raw)
+        except ValueError:
+            return APIResponseFail(message="Output folder is invalid / 输出目录无效。")
+        if output_dir.exists() and not output_dir.is_dir():
+            return APIResponseFail(message=f"Output path is not a folder / 输出路径不是文件夹：{output_dir}")
+
+    payload = req.model_dump()
+    if 'resize_mode' not in req.model_fields_set and req.exact_size:
+        payload['resize_mode'] = 'crop'
+    background_tasks.add_task(run_image_resize_job, payload)
+    return APIResponseSuccess(message="Image preprocessing task submitted / 图像预处理任务已提交。")
+
+
 @router.post("/interrogate")
 async def run_interrogate(req: TaggerInterrogateRequest, background_tasks: BackgroundTasks):
-    try:
-        import onnxruntime  # noqa: F401
-    except ImportError:
-        return APIResponseFail(message="onnxruntime is not installed, please reinstall dependencies and try again.")
-
     batch_path = req.path.strip()
     if not batch_path:
         return APIResponseFail(message="Input folder is empty / 输入的图片文件夹为空。")
     if not os.path.isdir(batch_path):
         return APIResponseFail(message="Input path is not a valid folder / 输入路径不是有效文件夹。")
+
+    use_llm_interrogator = is_llm_interrogator(req.interrogator_model)
+    if not use_llm_interrogator:
+        try:
+            import onnxruntime  # noqa: F401
+        except ImportError:
+            return APIResponseFail(message="onnxruntime is not installed, please reinstall dependencies and try again.")
 
     response_warnings: list[str] = []
     backup_result = None
@@ -974,32 +1217,56 @@ async def run_interrogate(req: TaggerInterrogateRequest, background_tasks: Backg
         )
         response_warnings.extend(backup_warnings)
 
-    interrogator = available_interrogators.get(req.interrogator_model, available_interrogators["wd14-convnextv2-v2"])
-    background_tasks.add_task(
-        on_interrogate,
-        image=None,
-        batch_input_glob=batch_path,
-        batch_input_recursive=req.batch_input_recursive,
-        batch_output_dir="",
-        batch_output_filename_format="[name].[output_extension]",
-        batch_output_action_on_conflict=req.batch_output_action_on_conflict,
-        batch_remove_duplicated_tag=True,
-        batch_output_save_json=False,
-        interrogator=interrogator,
-        threshold=req.threshold,
-        character_threshold=req.character_threshold,
-        add_rating_tag=req.add_rating_tag,
-        add_model_tag=req.add_model_tag,
-        additional_tags=req.additional_tags,
-        exclude_tags=req.exclude_tags,
-        sort_by_alphabetical_order=False,
-        add_confident_as_weight=False,
-        replace_underscore=req.replace_underscore,
-        replace_underscore_excludes=req.replace_underscore_excludes,
-        escape_tag=req.escape_tag,
-        unload_model_after_running=True
-    )
-    message = f"Batch interrogate started for {batch_path}"
+    if use_llm_interrogator:
+        llm_meta = get_llm_interrogator_meta(req.interrogator_model)
+        llm_api_key = req.llm_api_key.strip()
+        llm_model = req.llm_model.strip()
+        if not llm_api_key:
+            return APIResponseFail(message="LLM API Key is empty / LLM API Key 不能为空。")
+        if not llm_model:
+            return APIResponseFail(message="LLM model is empty / LLM 模型名称不能为空。")
+        if req.interrogator_model == "llm-custom" and not req.llm_api_base.strip():
+            return APIResponseFail(message="Custom API Base URL is empty / 自定义 API 地址不能为空。")
+
+        background_tasks.add_task(run_llm_interrogate, req.model_dump())
+        llm_api_style = req.llm_api_style if req.interrogator_model == "llm-custom" else llm_meta.get("api_style", req.interrogator_model)
+        llm_template_preset = (req.llm_template_preset or "anime-tags").strip() or "anime-tags"
+        message = (
+            f"LLM batch interrogate started for {batch_path} "
+            f"({llm_api_style} / {llm_model} / preset={llm_template_preset})"
+        )
+        if req.llm_output_mode == "raw_text":
+            response_warnings.append(
+                "LLM raw_text mode writes the model response directly and does not apply tag post-processing."
+            )
+    else:
+        interrogator = available_interrogators.get(req.interrogator_model, available_interrogators["wd14-convnextv2-v2"])
+        background_tasks.add_task(
+            on_interrogate,
+            image=None,
+            batch_input_glob=batch_path,
+            batch_input_recursive=req.batch_input_recursive,
+            batch_output_dir="",
+            batch_output_filename_format="[name].[output_extension]",
+            batch_output_action_on_conflict=req.batch_output_action_on_conflict,
+            batch_remove_duplicated_tag=True,
+            batch_output_save_json=False,
+            interrogator=interrogator,
+            threshold=req.threshold,
+            character_threshold=req.character_threshold,
+            add_rating_tag=req.add_rating_tag,
+            add_model_tag=req.add_model_tag,
+            additional_tags=req.additional_tags,
+            exclude_tags=req.exclude_tags,
+            sort_by_alphabetical_order=False,
+            add_confident_as_weight=False,
+            replace_underscore=req.replace_underscore,
+            replace_underscore_excludes=req.replace_underscore_excludes,
+            escape_tag=req.escape_tag,
+            unload_model_after_running=True
+        )
+        message = f"Batch interrogate started for {batch_path}"
+
     if backup_result is not None:
         message = f"{message} Created backup {backup_result['archive_name']} first."
     elif response_warnings:
@@ -1054,14 +1321,35 @@ async def get_interrogators() -> APIResponse:
     default_interrogator = TaggerInterrogateRequest.model_fields["interrogator_model"].default
     return APIResponseSuccess(data={
         "default": default_interrogator,
-        "interrogators": [
+        "interrogators": (
+            [
+                {
+                    "name": name,
+                    "kind": "cl" if name.startswith("cl_") else "wd",
+                    "repo_id": getattr(interrogator, "repo_id", None),
+                    "is_default": name == default_interrogator,
+                }
+                for name, interrogator in available_interrogators.items()
+            ]
+            + [
+                {
+                    "name": name,
+                    "kind": meta["kind"],
+                    "repo_id": None,
+                    "api_style": meta["api_style"],
+                    "default_api_base": meta["default_api_base"],
+                    "is_default": False,
+                }
+                for name, meta in LLM_INTERROGATORS.items()
+            ]
+        ),
+        "llm_template_presets": [
             {
-                "name": name,
-                "kind": "cl" if name.startswith("cl_") else "wd",
-                "repo_id": getattr(interrogator, "repo_id", None),
-                "is_default": name == default_interrogator,
+                "id": preset["id"],
+                "label": preset["label"],
+                "output_mode": preset["output_mode"],
             }
-            for name, interrogator in available_interrogators.items()
+            for preset in LLM_TEMPLATE_PRESETS.values()
         ],
     })
 
@@ -1467,3 +1755,8 @@ async def get_available_scripts() -> APIResponse:
             for script_name in avaliable_scripts
         ]
     })
+
+
+
+
+

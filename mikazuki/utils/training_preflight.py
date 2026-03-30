@@ -57,6 +57,25 @@ def parse_optional_float(value) -> Optional[float]:
     return None
 
 
+def get_anima_adapter_type(payload: dict) -> str:
+    adapter_type = str(payload.get("anima_adapter_type", "")).strip().lower()
+    if adapter_type:
+        return adapter_type
+
+    network_args = payload.get("network_args")
+    if isinstance(network_args, (list, tuple)):
+        for item in network_args:
+            item_str = str(item).strip()
+            if item_str.startswith("anima_adapter_type="):
+                return item_str.split("=", 1)[1].strip().lower()
+
+    network_module = str(payload.get("network_module", "")).strip().lower()
+    if network_module == "lycoris.kohya":
+        return "lokr"
+
+    return "lora"
+
+
 def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list[str], warnings: list[str], notes: list[str]) -> None:
     if not training_type.startswith("anima"):
         return
@@ -116,9 +135,13 @@ def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list
         warnings.append("Anima preview scheduler currently falls back to simple. / 当前 Anima 预览调度器仅支持 simple，其他值会自动回退。")
 
     if training_type == "anima-lora":
-        network_module = str(payload.get("network_module", "")).strip().lower()
-        if network_module == "lycoris.kohya":
-            notes.append("Anima adapter mode: LoKr / LyCORIS.")
+        adapter_type = get_anima_adapter_type(payload)
+        if adapter_type == "lokr":
+            notes.append("Anima adapter mode: LoKr (built-in linear-layer injection).")
+            warnings.append(
+                "Anima LoKr currently uses the built-in linear-layer injection path in lora_anima, not the kohya LyCORIS route. "
+                "/ 当前 Anima LoKr 走的是内置线性层注入实现，不是 kohya 的 LyCORIS 训练链。"
+            )
         else:
             notes.append("Anima adapter mode: LoRA.")
 

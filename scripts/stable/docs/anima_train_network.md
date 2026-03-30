@@ -337,6 +337,8 @@ By default, the following modules are excluded from LoRA via the built-in exclud
 .*(_modulation|_norm|_embedder|final_layer).*
 ```
 
+If you enable `train_norm=True`, norm modules are no longer excluded by default. Instead, the trainer will directly optimize norm layers that actually have trainable affine / weight parameters (for example RMSNorm or affine LayerNorm). Norm layers without trainable parameters are still skipped automatically.
+
 You can customize which modules are included or excluded using regex patterns in `--network_args`:
 
 * `exclude_patterns` - Exclude modules matching these patterns (in addition to the default exclusion).
@@ -382,6 +384,7 @@ In preliminary tests, lowering the learning rate for the LLM Adapter seems to im
 
 ### 5.4. Other Network Args / その他のネットワーク引数
 
+* `--network_args "train_norm=True"` - Additionally train norm layers with actual trainable parameters. This is most useful when you want LoRA / LoKr on linear layers plus direct tuning of RMSNorm / affine LayerNorm weights.
 * `--network_args "verbose=True"` - Print all LoRA module names and their dimensions.
 * `--network_args "rank_dropout=0.1"` - Rank dropout rate.
 * `--network_args "module_dropout=0.1"` - Module dropout rate.

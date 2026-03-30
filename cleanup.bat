@@ -12,6 +12,9 @@ cd /d "%~dp0"
 set "PYTHON_EXE=%~dp0python\python.exe"
 set "TAGEDITOR_PYTHON_EXE=%~dp0python_tageditor\python.exe"
 set "BLACKWELL_PYTHON_EXE=%~dp0python_blackwell\python.exe"
+set "MAIN_RUNTIME_DIR=python"
+set "TAGEDITOR_RUNTIME_DIR=python_tageditor"
+set "BLACKWELL_RUNTIME_DIR=python_blackwell"
 set "SAGEATTENTION_DIR_PRIMARY=python-sageattention"
 set "SAGEATTENTION_DIR_LEGACY=python_sageattention"
 set "SAGEATTENTION2_DIR_PRIMARY=python-sageattention-latest"
@@ -30,6 +33,15 @@ if exist "logs" rmdir /s /q "logs" 2>nul
 if exist "config\autosave" rmdir /s /q "config\autosave" 2>nul
 if exist "tmp" rmdir /s /q "tmp" 2>nul
 if exist "frontend\.vitepress\cache" rmdir /s /q "frontend\.vitepress\cache" 2>nul
+call :clear_runtime_cache "%MAIN_RUNTIME_DIR%"
+call :clear_runtime_cache "%TAGEDITOR_RUNTIME_DIR%"
+call :clear_runtime_cache "%BLACKWELL_RUNTIME_DIR%"
+call :clear_runtime_cache "%SAGEATTENTION_DIR_PRIMARY%"
+call :clear_runtime_cache "%SAGEATTENTION_DIR_LEGACY%"
+call :clear_runtime_cache "%SAGEATTENTION2_DIR_PRIMARY%"
+call :clear_runtime_cache "%SAGEATTENTION2_DIR_LEGACY%"
+call :clear_runtime_cache "%SAGEATTENTION_BLACKWELL_DIR_PRIMARY%"
+call :clear_runtime_cache "%SAGEATTENTION_BLACKWELL_DIR_LEGACY%"
 
 mkdir "logs" 2>nul
 mkdir "config\autosave" 2>nul
@@ -131,13 +143,21 @@ if /i "%SLIM_SAGEATTENTION%"=="Y" (
 
 echo.
 echo Cleanup summary:
-echo - Always cleared: __pycache__, *.pyc, logs, config\autosave, tmp, frontend\.vitepress\cache
+echo - Always cleared: __pycache__, *.pyc, logs, config\autosave, tmp, frontend\.vitepress\cache, embedded runtime .cache / torch_compile_debug
 echo - Optional: output, huggingface cache/config, main python deps, tag editor deps, blackwell python deps, SageAttention python deps
 echo - Main/Blackwell python slimming also removes xformers and will require reinstall on next startup
 echo - SageAttention python slimming removes triton / sageattention and will require reinstall on next startup
 echo - Main remaining bulky folder should drop massively after choosing Y for main python slimming
 echo.
 pause
+exit /b 0
+
+:clear_runtime_cache
+set "CACHE_RUNTIME_DIR=%~1"
+if "%CACHE_RUNTIME_DIR%"=="" exit /b 0
+if not exist "%~dp0%CACHE_RUNTIME_DIR%" exit /b 0
+if exist "%CACHE_RUNTIME_DIR%\.cache" rmdir /s /q "%CACHE_RUNTIME_DIR%\.cache" 2>nul
+if exist "%CACHE_RUNTIME_DIR%\torch_compile_debug" rmdir /s /q "%CACHE_RUNTIME_DIR%\torch_compile_debug" 2>nul
 exit /b 0
 
 :slim_python_runtime

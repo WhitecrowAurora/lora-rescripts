@@ -24,12 +24,35 @@ class TaggerInterrogateRequest(BaseModel):
     exclude_tags: str = ""
     escape_tag: bool = True
     batch_input_recursive: bool = False
-    batch_output_action_on_conflict: Literal["ignore", "copy", "prepend"] = "ignore"
+    batch_output_action_on_conflict: Literal["ignore", "copy", "prepend", "append"] = "ignore"
     create_backup_before_write: bool = False
     backup_snapshot_name: str = ""
     replace_underscore: bool = True
     replace_underscore_excludes: str = Field(
         default="0_0, (o)_(o), +_+, +_-, ._., <o>_<o>, <|>_<|>, =_=, >_<, 3_3, 6_9, >_o, @_@, ^_^, o_o, u_u, x_x, |_|, ||_||"
+    )
+    llm_api_base: str = ""
+    llm_api_style: Literal["openai-compatible", "claude-compatible"] = "openai-compatible"
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_template_preset: str = "anime-tags"
+    llm_system_prompt: str = ""
+    llm_user_template: str = ""
+    llm_output_mode: Literal["auto", "tags", "raw_text"] = "auto"
+    llm_temperature: float = Field(
+        default=0.2,
+        ge=0,
+        le=2,
+    )
+    llm_max_tokens: int = Field(
+        default=300,
+        ge=1,
+        le=8192,
+    )
+    llm_timeout: int = Field(
+        default=120,
+        ge=5,
+        le=600,
     )
 
 
@@ -96,6 +119,36 @@ class CaptionBackupRestoreRequest(BaseModel):
     path: str = Field(min_length=1)
     archive_name: str = Field(min_length=1)
     make_restore_backup: bool = True
+
+
+class ImageResizeRequest(BaseModel):
+    input_dir: str = Field(min_length=1)
+    output_dir: str = ""
+    format: Literal["ORIGINAL", "JPEG", "WEBP", "PNG"] = "ORIGINAL"
+    quality: int = Field(
+        default=95,
+        ge=1,
+        le=100,
+    )
+    resolutions: str = ""
+    enable_resize: bool = True
+    resize_mode: Literal["fit", "crop", "pad"] = "fit"
+    exact_size: bool = False
+    crop_anchor_x: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+    )
+    crop_anchor_y: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+    )
+    pad_color: str = "#ffffff"
+    recursive: bool = False
+    rename: bool = False
+    delete_original: bool = False
+    sync_metadata: bool = True
 
 
 class APIResponse(BaseModel):

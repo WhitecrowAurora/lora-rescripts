@@ -696,6 +696,10 @@ def do_sample(
     latent_w = width // 8
     latent = torch.zeros(1, 16, 1, latent_h, latent_w, device=device, dtype=dtype)
 
+    # UI treats seed=0 as random preview generation.
+    if seed == 0:
+        seed = None
+
     # Generate noise
     if seed is not None:
         generator = torch.manual_seed(seed)
@@ -741,6 +745,21 @@ def do_sample(
     return x
 
 
+def load_sample_prompts_flexible(sample_prompts: str):
+    sample_prompts = str(sample_prompts or "").strip()
+    if not sample_prompts:
+        return []
+
+    if os.path.isfile(sample_prompts):
+        return train_util.load_prompts(sample_prompts)
+
+    lines = [line.strip() for line in sample_prompts.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    return [{"prompt": line} for line in lines]
+
+
 def sample_images(
     accelerator: Accelerator,
     args: argparse.Namespace,
@@ -772,8 +791,9 @@ def sample_images(
                 return
 
     logger.info(f"Generating sample images at step {steps}")
-    if not os.path.isfile(args.sample_prompts) and sample_prompts_te_outputs is None:
-        logger.error(f"No prompt file: {args.sample_prompts}")
+    prompts = load_sample_prompts_flexible(args.sample_prompts)
+    if len(prompts) == 0:
+        logger.error(f"No sample prompts available: {args.sample_prompts}")
         return
 
     # Unwrap models
@@ -783,7 +803,6 @@ def sample_images(
 
     dit.switch_block_swap_for_inference()
 
-    prompts = train_util.load_prompts(args.sample_prompts)
     save_dir = os.path.join(args.output_dir, "sample")
     os.makedirs(save_dir, exist_ok=True)
 
@@ -833,6 +852,67 @@ def _decoded_tensor_to_pil_image(decoded: torch.Tensor) -> Image.Image:
     return Image.fromarray(decoded_np)
 
 
+def _analyze_decoded_image_health(decoded: torch.Tensor) -> dict:
+    image = decoded.detach().float()
+    image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)
+    if image.ndim == 5:
+        image = image[:, :, 0, :, :]
+    if image.ndim == 4:
+        image = image[0]
+
+    min_value = float(image.min().item())
+    max_value = float(image.max().item())
+    mean_value = float(image.mean().item())
+    std_value = float(image.std(unbiased=False).item())
+    dynamic_range = max_value - min_value
+    low_ratio = float((image < 0.08).float().mean().item())
+    high_ratio = float((image > 0.92).float().mean().item())
+
+    suspicious_reasons = []
+    if std_value < 0.045:
+        suspicious_reasons.append(f"very_low_std={std_value:.4f}")
+    if dynamic_range < 0.18:
+        suspicious_reasons.append(f"low_dynamic_range={dynamic_range:.4f}")
+    if low_ratio > 0.88:
+        suspicious_reasons.append(f"mostly_dark={low_ratio:.2%}")
+    if high_ratio > 0.88:
+        suspicious_reasons.append(f"mostly_bright={high_ratio:.2%}")
+
+    return {
+        "min": min_value,
+        "max": max_value,
+        "mean": mean_value,
+        "std": std_value,
+        "dynamic_range": dynamic_range,
+        "low_ratio": low_ratio,
+        "high_ratio": high_ratio,
+        "suspicious": len(suspicious_reasons) > 0,
+        "reasons": suspicious_reasons,
+    }
+
+
+def _warn_if_preview_looks_suspicious(args: argparse.Namespace, image_stats: dict, *, context: str, likely_early: bool = False) -> None:
+    if not image_stats.get("suspicious", False):
+        return
+
+    warned_count = int(getattr(args, "_anima_preview_health_warning_count", 0) or 0)
+    if warned_count >= 3:
+        if warned_count == 3:
+            logger.warning(
+                "More suspicious Anima preview images were detected. Additional warnings will be suppressed for this run."
+            )
+            setattr(args, "_anima_preview_health_warning_count", warned_count + 1)
+        return
+
+    reason_text = ", ".join(image_stats.get("reasons", [])) or "low-detail image statistics"
+    early_note = " This may happen very early in training, but" if likely_early else ""
+    logger.warning(
+        f"Suspicious Anima preview image detected ({context}): {reason_text}."
+        f"{early_note} if this keeps happening, please check VAE compatibility, clear latent/text cache, and verify preview sampling settings."
+    )
+    setattr(args, "_anima_preview_health_warning_count", warned_count + 1)
+
+
 def run_vae_roundtrip_self_check(
     args: argparse.Namespace,
     accelerator: Accelerator,
@@ -869,11 +949,22 @@ def run_vae_roundtrip_self_check(
                 raise RuntimeError("VAE roundtrip produced non-finite decoded pixels")
 
         mse = torch.mean((recon.float() - pixels.float()) ** 2).item()
+        recon_stats = _analyze_decoded_image_health(recon)
         save_dir = os.path.join(args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, "vae_roundtrip.png")
         _decoded_tensor_to_pil_image(recon).save(save_path)
         logger.info(f"VAE roundtrip self-check saved: {save_path} (mse={mse:.6f})")
+
+        suspicious_vae = mse > 0.08 or recon_stats["suspicious"]
+        if suspicious_vae:
+            reason_parts = [f"mse={mse:.6f}"]
+            reason_parts.extend(recon_stats.get("reasons", []))
+            logger.warning(
+                "VAE roundtrip self-check looks suspicious: "
+                + ", ".join(reason_parts)
+                + ". If training previews or saved samples look blurry / blocky / washed out, please first verify that the selected VAE matches the Anima base model and clear stale latent caches before retraining."
+            )
     except Exception as e:
         logger.warning(f"VAE roundtrip self-check failed. If training previews or samples look corrupted, please check the VAE first: {e}")
     finally:
@@ -938,6 +1029,8 @@ def _sample_image_inference(
     height = prompt_dict.get("height", 512)
     scale = prompt_dict.get("scale", 7.5)
     seed = prompt_dict.get("seed")
+    if seed == 0:
+        seed = None
     flow_shift = prompt_dict.get("flow_shift", getattr(args, "discrete_flow_shift", 3.0) or 3.0)
     sample_sampler = prompt_dict.get("sample_sampler", getattr(args, "sample_sampler", "euler"))
     sample_scheduler = getattr(args, "sample_scheduler", "simple")
@@ -1057,6 +1150,7 @@ def _sample_image_inference(
     clean_memory_on_device(accelerator.device)
 
     # Convert to image
+    image_stats = _analyze_decoded_image_health(decoded)
     image = _decoded_tensor_to_pil_image(decoded)
 
     ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
@@ -1065,6 +1159,15 @@ def _sample_image_inference(
     i = prompt_dict.get("enum", 0)
     img_filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{ts_str}{seed_suffix}.png"
     image.save(os.path.join(save_dir, img_filename))
+
+    max_train_steps = int(getattr(args, "max_train_steps", 0) or 0)
+    likely_early = bool(max_train_steps > 0 and steps is not None and steps <= max(20, int(max_train_steps * 0.15)))
+    _warn_if_preview_looks_suspicious(
+        args,
+        image_stats,
+        context=f"step={steps}, file={img_filename}",
+        likely_early=likely_early,
+    )
 
     # Log to wandb if enabled
     if "wandb" in [tracker.name for tracker in accelerator.trackers]:
