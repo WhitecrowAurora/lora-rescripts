@@ -1843,7 +1843,7 @@ class BaseDataset(torch.utils.data.Dataset):
         example = {}
         example["custom_attributes"] = custom_attributes  # may be list of empty dict
         example["loss_weights"] = torch.FloatTensor(loss_weights)
-        example["text_encoder_outputs_list"] = none_or_stack_elements(text_encoder_outputs_list, torch.FloatTensor)
+        example["text_encoder_outputs_list"] = none_or_stack_elements(text_encoder_outputs_list, torch.as_tensor)
         example["input_ids_list"] = none_or_stack_elements(input_ids_list, lambda x: x)
 
         # if one of alpha_masks is not None, we need to replace None with ones

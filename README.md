@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.0.9**
+**v1.1.5 Beta10**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -53,6 +53,13 @@ SD-reScripts is a maintained fork / continuation of LoRA-scripts (a.k.a. SD-Trai
 LoRA & Dreambooth training GUI & scripts preset & one key training environment for [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts.git)
 
 ## Recent Updates
+
+### v1.1.5 Beta10
+
+- improved Anima training throughput and runtime stability with lighter cache handling, better tensor transfer paths, and clearer runtime diagnostics
+- improved SageAttention real-world performance visibility for Anima, with step profiler support and more transparent backend summary logging
+- fixed multiple Anima edge cases around preview prompts, empty token paths, legacy text cache rebuilding, and `save_every_n_epochs=0`
+- added advanced Anima debug options for profiler window and NaN check interval tuning
 
 ### v1.0.9
 

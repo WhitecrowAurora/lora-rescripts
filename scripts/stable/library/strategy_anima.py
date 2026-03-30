@@ -50,22 +50,49 @@ class AnimaTokenizeStrategy(TokenizeStrategy):
         self.t5_tokenizer = t5_tokenizer
         self.t5_max_length = t5_max_length
 
+    @staticmethod
+    def _resolve_fallback_token_id(tokenizer) -> int:
+        token_id = getattr(tokenizer, "eos_token_id", None)
+        if token_id is None:
+            token_id = getattr(tokenizer, "pad_token_id", None)
+        if token_id is None:
+            token_id = 0
+        return int(token_id)
+
+    def _ensure_min_sequence_length(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, tokenizer) -> Tuple[torch.Tensor, torch.Tensor]:
+        if input_ids.ndim != 2 or attention_mask.ndim != 2:
+            return input_ids.long(), attention_mask.long()
+        if input_ids.shape[1] > 0:
+            return input_ids.long(), attention_mask.long()
+
+        batch_size = input_ids.shape[0]
+        fallback_token_id = self._resolve_fallback_token_id(tokenizer)
+        input_ids = torch.full((batch_size, 1), fallback_token_id, dtype=torch.long)
+        attention_mask = torch.ones((batch_size, 1), dtype=torch.long)
+        return input_ids, attention_mask
+
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
         text = [text] if isinstance(text, str) else text
 
         # Tokenize with Qwen3
         qwen3_encoding = self.qwen3_tokenizer.batch_encode_plus(
-            text, return_tensors="pt", truncation=True, padding="max_length", max_length=self.qwen3_max_length
+            text, return_tensors="pt", truncation=True, padding=True, max_length=self.qwen3_max_length
         )
-        qwen3_input_ids = qwen3_encoding["input_ids"]
-        qwen3_attn_mask = qwen3_encoding["attention_mask"]
+        qwen3_input_ids, qwen3_attn_mask = self._ensure_min_sequence_length(
+            qwen3_encoding["input_ids"],
+            qwen3_encoding["attention_mask"],
+            self.qwen3_tokenizer,
+        )
 
         # Tokenize with T5 (for LLM Adapter target tokens)
         t5_encoding = self.t5_tokenizer.batch_encode_plus(
-            text, return_tensors="pt", truncation=True, padding="max_length", max_length=self.t5_max_length
+            text, return_tensors="pt", truncation=True, padding=True, max_length=self.t5_max_length
         )
-        t5_input_ids = t5_encoding["input_ids"]
-        t5_attn_mask = t5_encoding["attention_mask"]
+        t5_input_ids, t5_attn_mask = self._ensure_min_sequence_length(
+            t5_encoding["input_ids"],
+            t5_encoding["attention_mask"],
+            self.t5_tokenizer,
+        )
         return [qwen3_input_ids, qwen3_attn_mask, t5_input_ids, t5_attn_mask]
 
 
@@ -98,8 +125,8 @@ class AnimaTextEncodingStrategy(TextEncodingStrategy):
 
         encoder_device = qwen3_text_encoder.device
 
-        qwen3_input_ids = qwen3_input_ids.to(encoder_device)
-        qwen3_attn_mask = qwen3_attn_mask.to(encoder_device)
+        qwen3_input_ids = qwen3_input_ids.to(encoder_device, dtype=torch.long)
+        qwen3_attn_mask = qwen3_attn_mask.to(encoder_device, dtype=torch.long)
         outputs = qwen3_text_encoder(input_ids=qwen3_input_ids, attention_mask=qwen3_attn_mask)
         prompt_embeds = outputs.last_hidden_state
         prompt_embeds[~qwen3_attn_mask.bool()] = 0
@@ -155,6 +182,8 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
     """
 
     ANIMA_TEXT_ENCODER_OUTPUTS_NPZ_SUFFIX = "_anima_te.npz"
+    CACHE_FORMAT_VERSION = 2
+    _cache_upgrade_notice_logged = False
 
     def __init__(
         self,
@@ -188,11 +217,29 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
                 return False
             if "caption_dropout_rate" not in npz:
                 return False
+            if "cache_format_version" not in npz:
+                self._log_cache_upgrade_notice(npz_path)
+                return False
+            if int(np.array(npz["cache_format_version"]).item()) != self.CACHE_FORMAT_VERSION:
+                self._log_cache_upgrade_notice(npz_path)
+                return False
         except Exception as e:
             logger.error(f"Error loading file: {npz_path}")
             raise e
 
         return True
+
+    @classmethod
+    def _log_cache_upgrade_notice(cls, npz_path: str) -> None:
+        if cls._cache_upgrade_notice_logged:
+            return
+        cls._cache_upgrade_notice_logged = True
+        logger.info(
+            f"Detected legacy Anima text cache format at {npz_path}. The cache will be rebuilt once to enable variable-length text caching."
+        )
+        logger.info(
+            f"检测到旧版 Anima 文本缓存格式：{npz_path}。系统会自动重建一次缓存，以启用变长文本缓存加速。"
+        )
 
     def load_outputs_npz(self, npz_path: str) -> List[np.ndarray]:
         data = np.load(npz_path)
@@ -202,6 +249,37 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         t5_attn_mask = data["t5_attn_mask"]
         caption_dropout_rate = data["caption_dropout_rate"]
         return [prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask, caption_dropout_rate]
+
+    @staticmethod
+    def _get_effective_length(mask: np.ndarray) -> int:
+        if mask.ndim == 0:
+            return 1
+
+        flat_mask = np.asarray(mask).reshape(-1)
+        nonzero = np.flatnonzero(flat_mask)
+        if nonzero.size == 0:
+            return 1 if flat_mask.shape[0] > 0 else 0
+        return int(nonzero[-1]) + 1
+
+    @classmethod
+    def _trim_cached_outputs(
+        cls,
+        prompt_embeds: np.ndarray,
+        attn_mask: np.ndarray,
+        t5_input_ids: np.ndarray,
+        t5_attn_mask: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        prompt_length = min(prompt_embeds.shape[0], cls._get_effective_length(attn_mask))
+        t5_length = min(t5_input_ids.shape[0], cls._get_effective_length(t5_attn_mask))
+
+        prompt_length = max(prompt_length, 1)
+        t5_length = max(t5_length, 1)
+
+        trimmed_prompt_embeds = np.ascontiguousarray(prompt_embeds[:prompt_length])
+        trimmed_attn_mask = np.ascontiguousarray(attn_mask[:prompt_length])
+        trimmed_t5_input_ids = np.ascontiguousarray(t5_input_ids[:t5_length])
+        trimmed_t5_attn_mask = np.ascontiguousarray(t5_attn_mask[:t5_length])
+        return trimmed_prompt_embeds, trimmed_attn_mask, trimmed_t5_input_ids, trimmed_t5_attn_mask
 
     def cache_batch_outputs(
         self,
@@ -228,10 +306,12 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         t5_attn_mask = t5_attn_mask.cpu().numpy().astype(np.int32)
 
         for i, info in enumerate(infos):
-            prompt_embeds_i = prompt_embeds[i]
-            attn_mask_i = attn_mask[i]
-            t5_input_ids_i = t5_input_ids[i]
-            t5_attn_mask_i = t5_attn_mask[i]
+            prompt_embeds_i, attn_mask_i, t5_input_ids_i, t5_attn_mask_i = self._trim_cached_outputs(
+                prompt_embeds[i],
+                attn_mask[i],
+                t5_input_ids[i],
+                t5_attn_mask[i],
+            )
             caption_dropout_rate = torch.tensor(info.caption_dropout_rate, dtype=torch.float32)
 
             if self.cache_to_disk:
@@ -242,6 +322,7 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
                     t5_input_ids=t5_input_ids_i,
                     t5_attn_mask=t5_attn_mask_i,
                     caption_dropout_rate=caption_dropout_rate,
+                    cache_format_version=np.array(self.CACHE_FORMAT_VERSION, dtype=np.int32),
                 )
             else:
                 info.text_encoder_outputs = (prompt_embeds_i, attn_mask_i, t5_input_ids_i, t5_attn_mask_i, caption_dropout_rate)

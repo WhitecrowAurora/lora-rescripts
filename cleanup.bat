@@ -83,6 +83,7 @@ echo.
 echo [4/7] Slim bundled main Python packages for distribution? (Y/N, default N)
 echo This will physically remove installed runtime packages like torch / torchvision / xformers / diffusers / transformers / numpy / scipy / onnxruntime.
 echo It keeps only pip / setuptools / wheel bootstrap components so first startup can auto-install dependencies again.
+echo It does not delete the python folder itself; only Lib\site-packages / Scripts / share payload is slimmed.
 set /p "SLIM_MAIN=: "
 if /i "%SLIM_MAIN%"=="Y" (
     if not exist "%PYTHON_EXE%" (
@@ -98,6 +99,7 @@ echo.
 echo [5/7] Slim bundled tag editor Python packages too? (Y/N, default N)
 echo This will physically remove gradio / transformers / timm / torch and other tag editor runtime packages.
 echo It keeps only pip / setuptools / wheel bootstrap components.
+echo It does not delete the python_tageditor folder itself; only runtime payload is slimmed.
 set /p "SLIM_TAGEDITOR=: "
 if /i "%SLIM_TAGEDITOR%"=="Y" (
     if not exist "%TAGEDITOR_PYTHON_EXE%" (
@@ -113,6 +115,7 @@ echo.
 echo [6/7] Slim bundled Blackwell Python packages too? (Y/N, default N)
 echo This will physically remove torch / torchvision / xformers and other Blackwell runtime packages.
 echo It keeps only pip / setuptools / wheel bootstrap components.
+echo It does not delete the python_blackwell folder itself; only runtime payload is slimmed.
 set /p "SLIM_BLACKWELL=: "
 if /i "%SLIM_BLACKWELL%"=="Y" (
     if not exist "%BLACKWELL_PYTHON_EXE%" (
@@ -128,6 +131,7 @@ echo.
 echo [7/7] Slim bundled SageAttention Python packages too? (Y/N, default N)
 echo This will physically remove torch / torchvision / triton / sageattention and other SageAttention runtime packages.
 echo It keeps only pip / setuptools / wheel bootstrap components.
+echo It does not delete the SageAttention runtime folders themselves; only runtime payload is slimmed.
 echo If both hyphen and legacy underscore runtime folders exist, all detected SageAttention runtimes will be slimmed here.
 set /p "SLIM_SAGEATTENTION=: "
 if /i "%SLIM_SAGEATTENTION%"=="Y" (
@@ -171,11 +175,24 @@ if not exist "%~dp0%RUNTIME_DIR%\python.exe" (
     exit /b 0
 )
 
-set "RUNTIME_IN_USE="
-for /f %%P in ('"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "$runtime=[System.IO.Path]::GetFullPath((Join-Path (Get-Location) ''%RUNTIME_DIR%'')); $found=$false; foreach($proc in Get-CimInstance Win32_Process){ if($proc.ExecutablePath){ try{ $exe=[System.IO.Path]::GetFullPath($proc.ExecutablePath) } catch { $exe=$proc.ExecutablePath }; if($exe.StartsWith($runtime,[System.StringComparison]::OrdinalIgnoreCase)){ $found=$true; break } } }; if($found){ ''1'' } else { ''0'' }"') do set "RUNTIME_IN_USE=%%P"
-if "%RUNTIME_IN_USE%"=="1" (
-    echo [Skip] %RUNTIME_LABEL% Python is currently in use. Please close related GUI / tensorboard / tag editor processes and run cleanup again.
-    exit /b 0
+call :runtime_is_in_use "%RUNTIME_DIR%"
+if errorlevel 7 (
+    echo [Warn] %RUNTIME_LABEL% Python is currently in use.
+    call :runtime_list_processes "%RUNTIME_DIR%"
+    echo Force close related processes under %RUNTIME_DIR% and continue cleanup? (Y/N, default N)
+    set "FORCE_CLOSE_RUNTIME="
+    set /p "FORCE_CLOSE_RUNTIME=: "
+    if /i not "%FORCE_CLOSE_RUNTIME%"=="Y" (
+        echo [Skip] %RUNTIME_LABEL% Python slimming skipped because the runtime is in use.
+        exit /b 0
+    )
+    call :runtime_force_close "%RUNTIME_DIR%"
+    timeout /t 2 /nobreak >nul
+    call :runtime_is_in_use "%RUNTIME_DIR%"
+    if errorlevel 7 (
+        echo [Fail] %RUNTIME_LABEL% Python is still in use after the forced close attempt.
+        exit /b 1
+    )
 )
 
 echo [%RUNTIME_LABEL%] Removing site-packages, scripts and share payload while keeping bootstrap tools... (%RUNTIME_DIR%)
@@ -197,4 +214,32 @@ if errorlevel 1 (
 )
 for %%M in (%RUNTIME_MARKERS%) do del /q "%RUNTIME_DIR%\%%~M" 2>nul
 echo [Done] %RUNTIME_LABEL% Python slimmed (%RUNTIME_DIR%)
+exit /b 0
+
+:runtime_is_in_use
+set "CHECK_RUNTIME_DIR=%~1"
+if "%CHECK_RUNTIME_DIR%"=="" exit /b 0
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$runtime=[System.IO.Path]::GetFullPath((Join-Path (Get-Location) '%CHECK_RUNTIME_DIR%'));" ^
+  "$found=$false;" ^
+  "foreach($proc in Get-CimInstance Win32_Process){ if($proc.ExecutablePath){ try{ $exe=[System.IO.Path]::GetFullPath($proc.ExecutablePath) } catch { $exe=$proc.ExecutablePath }; if($exe.StartsWith($runtime,[System.StringComparison]::OrdinalIgnoreCase)){ $found=$true; break } } };" ^
+  "if($found){ exit 7 } else { exit 0 }"
+exit /b %errorlevel%
+
+:runtime_list_processes
+set "CHECK_RUNTIME_DIR=%~1"
+if "%CHECK_RUNTIME_DIR%"=="" exit /b 0
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$runtime=[System.IO.Path]::GetFullPath((Join-Path (Get-Location) '%CHECK_RUNTIME_DIR%'));" ^
+  "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath } | ForEach-Object { try { $exe=[System.IO.Path]::GetFullPath($_.ExecutablePath) } catch { $exe=$_.ExecutablePath }; if($exe.StartsWith($runtime,[System.StringComparison]::OrdinalIgnoreCase)){ Write-Host ('  PID=' + $_.ProcessId + ' Name=' + $_.Name + ' Path=' + $_.ExecutablePath) } }"
+exit /b 0
+
+:runtime_force_close
+set "CHECK_RUNTIME_DIR=%~1"
+if "%CHECK_RUNTIME_DIR%"=="" exit /b 0
+echo [Action] Force closing processes under %CHECK_RUNTIME_DIR%...
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$runtime=[System.IO.Path]::GetFullPath((Join-Path (Get-Location) '%CHECK_RUNTIME_DIR%'));" ^
+  "$targets = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath } | ForEach-Object { try { $exe=[System.IO.Path]::GetFullPath($_.ExecutablePath) } catch { $exe=$_.ExecutablePath }; if($exe.StartsWith($runtime,[System.StringComparison]::OrdinalIgnoreCase)){ $_ } };" ^
+  "foreach($proc in $targets){ try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop; Write-Host ('  Stopped PID=' + $proc.ProcessId + ' Name=' + $proc.Name) } catch { Write-Host ('  Failed PID=' + $proc.ProcessId + ' Name=' + $proc.Name + ' :: ' + $_.Exception.Message) } }"
 exit /b 0

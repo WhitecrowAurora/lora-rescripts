@@ -1,6 +1,7 @@
 # Unified attention function supporting various implementations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import torch
 from typing import Optional, Union
 
@@ -27,6 +28,38 @@ except ImportError:
     xops = None
 
 
+@lru_cache(maxsize=8)
+def _get_cuda_device_capability(device_index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(device_index)
+
+
+def _build_sageattn_call_kwargs(q: torch.Tensor, *, tensor_layout: str) -> dict:
+    kwargs = {
+        "tensor_layout": tensor_layout,
+        "is_causal": False,
+        "sm_scale": q.shape[-1] ** -0.5,
+    }
+
+    if not q.is_cuda:
+        return kwargs
+
+    try:
+        device_index = q.device.index
+        if device_index is None:
+            return kwargs
+        major, minor = _get_cuda_device_capability(device_index)
+    except Exception:
+        return kwargs
+
+    # The official SageAttention sm86 route uses the Triton implementation by
+    # default, but its own core implementation notes that the CUDA quantization
+    # backend can perform better due to kernel fusion.
+    if (major, minor) == (8, 6):
+        kwargs["quantization_backend"] = "cuda"
+
+    return kwargs
+
+
 @dataclass
 class AttentionParams:
     attn_mode: Optional[str] = None
@@ -39,11 +72,11 @@ class AttentionParams:
 
     @property
     def supports_fp32(self) -> bool:
-        return self.attn_mode not in ["flash"]
+        return self.attn_mode not in ["flash", "sageattn"]
 
     @property
     def requires_same_dtype(self) -> bool:
-        return self.attn_mode in ["xformers"]
+        return self.attn_mode in ["xformers", "sageattn"]
 
     @staticmethod
     def create_attention_params(attn_mode: Optional[str], split_attn: bool) -> "AttentionParams":
@@ -134,11 +167,11 @@ def attention(
             attn_params.max_seqlen = max_seqlen  # keep max_seqlen for padding
             seqlen_trimmed = True
 
-    # Determine tensor layout based on attention implementation
-    if attn_params.attn_mode == "torch" or (
-        attn_params.attn_mode == "sageattn" and (attn_params.split_attn or attn_params.cu_seqlens is None)
-    ):
-        transpose_fn = lambda x: x.transpose(1, 2)  # [B, H, L, D] for SDPA and sageattn with fixed length
+    # Determine tensor layout based on attention implementation.
+    # For SageAttention fixed-length paths, keep the native NHD layout to avoid
+    # extra transpose overhead in DiT-style models such as Anima.
+    if attn_params.attn_mode == "torch":
+        transpose_fn = lambda x: x.transpose(1, 2)  # [B, H, L, D] for SDPA
         # pad on sequence length dimension
         pad_fn = lambda x, pad_to: torch.nn.functional.pad(x, (0, 0, 0, pad_to - x.shape[-2]), value=0)
     else:
@@ -197,27 +230,47 @@ def attention(
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
-                # HND seems to cause an error
-                x_i = sageattn(q[i], k[i], v[i])  # B, H, L, D. No dropout support
+                sage_kwargs = _build_sageattn_call_kwargs(q[i], tensor_layout="NHD")
+                x_i = sageattn(
+                    q[i],
+                    k[i],
+                    v[i],
+                    **sage_kwargs,
+                )  # B, L, H, D. No dropout support
                 q[i] = None
                 k[i] = None
                 v[i] = None
-                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, H, L, D
+                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, L, H, D
             x = torch.cat(x, dim=0)
             del q, k, v
         elif attn_params.cu_seqlens is None:  # all tokens are valid
-            x = sageattn(q, k, v)  # B, L, H, D. No dropout support
+            sage_kwargs = _build_sageattn_call_kwargs(q, tensor_layout="NHD")
+            x = sageattn(
+                q,
+                k,
+                v,
+                **sage_kwargs,
+            )  # B, L, H, D. No dropout support
             del q, k, v
         else:
             # Reshape to [(bxs), a, d]
             batch_size, seqlen = q.shape[0], q.shape[1]
-            q = q.view(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
-            k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
-            v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
+            q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
+            k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
+            v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
+            sage_kwargs = _build_sageattn_call_kwargs(q, tensor_layout="HND")
 
             # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv. No dropout support
             x = sageattn_varlen(
-                q, k, v, attn_params.cu_seqlens, attn_params.cu_seqlens, attn_params.max_seqlen, attn_params.max_seqlen
+                q,
+                k,
+                v,
+                attn_params.cu_seqlens,
+                attn_params.cu_seqlens,
+                attn_params.max_seqlen,
+                attn_params.max_seqlen,
+                is_causal=sage_kwargs["is_causal"],
+                sm_scale=sage_kwargs["sm_scale"],
             )
             del q, k, v
 

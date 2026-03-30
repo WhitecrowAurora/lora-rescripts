@@ -1,5 +1,6 @@
-import argparse
+﻿import argparse
 import gc
+from contextlib import nullcontext
 import importlib
 import json
 import math
@@ -319,49 +320,58 @@ class AnimaNetworkTrainer:
         unet,
         weight_dtype,
         is_train=True,
+        profiler: Optional[anima_train_utils.AnimaStepTimingProfiler] = None,
+        run_nan_check: bool = True,
     ):
         anima: anima_models.Anima = unet
-
-        if latents.ndim == 5:
-            latents = latents.squeeze(2)
-        noise = torch.randn_like(latents)
-
-        noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
-            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype
-        )
-        timesteps = timesteps / 1000.0
-
-        if args.gradient_checkpointing:
-            noisy_model_input.requires_grad_(True)
-            for tensor in text_encoder_conds:
-                if tensor is not None and tensor.dtype.is_floating_point:
-                    tensor.requires_grad_(True)
-
         prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = text_encoder_conds
-        prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
-        attn_mask = attn_mask.to(accelerator.device)
-        t5_input_ids = t5_input_ids.to(accelerator.device, dtype=torch.long)
-        t5_attn_mask = t5_attn_mask.to(accelerator.device)
 
-        bs = latents.shape[0]
-        h_latent = latents.shape[-2]
-        w_latent = latents.shape[-1]
-        padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=weight_dtype, device=accelerator.device)
-        padding_mask = anima_train_utils.maybe_apply_anima_channels_last(args, padding_mask)
+        with (profiler.step_section("noise_prepare") if profiler is not None else nullcontext()):
+            if latents.ndim == 5:
+                latents = latents.squeeze(2)
+            noise = torch.randn_like(latents)
 
-        noisy_model_input = noisy_model_input.unsqueeze(2)
-        noisy_model_input = anima_train_utils.maybe_apply_anima_channels_last(args, noisy_model_input)
-        with torch.set_grad_enabled(is_train), accelerator.autocast():
-            model_pred = anima(
-                noisy_model_input,
-                timesteps,
-                prompt_embeds,
-                padding_mask=padding_mask,
-                target_input_ids=t5_input_ids,
-                target_attention_mask=t5_attn_mask,
-                source_attention_mask=attn_mask,
+            noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
+                args, noise_scheduler, latents, noise, accelerator.device, weight_dtype
             )
-        model_pred = model_pred.squeeze(2)
+            timesteps = timesteps / 1000.0
+
+            if run_nan_check and torch.any(torch.isnan(noisy_model_input)):
+                accelerator.print("NaN found in noisy_model_input, replacing with zeros")
+                noisy_model_input = torch.nan_to_num(noisy_model_input, 0, out=noisy_model_input)
+
+            if args.gradient_checkpointing:
+                noisy_model_input.requires_grad_(True)
+                for tensor in text_encoder_conds:
+                    if tensor is not None and tensor.dtype.is_floating_point:
+                        tensor.requires_grad_(True)
+
+            bs = latents.shape[0]
+            h_latent = latents.shape[-2]
+            w_latent = latents.shape[-1]
+            padding_mask = anima_train_utils.get_cached_anima_padding_mask(
+                bs,
+                h_latent,
+                w_latent,
+                device=accelerator.device,
+                dtype=weight_dtype,
+                use_channels_last=bool(getattr(args, "opt_channels_last", False)),
+            )
+
+        with (profiler.step_section("dit_forward") if profiler is not None else nullcontext()):
+            noisy_model_input = noisy_model_input.unsqueeze(2)
+            noisy_model_input = anima_train_utils.maybe_apply_anima_channels_last(args, noisy_model_input)
+            with torch.set_grad_enabled(is_train), accelerator.autocast():
+                model_pred = anima(
+                    noisy_model_input,
+                    timesteps,
+                    prompt_embeds,
+                    padding_mask=padding_mask,
+                    target_input_ids=t5_input_ids,
+                    target_attention_mask=t5_attn_mask,
+                    source_attention_mask=attn_mask,
+                )
+            model_pred = model_pred.squeeze(2)
 
         target = noise - latents
         weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
@@ -382,50 +392,100 @@ class AnimaNetworkTrainer:
         text_encoding_strategy,
         tokenize_strategy,
         train_text_encoder=True,
+        profiler: Optional[anima_train_utils.AnimaStepTimingProfiler] = None,
+        use_non_blocking: bool = False,
+        run_nan_check: bool = True,
     ) -> torch.Tensor:
-        with torch.no_grad():
-            if "latents" in batch and batch["latents"] is not None:
-                latents = batch["latents"].to(accelerator.device, dtype=weight_dtype)
-            else:
-                images = batch["images"].to(accelerator.device, dtype=vae_dtype)
-                images = anima_train_utils.maybe_apply_anima_channels_last(args, images)
-                latents = vae.encode_pixels_to_latents(images).to(accelerator.device, dtype=weight_dtype)
-                if torch.any(torch.isnan(latents)):
-                    accelerator.print("NaN found in latents, replacing with zeros")
-                    latents = torch.nan_to_num(latents, 0, out=latents)
-            latents = anima_train_utils.maybe_apply_anima_channels_last(args, latents)
+        with (profiler.step_section("data/latents") if profiler is not None else nullcontext()):
+            with torch.no_grad():
+                if "latents" in batch and batch["latents"] is not None:
+                    latents = anima_train_utils.move_anima_tensor(
+                        batch["latents"],
+                        accelerator.device,
+                        dtype=weight_dtype,
+                        non_blocking=use_non_blocking,
+                    )
+                else:
+                    images = anima_train_utils.move_anima_tensor(
+                        batch["images"],
+                        accelerator.device,
+                        dtype=vae_dtype,
+                        non_blocking=use_non_blocking,
+                    )
+                    images = anima_train_utils.maybe_apply_anima_channels_last(args, images)
+                    latents = vae.encode_pixels_to_latents(images).to(
+                        accelerator.device, dtype=weight_dtype, non_blocking=use_non_blocking
+                    )
+                    if run_nan_check and torch.any(torch.isnan(latents)):
+                        accelerator.print("NaN found in latents, replacing with zeros")
+                        latents = torch.nan_to_num(latents, 0, out=latents)
+                latents = anima_train_utils.maybe_apply_anima_channels_last(args, latents)
 
-        text_encoder_conds = []
-        text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
-        if text_encoder_outputs_list is not None:
-            caption_dropout_rates = text_encoder_outputs_list[-1]
-            text_encoder_outputs_list = text_encoder_outputs_list[:-1]
-            text_encoder_outputs_list = text_encoding_strategy.drop_cached_text_encoder_outputs(
-                *text_encoder_outputs_list, caption_dropout_rates=caption_dropout_rates
-            )
-            text_encoder_conds = list(text_encoder_outputs_list)
-
-        if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
-            if text_encoders is None or len(text_encoders) == 0 or text_encoders[0] is None:
-                raise RuntimeError(
-                    "Text encoder outputs must be encoded on-the-fly, but no active Anima text encoder model is available."
+        with (profiler.step_section("text_encoder_or_cached_text") if profiler is not None else nullcontext()):
+            text_encoder_conds = []
+            text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
+            if text_encoder_outputs_list is not None:
+                caption_dropout_rates = text_encoder_outputs_list[-1]
+                text_encoder_outputs_list = text_encoder_outputs_list[:-1]
+                text_encoder_outputs_list = text_encoding_strategy.drop_cached_text_encoder_outputs(
+                    *text_encoder_outputs_list, caption_dropout_rates=caption_dropout_rates
                 )
-            with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
-                input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
-                encoded = text_encoding_strategy.encode_tokens(
-                    tokenize_strategy,
-                    text_encoders,
-                    input_ids,
-                )
-                if args.full_fp16:
-                    encoded = [tensor.to(weight_dtype) for tensor in encoded]
+                text_encoder_conds = list(text_encoder_outputs_list)
 
-            if len(text_encoder_conds) == 0:
-                text_encoder_conds = list(encoded)
-            else:
-                for index, tensor in enumerate(encoded):
-                    if tensor is not None:
-                        text_encoder_conds[index] = tensor
+            if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
+                if text_encoders is None or len(text_encoders) == 0 or text_encoders[0] is None:
+                    raise RuntimeError(
+                        "Text encoder outputs must be encoded on-the-fly, but no active Anima text encoder model is available."
+                    )
+                with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                    input_ids = [
+                        anima_train_utils.move_anima_tensor(
+                            ids,
+                            accelerator.device,
+                            non_blocking=use_non_blocking,
+                        )
+                        for ids in batch["input_ids_list"]
+                    ]
+                    encoded = text_encoding_strategy.encode_tokens(
+                        tokenize_strategy,
+                        text_encoders,
+                        input_ids,
+                    )
+                    if args.full_fp16:
+                        encoded = [tensor.to(weight_dtype) if tensor is not None else None for tensor in encoded]
+
+                if len(text_encoder_conds) == 0:
+                    text_encoder_conds = list(encoded)
+                else:
+                    for index, tensor in enumerate(encoded):
+                        if tensor is not None:
+                            text_encoder_conds[index] = tensor
+
+            prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = text_encoder_conds
+            text_encoder_conds = [
+                anima_train_utils.move_anima_tensor(
+                    prompt_embeds,
+                    accelerator.device,
+                    dtype=weight_dtype,
+                    non_blocking=use_non_blocking,
+                ),
+                anima_train_utils.move_anima_tensor(
+                    attn_mask,
+                    accelerator.device,
+                    non_blocking=use_non_blocking,
+                ),
+                anima_train_utils.move_anima_tensor(
+                    t5_input_ids,
+                    accelerator.device,
+                    dtype=torch.long,
+                    non_blocking=use_non_blocking,
+                ),
+                anima_train_utils.move_anima_tensor(
+                    t5_attn_mask,
+                    accelerator.device,
+                    non_blocking=use_non_blocking,
+                ),
+            ]
 
         model_pred, target, timesteps, weighting = self.get_noise_pred_and_target(
             args,
@@ -435,17 +495,20 @@ class AnimaNetworkTrainer:
             text_encoder_conds,
             unet,
             weight_dtype,
+            profiler=profiler,
+            run_nan_check=run_nan_check,
         )
 
-        huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, None)
-        loss = train_util.conditional_loss(model_pred.float(), target.float(), args.loss_type, "none", huber_c)
-        if weighting is not None:
-            loss = loss * weighting
-        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-            loss = apply_masked_loss(loss, batch)
-        loss = loss.mean(dim=list(range(1, loss.ndim)))
-        loss = loss * batch["loss_weights"]
-        return loss.mean()
+        with (profiler.step_section("loss") if profiler is not None else nullcontext()):
+            huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, None)
+            loss = train_util.conditional_loss(model_pred.float(), target.float(), args.loss_type, "none", huber_c)
+            if weighting is not None:
+                loss = loss * weighting
+            if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                loss = apply_masked_loss(loss, batch)
+            loss = loss.mean(dim=list(range(1, loss.ndim)))
+            loss = loss * batch["loss_weights"]
+            return loss.mean()
 
     def prepare_text_encoder_grad_ckpt_workaround(self, text_encoder):
         first_param = next(text_encoder.parameters())
@@ -573,6 +636,8 @@ class AnimaNetworkTrainer:
             logger.warning("cpu_offload_checkpointing is enabled, so gradient_checkpointing is also enabled")
             args.gradient_checkpointing = True
 
+        anima_train_utils.log_anima_runtime_summary(args, route_label="Anima LoRA")
+
         if args.seed is None:
             args.seed = random.randint(0, 2**32)
         set_seed(args.seed)
@@ -694,6 +759,9 @@ class AnimaNetworkTrainer:
                     args.cache_text_encoder_outputs_to_disk, args.text_encoder_batch_size, args.skip_cache_check, False
                 )
             )
+            train_dataset_group.set_current_strategies()
+            if val_dataset_group is not None:
+                val_dataset_group.set_current_strategies()
 
         text_encoders = [qwen3_text_encoder]
         self.cache_text_encoder_outputs_if_needed(
@@ -843,13 +911,21 @@ class AnimaNetworkTrainer:
 
         train_dataset_group.set_current_strategies()
         n_workers = min(args.max_data_loader_n_workers, os.cpu_count())
+        use_pinned_memory = anima_train_utils.should_use_anima_pinned_memory(accelerator)
+        prefetch_factor = anima_train_utils.resolve_anima_dataloader_prefetch_factor(args, n_workers)
+        train_dataloader_kwargs = {
+            "batch_size": 1,
+            "shuffle": True,
+            "collate_fn": collator,
+            "num_workers": n_workers,
+            "persistent_workers": bool(args.persistent_data_loader_workers and n_workers > 0),
+            "pin_memory": use_pinned_memory,
+        }
+        if prefetch_factor is not None:
+            train_dataloader_kwargs["prefetch_factor"] = prefetch_factor
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
-            batch_size=1,
-            shuffle=True,
-            collate_fn=collator,
-            num_workers=n_workers,
-            persistent_workers=bool(args.persistent_data_loader_workers and n_workers > 0),
+            **train_dataloader_kwargs,
         )
 
         if args.max_train_epochs is not None:
@@ -1005,6 +1081,8 @@ class AnimaNetworkTrainer:
         noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
         train_util.init_trackers(accelerator, args, "anima_network_train")
         loss_recorder = train_util.LossRecorder()
+        anima_step_profiler = anima_train_utils.AnimaStepTimingProfiler(args, accelerator, route_label="Anima LoRA")
+        use_non_blocking = anima_train_utils.should_use_anima_non_blocking(accelerator)
 
         def save_model(ckpt_name, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
             os.makedirs(args.output_dir, exist_ok=True)
@@ -1094,47 +1172,61 @@ class AnimaNetworkTrainer:
                     initial_step -= 1
                     continue
 
-                with accelerator.accumulate(training_model):
-                    loss = self.process_batch(
-                        batch,
-                        text_encoders,
-                        dit,
-                        network,
-                        vae,
-                        noise_scheduler,
-                        vae_dtype,
-                        weight_dtype,
-                        accelerator,
-                        args,
-                        text_encoding_strategy,
-                        tokenize_strategy,
-                        train_text_encoder=train_text_encoder,
-                    )
+                nan_check_step = epoch * len(train_dataloader) + step + 1
+                run_nan_check = anima_train_utils.should_run_anima_nan_check(args, nan_check_step)
+                anima_step_profiler.begin_micro_step()
+                try:
+                    with accelerator.accumulate(training_model):
+                        loss = self.process_batch(
+                            batch,
+                            text_encoders,
+                            dit,
+                            network,
+                            vae,
+                            noise_scheduler,
+                            vae_dtype,
+                            weight_dtype,
+                            accelerator,
+                            args,
+                            text_encoding_strategy,
+                            tokenize_strategy,
+                            train_text_encoder=train_text_encoder,
+                            profiler=anima_step_profiler,
+                            use_non_blocking=use_non_blocking,
+                            run_nan_check=run_nan_check,
+                        )
 
-                    current_loss = loss.detach().item()
-                    if safeguard is not None:
-                        safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
-                        if safeguard_decision.reason:
-                            logger.warning(safeguard_decision.reason)
-                        if safeguard_decision.stop_training:
-                            raise RuntimeError(safeguard_decision.reason)
-                        if safeguard_decision.skip_step:
+                        current_loss = loss.detach().item()
+                        if safeguard is not None:
+                            safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                            if safeguard_decision.reason:
+                                logger.warning(safeguard_decision.reason)
+                            if safeguard_decision.stop_training:
+                                raise RuntimeError(safeguard_decision.reason)
+                            if safeguard_decision.skip_step:
+                                optimizer.zero_grad(set_to_none=True)
+                                anima_step_profiler.discard_current_step()
+                                continue
+
+                        with anima_step_profiler.step_section("backward"):
+                            accelerator.backward(loss)
+
+                        with anima_step_profiler.step_section("optimizer_step"):
+                            if accelerator.sync_gradients:
+                                self.all_reduce_network(accelerator, network)
+                                if args.max_grad_norm != 0.0:
+                                    params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                            optimizer.step()
+                            lr_scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
-                            continue
-
-                    accelerator.backward(loss)
-                    if accelerator.sync_gradients:
-                        self.all_reduce_network(accelerator, network)
-                        if args.max_grad_norm != 0.0:
-                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                finally:
+                    anima_step_profiler.end_micro_step()
 
                 if args.scale_weight_norms:
-                    accelerator.unwrap_model(network).apply_max_norm_regularization(args.scale_weight_norms, accelerator.device)
+                    with anima_step_profiler.step_section("optimizer_step"):
+                        accelerator.unwrap_model(network).apply_max_norm_regularization(args.scale_weight_norms, accelerator.device)
 
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
@@ -1143,31 +1235,34 @@ class AnimaNetworkTrainer:
                         ema_model.update(global_step)
 
                     optimizer_eval_fn()
-                    self.sample_images(
-                        accelerator,
-                        args,
-                        None,
-                        global_step,
-                        vae,
-                        qwen3_text_encoder,
-                        dit,
-                        tokenize_strategy,
-                        text_encoding_strategy,
-                        network=network,
-                    )
+                    with anima_step_profiler.step_section("preview", wall_only=True):
+                        self.sample_images(
+                            accelerator,
+                            args,
+                            None,
+                            global_step,
+                            vae,
+                            qwen3_text_encoder,
+                            dit,
+                            tokenize_strategy,
+                            text_encoding_strategy,
+                            network=network,
+                        )
 
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                         accelerator.wait_for_everyone()
                         if accelerator.is_main_process:
-                            ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
-                            if args.save_state:
-                                train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
-                            remove_step_no = train_util.get_remove_step_no(args, global_step)
-                            if remove_step_no is not None:
-                                remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                remove_model(remove_ckpt_name)
+                            with anima_step_profiler.step_section("save", wall_only=True):
+                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                                if args.save_state:
+                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+                                remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                if remove_step_no is not None:
+                                    remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                    remove_model(remove_ckpt_name)
                     optimizer_train_fn()
+                    anima_step_profiler.finalize_optimizer_step(global_step)
 
                 if safeguard is not None:
                     safeguard.record_loss(current_loss)
@@ -1188,30 +1283,32 @@ class AnimaNetworkTrainer:
 
             accelerator.wait_for_everyone()
             optimizer_eval_fn()
-            if args.save_every_n_epochs is not None:
+            if args.save_every_n_epochs is not None and args.save_every_n_epochs > 0:
                 saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                 if is_main_process and saving:
-                    ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
-                    remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
-                    if remove_epoch_no is not None:
-                        remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                        remove_model(remove_ckpt_name)
-                    if args.save_state:
-                        train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                    with anima_step_profiler.window_section("save", wall_only=True):
+                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
+                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                        if remove_epoch_no is not None:
+                            remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                            remove_model(remove_ckpt_name)
+                        if args.save_state:
+                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            self.sample_images(
-                accelerator,
-                args,
-                epoch + 1,
-                global_step,
-                vae,
-                qwen3_text_encoder,
-                dit,
-                tokenize_strategy,
-                text_encoding_strategy,
-                network=network,
-            )
+            with anima_step_profiler.window_section("preview", wall_only=True):
+                self.sample_images(
+                    accelerator,
+                    args,
+                    epoch + 1,
+                    global_step,
+                    vae,
+                    qwen3_text_encoder,
+                    dit,
+                    tokenize_strategy,
+                    text_encoding_strategy,
+                    network=network,
+                )
             optimizer_train_fn()
 
             if global_step >= args.max_train_steps:
@@ -1226,7 +1323,9 @@ class AnimaNetworkTrainer:
         if is_main_process:
             network = accelerator.unwrap_model(network)
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
-            save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+            with anima_step_profiler.window_section("save", wall_only=True):
+                save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+            anima_step_profiler.flush_remaining(global_step)
             logger.info("model saved.")
 
 

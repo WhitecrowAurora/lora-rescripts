@@ -1,6 +1,7 @@
 # Anima Training Utilities
 
 import argparse
+from collections import defaultdict
 import gc
 import importlib
 import math
@@ -30,6 +31,200 @@ logger = logging.getLogger(__name__)
 
 # Anima-specific training arguments
 ANIMA_SUPPORTED_ATTN_MODES = ("torch", "xformers", "sageattn")
+
+
+class _AnimaTimingSection:
+    def __init__(self, profiler, section_name: str, *, wall_only: bool, target: str):
+        self.profiler = profiler
+        self.section_name = section_name
+        self.wall_only = wall_only
+        self.target = target
+        self.wall_start: Optional[float] = None
+        self.start_event = None
+        self.end_event = None
+
+    def __enter__(self):
+        if not self.profiler.enabled:
+            return self
+
+        self.wall_start = time.perf_counter()
+        if self.profiler.use_cuda_events and not self.wall_only:
+            self.start_event = torch.cuda.Event(enable_timing=True)
+            self.end_event = torch.cuda.Event(enable_timing=True)
+            self.start_event.record()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.profiler.enabled or self.wall_start is None:
+            return False
+
+        wall_elapsed = time.perf_counter() - self.wall_start
+        if self.profiler.use_cuda_events and not self.wall_only:
+            self.end_event.record()
+            self.profiler.queue_cuda_section(self.section_name, self.start_event, self.end_event, wall_elapsed, self.target)
+        else:
+            self.profiler.add_elapsed(self.section_name, wall_elapsed, target=self.target)
+            if self.wall_only and self.target == "step":
+                self.profiler.add_step_total(wall_elapsed)
+        return False
+
+
+class AnimaStepTimingProfiler:
+    SECTION_ORDER = (
+        "data/latents",
+        "text_encoder_or_cached_text",
+        "noise_prepare",
+        "dit_forward",
+        "loss",
+        "backward",
+        "optimizer_step",
+        "preview",
+        "save",
+    )
+
+    def __init__(self, args: argparse.Namespace, accelerator: Optional[Accelerator], *, route_label: str = "Anima"):
+        window_size = int(getattr(args, "anima_profile_window", 0) or 0)
+        self.window_size = max(window_size, 0)
+        self.route_label = route_label
+        self.device = accelerator.device if accelerator is not None else None
+        self.enabled = bool(accelerator is not None and accelerator.is_local_main_process and self.window_size > 0)
+        self.use_cuda_events = bool(
+            self.enabled and self.device is not None and self.device.type == "cuda" and torch.cuda.is_available()
+        )
+        self._current_step_totals = defaultdict(float)
+        self._window_totals = defaultdict(float)
+        self._window_steps = 0
+        self._micro_step_start: Optional[float] = None
+        self._micro_step_wall_total = 0.0
+        self._pending_cuda_sections: list[tuple[str, object, object, float, str]] = []
+
+        if self.enabled:
+            logger.info(
+                f"{route_label}: step timing profiler enabled. Aggregated timing will be logged every {self.window_size} optimizer step(s)."
+            )
+            logger.info(
+                f"{route_label}：已启用步骤耗时剖析器。每 {self.window_size} 个优化步会输出一次聚合耗时摘要。"
+            )
+
+    def begin_micro_step(self) -> None:
+        if not self.enabled:
+            return
+        self._micro_step_start = time.perf_counter()
+
+    def end_micro_step(self) -> None:
+        if not self.enabled:
+            return
+        self.flush_cuda_sections()
+        if self._micro_step_start is not None:
+            self._micro_step_wall_total += time.perf_counter() - self._micro_step_start
+            self._micro_step_start = None
+
+    def queue_cuda_section(self, section_name: str, start_event, end_event, wall_elapsed: float, target: str) -> None:
+        if not self.enabled:
+            return
+        self._pending_cuda_sections.append((section_name, start_event, end_event, wall_elapsed, target))
+
+    def flush_cuda_sections(self) -> None:
+        if not self.enabled or not self._pending_cuda_sections:
+            return
+
+        if self.use_cuda_events and self.device is not None:
+            synchronize_device(self.device)
+
+        pending_sections = self._pending_cuda_sections
+        self._pending_cuda_sections = []
+        for section_name, start_event, end_event, wall_elapsed, target in pending_sections:
+            elapsed = wall_elapsed
+            if self.use_cuda_events:
+                try:
+                    elapsed = float(start_event.elapsed_time(end_event)) / 1000.0
+                except Exception:
+                    elapsed = wall_elapsed
+            self.add_elapsed(section_name, elapsed, target=target)
+
+    def add_elapsed(self, section_name: str, elapsed_seconds: float, *, target: str = "step") -> None:
+        if not self.enabled or elapsed_seconds < 0:
+            return
+        if target == "step":
+            self._current_step_totals[section_name] += elapsed_seconds
+        else:
+            self._window_totals[section_name] += elapsed_seconds
+            self._window_totals["step_total"] += elapsed_seconds
+
+    def add_step_total(self, elapsed_seconds: float) -> None:
+        if not self.enabled or elapsed_seconds < 0:
+            return
+        self._micro_step_wall_total += elapsed_seconds
+
+    def step_section(self, section_name: str, *, wall_only: bool = False):
+        return _AnimaTimingSection(self, section_name, wall_only=wall_only, target="step")
+
+    def window_section(self, section_name: str, *, wall_only: bool = True):
+        return _AnimaTimingSection(self, section_name, wall_only=wall_only, target="window")
+
+    def finalize_optimizer_step(self, global_step: int) -> None:
+        if not self.enabled:
+            return
+
+        self.flush_cuda_sections()
+        self._window_totals["step_total"] += self._micro_step_wall_total
+        for section_name, elapsed in self._current_step_totals.items():
+            self._window_totals[section_name] += elapsed
+
+        self._window_steps += 1
+        self._current_step_totals = defaultdict(float)
+        self._micro_step_wall_total = 0.0
+
+        if self._window_steps >= self.window_size:
+            self.log_window_summary(global_step)
+            self._window_totals = defaultdict(float)
+            self._window_steps = 0
+
+    def discard_current_step(self) -> None:
+        if not self.enabled:
+            return
+        self._pending_cuda_sections = []
+        self._current_step_totals = defaultdict(float)
+        self._micro_step_wall_total = 0.0
+        self._micro_step_start = None
+
+    def flush_remaining(self, global_step: int) -> None:
+        if not self.enabled:
+            return
+        self.flush_cuda_sections()
+        if self._window_steps > 0 and self._window_totals.get("step_total", 0.0) > 0:
+            self.log_window_summary(global_step)
+        self._window_totals = defaultdict(float)
+        self._window_steps = 0
+
+    def log_window_summary(self, global_step: int) -> None:
+        if not self.enabled or self._window_steps <= 0:
+            return
+
+        total = float(self._window_totals.get("step_total", 0.0))
+        if total <= 0:
+            return
+
+        avg_step_ms = total * 1000.0 / self._window_steps
+        parts = [f"avg_step={avg_step_ms:.2f} ms"]
+        parts_zh = [f"平均每步={avg_step_ms:.2f} ms"]
+        for section_name in self.SECTION_ORDER:
+            elapsed = float(self._window_totals.get(section_name, 0.0))
+            if elapsed <= 0:
+                continue
+            avg_ms = elapsed * 1000.0 / self._window_steps
+            ratio = elapsed / total * 100.0
+            parts.append(f"{section_name}={avg_ms:.2f} ms ({ratio:.1f}%)")
+            parts_zh.append(f"{section_name}={avg_ms:.2f} ms（{ratio:.1f}%）")
+
+        logger.info(
+            f"{self.route_label} step timing window @ step {global_step}: "
+            + " | ".join(parts)
+        )
+        logger.info(
+            f"{self.route_label} 步骤耗时窗口统计 @ step {global_step}："
+            + " | ".join(parts_zh)
+        )
 
 
 def _infer_anima_runtime_mode() -> str:
@@ -312,6 +507,22 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Sampling scheduler used by Anima preview generation during training. Currently 'simple' is supported."
         + " / Anima の学習中プレビュー生成で使用するサンプリング scheduler。現在は simple のみサポートします。",
     )
+    parser.add_argument(
+        "--anima_profile_window",
+        type=int,
+        default=0,
+        help="Emit aggregated Anima training step timing every N optimizer steps. 0 disables profiling."
+        + " / N ステップごとに Anima 学習の集計耗时を出力します。0 で無効です。"
+        + " / 每 N 个优化步输出一次 Anima 训练耗时聚合日志，0 表示关闭。",
+    )
+    parser.add_argument(
+        "--anima_nan_check_interval",
+        type=int,
+        default=0,
+        help="Check Anima tensors for NaN every N training steps. 0 uses the runtime default."
+        + " / N ステップごとに Anima テンソルの NaN を検査します。0 は実行時の自動設定です。"
+        + " / 每 N 个训练步检查一次 Anima 张量中的 NaN，0 表示自动。",
+    )
 
 
 def resolve_required_anima_vae_path(args: argparse.Namespace, training_type: str) -> str:
@@ -412,14 +623,115 @@ def normalize_anima_attn_mode(attn_mode: Optional[str], fallback: Optional[str] 
     return normalized
 
 
+def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "Anima") -> None:
+    attn_mode = str(getattr(args, "attn_mode", "") or "").strip().lower() or "torch"
+    split_attn = bool(getattr(args, "split_attn", False))
+    cache_text_encoder_outputs = bool(getattr(args, "cache_text_encoder_outputs", False))
+    cache_latents = bool(getattr(args, "cache_latents", False))
+    enable_preview = bool(getattr(args, "enable_preview", False))
+    profile_window = int(getattr(args, "anima_profile_window", 0) or 0)
+    nan_check_interval = resolve_anima_nan_check_interval(args)
+
+    logger.info(
+        f"{route_label} runtime summary: "
+        f"attn_mode={attn_mode} | "
+        f"split_attn={split_attn} | "
+        f"cache_text_encoder_outputs={cache_text_encoder_outputs} | "
+        f"cache_latents={cache_latents} | "
+        f"enable_preview={enable_preview} | "
+        f"anima_profile_window={profile_window} | "
+        f"anima_nan_check_interval={nan_check_interval}"
+    )
+    logger.info(
+        f"{route_label} 运行摘要："
+        f"attn_mode={attn_mode}，"
+        f"split_attn={split_attn}，"
+        f"cache_text_encoder_outputs={cache_text_encoder_outputs}，"
+        f"cache_latents={cache_latents}，"
+        f"enable_preview={enable_preview}，"
+        f"anima_profile_window={profile_window}，"
+        f"anima_nan_check_interval={nan_check_interval}"
+    )
+
+    if attn_mode == "sageattn" and split_attn:
+        logger.warning(
+            f"{route_label}: SageAttention + split_attn prioritizes lower VRAM usage over speed. "
+            "If VRAM is sufficient, disabling split_attn is usually faster."
+        )
+        logger.warning(
+            f"{route_label}：当前为 SageAttention + split_attn 组合。该组合会优先降低显存占用，而不是追求速度；"
+            "如果显存足够，通常关闭 split_attn 会更快。"
+        )
+
+    if enable_preview:
+        logger.info(
+            f"{route_label}: training previews are enabled. Preview generation can noticeably increase wall-clock training time."
+        )
+        logger.info(
+            f"{route_label}：当前已启用训练预览图。预览生成会明显增加整体训练耗时。"
+        )
+
+
+def should_use_anima_pinned_memory(accelerator: Optional[Accelerator]) -> bool:
+    return bool(accelerator is not None and accelerator.device.type == "cuda" and torch.cuda.is_available())
+
+
+def should_use_anima_non_blocking(accelerator: Optional[Accelerator]) -> bool:
+    return should_use_anima_pinned_memory(accelerator)
+
+
+def resolve_anima_dataloader_prefetch_factor(args: argparse.Namespace, n_workers: int) -> Optional[int]:
+    if n_workers <= 0:
+        return None
+    return 4 if bool(getattr(args, "cache_latents", False)) else 2
+
+
+def resolve_anima_nan_check_interval(args: argparse.Namespace) -> int:
+    configured = int(getattr(args, "anima_nan_check_interval", 0) or 0)
+    if configured > 0:
+        return configured
+
+    mixed_precision = str(getattr(args, "mixed_precision", "") or "").strip().lower()
+    if mixed_precision in {"fp16", "bf16"} and torch.cuda.is_available():
+        return 4
+    return 1
+
+
+def should_run_anima_nan_check(args: argparse.Namespace, step_index: int) -> bool:
+    interval = resolve_anima_nan_check_interval(args)
+    if interval <= 1:
+        return True
+    return step_index <= 1 or step_index % interval == 0
+
+
+def move_anima_tensor(
+    tensor: Optional[torch.Tensor],
+    device: Optional[torch.device],
+    *,
+    dtype: Optional[torch.dtype] = None,
+    non_blocking: bool = False,
+) -> Optional[torch.Tensor]:
+    if tensor is None or not isinstance(tensor, torch.Tensor) or device is None:
+        return tensor
+
+    target_dtype = dtype or tensor.dtype
+    if tensor.device == device and tensor.dtype == target_dtype:
+        return tensor
+    return tensor.to(device=device, dtype=target_dtype, non_blocking=non_blocking)
+
+
 def maybe_apply_anima_channels_last(args: argparse.Namespace, tensor: Optional[torch.Tensor]):
     if not getattr(args, "opt_channels_last", False):
         return tensor
     if tensor is None or not isinstance(tensor, torch.Tensor):
         return tensor
     if tensor.ndim == 5:
+        if tensor.is_contiguous(memory_format=torch.channels_last_3d):
+            return tensor
         return tensor.contiguous(memory_format=torch.channels_last_3d)
     if tensor.ndim == 4:
+        if tensor.is_contiguous(memory_format=torch.channels_last):
+            return tensor
         return tensor.contiguous(memory_format=torch.channels_last)
     return tensor
 
@@ -457,11 +769,13 @@ def apply_opt_channels_last_for_anima(args: argparse.Namespace, *named_models):
             for _, tensor in _iter_named_floating_tensors(model):
                 tensor_count += 1
                 if tensor.ndim == 5:
-                    tensor.data = tensor.data.contiguous(memory_format=torch.channels_last_3d)
-                    converted_5d += 1
+                    if not tensor.is_contiguous(memory_format=torch.channels_last_3d):
+                        tensor.data = tensor.data.contiguous(memory_format=torch.channels_last_3d)
+                        converted_5d += 1
                 elif tensor.ndim == 4:
-                    tensor.data = tensor.data.contiguous(memory_format=torch.channels_last)
-                    converted_4d += 1
+                    if not tensor.is_contiguous(memory_format=torch.channels_last):
+                        tensor.data = tensor.data.contiguous(memory_format=torch.channels_last)
+                        converted_4d += 1
 
         if tensor_count == 0:
             skipped.append(display_name)
@@ -480,6 +794,30 @@ def apply_opt_channels_last_for_anima(args: argparse.Namespace, *named_models):
         logger.info("当前已请求为 Anima 启用 channels_last，但未在当前模型中检测到可切换的 4D/5D 浮点张量。")
 
     return applied
+
+
+_ANIMA_PADDING_MASK_CACHE: dict[tuple[str, str, int, int, int, bool], torch.Tensor] = {}
+
+
+def get_cached_anima_padding_mask(
+    batch_size: int,
+    latent_height: int,
+    latent_width: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    use_channels_last: bool,
+) -> torch.Tensor:
+    key = (str(device), str(dtype), int(batch_size), int(latent_height), int(latent_width), bool(use_channels_last))
+    cached = _ANIMA_PADDING_MASK_CACHE.get(key)
+    if cached is None or cached.device != device:
+        cached = torch.zeros(batch_size, 1, latent_height, latent_width, dtype=dtype, device=device)
+        if use_channels_last:
+            cached = cached.contiguous(memory_format=torch.channels_last)
+        _ANIMA_PADDING_MASK_CACHE[key] = cached
+    else:
+        cached.zero_()
+    return cached
 
 
 # Loss weighting
@@ -1024,10 +1362,10 @@ def _sample_image_inference(
     """Generate a single sample image."""
     prompt = prompt_dict.get("prompt", "")
     negative_prompt = prompt_dict.get("negative_prompt", "")
-    sample_steps = prompt_dict.get("sample_steps", 30)
-    width = prompt_dict.get("width", 512)
-    height = prompt_dict.get("height", 512)
-    scale = prompt_dict.get("scale", 7.5)
+    sample_steps = prompt_dict.get("sample_steps", getattr(args, "sample_steps", 30))
+    width = prompt_dict.get("width", getattr(args, "sample_width", 512))
+    height = prompt_dict.get("height", getattr(args, "sample_height", 512))
+    scale = prompt_dict.get("scale", getattr(args, "sample_cfg", 7.5))
     seed = prompt_dict.get("seed")
     if seed == 0:
         seed = None

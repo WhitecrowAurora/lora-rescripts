@@ -15,7 +15,7 @@ from mikazuki.launch_utils import (base_dir_path, catch_exception, git_tag,
 from mikazuki.log import log
 
 APP_NAME = "SD-reScripts"
-APP_VERSION = "v1.0.9"
+APP_VERSION = "v1.1.5 Beta10"
 ALLOW_SYSTEM_PYTHON_ENV = "MIKAZUKI_ALLOW_SYSTEM_PYTHON"
 
 parser = argparse.ArgumentParser(description="GUI for stable diffusion training")
