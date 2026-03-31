@@ -1,0 +1,8 @@
+{
+  "id": "community:your-ui-id",
+  "name": "Your Community UI",
+  "version": "0.1.0",
+  "entry": "ui/dist",
+  "entry_file": "index.html",
+  "source": "https://github.com/your-name/your-ui-repo"
+}

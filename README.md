@@ -61,34 +61,6 @@ LoRA & Dreambooth training GUI & scripts preset & one key training environment f
 - fixed multiple Anima edge cases around preview prompts, empty token paths, legacy text cache rebuilding, and `save_every_n_epochs=0`
 - added advanced Anima debug options for profiler window and NaN check interval tuning
 
-### v1.0.9
-
-- added SafeGuard and EMA training options across the main training routes, with save-time EMA checkpoint export support
-- fixed Anima startup failures caused by missing VAE paths by aligning the UI field, preflight validation, and backend runtime checks
-- improved save / training stability consistency across SD / SDXL / Flux / SD3 / Lumina / Anima / ControlNet / Textual Inversion workflows
-- refreshed homepage copy, version metadata, and release documentation for the current build
-
-### v1.0.8 Beta3
-
-- added native Anima training pages and backend integration for Anima LoRA / finetune workflows
-- added friendly Anima LoRA / LoKr switching, JSON caption priority, and improved preview prompt flow
-- added experimental SageAttention 2 startup scripts and improved attention backend detection / fallback behavior
-- improved staged mixed-resolution stability, distributed / mixed-GPU launch handling, and training preflight checks
-
-### v1.0.6 Beta2
-
-- added experimental SageAttention startup support for supported NVIDIA environments
-- improved Blackwell / RTX 50 / RTX PRO compatibility and reduced startup failures on newer GPUs
-- improved xformers / SDPA / SageAttention fallback logic and runtime troubleshooting visibility
-- improved mixed GPU selection, dataset cache preflight, and training option coverage
-- added experimental staged mixed-resolution training and expanded optimizer / scheduler integration
-
-### v1.0.2
-
-- polished portable startup and project-local Python handling
-- fixed tag editor startup, dependency compatibility, and UI theme consistency
-- improved config parsing, SDXL checkpoint loading, and general training compatibility
-
 ## ✨NEW: Train WebUI
 
 The **REAL** Stable Diffusion Training Studio. Everything in one WebUI.
@@ -125,8 +97,7 @@ git clone --recurse-submodules https://github.com/WhitecrowAurora/lora-rescripts
 
 #### Installation
 
-Run `install.ps1`.
-If you are in China mainland, please use `install-cn.ps1`.
+Run `run_For_≤RTX40series.bat` or `run_For_SageAttention_Experimental.bat`.
 
 - If a ready-to-run `python` folder already exists in the repo root, the installer will use it first
 - Otherwise it falls back to creating a virtual environment
@@ -179,17 +150,6 @@ Run `bash run_gui.sh`, then program will open [http://127.0.0.1:28000](http://12
 - if base dependencies are missing, it will run `install.bash` for you
 - if tag editor dependencies are missing and the current Python is compatible, it will run `install_tageditor.sh`
 - for mainland China mirror settings, use `bash run_gui_cn.sh`
-
-## Legacy Manual Scripts
-
-These old script-first entry points are no longer the recommended workflow for normal users.
-Most of them have already been moved out of the repo root during cleanup and are kept only as reference material.
-
-The recommended path is:
-- install with `install.ps1` / `install-cn.ps1` / `install.bash`
-- launch with `run_gui.ps1` / `run_gui.sh` / `run_gui_cn.sh` / `run.bat`
-
-If you specifically need old notebooks or manual script references, check the `.delete` quarantine folder first.
 
 #### TensorBoard
 

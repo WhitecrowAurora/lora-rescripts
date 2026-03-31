@@ -23,12 +23,16 @@ class WaifuDiffusionInterrogator(Interrogator):
             model_path='model.onnx',
             tags_path='selected_tags.csv',
             extra_files=None,
+            use_rgb=False,
+            normalize_01=False,
             **kwargs
     ) -> None:
         super().__init__(name)
         self.model_path = model_path
         self.tags_path = tags_path
         self.extra_files = list(extra_files or [])
+        self.use_rgb = use_rgb
+        self.normalize_01 = normalize_01
         self.kwargs = kwargs
 
     def download(self) -> Tuple[os.PathLike, os.PathLike]:
@@ -135,12 +139,15 @@ class WaifuDiffusionInterrogator(Interrogator):
         image = new_image.convert('RGB')
         image = np.asarray(image)
 
-        # PIL RGB to OpenCV BGR
-        image = image[:, :, ::-1]
+        # PIL RGB to OpenCV BGR (skip for models that expect RGB input)
+        if not self.use_rgb:
+            image = image[:, :, ::-1]
 
         image = dbimutils.make_square(image, target_size)
         image = dbimutils.smart_resize(image, target_size)
         image = image.astype(np.float32)
+        if self.normalize_01:
+            image = image / 255.0
         if layout == 'NCHW':
             image = image.transpose(2, 0, 1)
         image = np.expand_dims(np.ascontiguousarray(image), 0)
@@ -153,12 +160,6 @@ class WaifuDiffusionInterrogator(Interrogator):
         tags = self.tags[:][['name']]
         tags['confidents'] = confidents[0]
 
-        # first 4 items are for rating (general, sensitive, questionable, explicit)
-        ratings = dict(tags[:4].values)
-
-        # rest are regular tags
-        tags = dict(tags[4:].values)
-
         result = {
             "rating": [],
             "general": [],
@@ -166,14 +167,40 @@ class WaifuDiffusionInterrogator(Interrogator):
             "copyright": [],
             "artist": [],
             "meta": [],
-            "quality": [],
-            "model": []
+            "species": [],
         }
 
-        for tag, conf in ratings.items():
-            result["rating"].append((tag, conf))
-
-        for tag, conf in tags.items():
-            result["general"].append((tag, conf))
+        # If the CSV has a 'category' column, use it to classify tags
+        if 'category' in self.tags.columns:
+            cat_col = self.tags['category']
+            # Detect if categories are numeric (E621-style: 0,4,5,9) or string (WD14-style: "general","rating",...)
+            first_cat = str(cat_col.iloc[0]).strip()
+            numeric_cats = first_cat.isdigit()
+            for i, row in enumerate(tags.values):
+                name, conf = row[0], row[1]
+                raw_cat = cat_col.iloc[i]
+                if numeric_cats:
+                    cat = int(raw_cat)
+                    if cat == 9:
+                        result["rating"].append((name, conf))
+                    elif cat == 4:
+                        result["character"].append((name, conf))
+                    elif cat == 5:
+                        result.setdefault("species", []).append((name, conf))
+                    else:
+                        result["general"].append((name, conf))
+                else:
+                    cat_str = str(raw_cat).strip()
+                    if cat_str in result:
+                        result[cat_str].append((name, conf))
+                    else:
+                        result["general"].append((name, conf))
+        else:
+            # Legacy WD14: first 4 items are rating, rest are general
+            tag_pairs = list(tags.values)
+            for name, conf in tag_pairs[:4]:
+                result["rating"].append((name, conf))
+            for name, conf in tag_pairs[4:]:
+                result["general"].append((name, conf))
 
         return result
