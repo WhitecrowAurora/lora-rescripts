@@ -32,6 +32,9 @@ from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.patches import torch_load
 from ultralytics.utils.plotting import plot_tune_results
 
+# 使用不含真实 Atlas 域名的占位符，避免被 GitHub Secret Scanning 误判为泄漏凭据。
+MONGODB_URI_PLACEHOLDER = "mongodb+srv://<username>:<password>@<cluster-host>/"
+
 
 class Tuner:
     """A class for hyperparameter tuning of YOLO models.
@@ -72,7 +75,7 @@ class Tuner:
         >>>     data="coco8.yaml",
         >>>     epochs=10,
         >>>     iterations=300,
-        >>>     mongodb_uri="mongodb+srv://user:pass@cluster.mongodb.net/",
+        >>>     mongodb_uri="mongodb+srv://<username>:<password>@<cluster-host>/",
         >>>     mongodb_db="ultralytics",
         >>>     mongodb_collection="tune_results"
         >>> )
@@ -139,7 +142,7 @@ class Tuner:
             f"{self.prefix}💡 Learn about tuning at https://docs.ultralytics.com/guides/hyperparameter-tuning"
         )
 
-    def _connect(self, uri: str = "mongodb+srv://username:password@cluster.mongodb.net/", max_retries: int = 3):
+    def _connect(self, uri: str = MONGODB_URI_PLACEHOLDER, max_retries: int = 3):
         """Create MongoDB client with exponential backoff retry on connection failures.
 
         Args:
@@ -186,7 +189,7 @@ class Tuner:
         saves results to a shared collection and reads the latest best hyperparameters from all workers for evolution.
 
         Args:
-            mongodb_uri (str): MongoDB connection string, e.g. 'mongodb+srv://username:password@cluster.mongodb.net/'.
+            mongodb_uri (str): MongoDB connection string, e.g. 'mongodb+srv://<username>:<password>@<cluster-host>/'.
             mongodb_db (str, optional): Database name.
             mongodb_collection (str, optional): Collection name.
 
