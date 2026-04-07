@@ -42,18 +42,39 @@ def iter_existing_output_artifacts(config: dict, repo_root: Path) -> Iterable[Pa
         return []
 
     output_name = str(config.get("output_name", "") or "").strip()
+
+    def _name_matches(filename: str, is_dir: bool) -> bool:
+        """Check if *filename* is an exact sd-scripts artifact for *output_name*.
+
+        sd-scripts produces:
+          files:  {output_name}.ext, {output_name}-000004.ext, {output_name}-e5.ext …
+          dirs:   {output_name}-000004-state, {output_name}-state …
+        A simple ``startswith(output_name)`` is too broad — e.g. output_name="xx"
+        would wrongly match "xx2-000001.safetensors".  We require that the
+        character immediately after *output_name* (if any) is ``-`` or ``.``.
+        """
+        if not output_name:
+            return True
+        if not filename.startswith(output_name):
+            return False
+        rest = filename[len(output_name):]
+        if not rest:
+            return True
+        # The very next char must be '-' (epoch/state suffix'.' (extension)
+        return rest[0] in ('-', '.')
+
     artifacts: list[Path] = []
     for child in output_dir.iterdir():
         if child.is_file():
             if child.suffix.lower() not in CKPT_EXTENSIONS:
                 continue
-            if output_name and not child.name.startswith(output_name):
+            if not _name_matches(child.name, is_dir=False):
                 continue
             artifacts.append(child)
             continue
 
         if child.is_dir() and child.name.endswith("-state"):
-            if output_name and not child.name.startswith(f"{output_name}-"):
+            if not _name_matches(child.name, is_dir=True):
                 continue
             artifacts.append(child)
 

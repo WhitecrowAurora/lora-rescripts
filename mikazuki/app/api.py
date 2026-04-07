@@ -37,7 +37,7 @@ from mikazuki.tagger.llm import (
 )
 from mikazuki.tagger.interrogator import (available_interrogators,
                                           on_interrogate)
-from mikazuki.tasks import tm
+from mikazuki.tasks import tm, TaskStatus as _TaskStatus
 from mikazuki.utils.caption_backup import (create_caption_backup,
                                            list_caption_backups,
                                            NO_CAPTIONS_TO_BACKUP_MESSAGE,
@@ -1373,7 +1373,7 @@ async def training_sample_prompt(request: Request) -> APIResponse:
 
 
 @router.post("/run_script")
-async def run_script(request: Request, background_tasks: BackgroundTasks):
+async def run_script(request: Request):
     paras = await request.body()
     j = json.loads(paras.decode("utf-8"))
     script_name = j["script_name"]
@@ -1415,8 +1415,31 @@ async def run_script(request: Request, background_tasks: BackgroundTasks):
                 continue
             cmd.append(f"--{k}")
             cmd.append(str(v))
-    background_tasks.add_task(launch_utils.run, cmd, custom_env=script_env, cwd=str(repo_root), shell=False)
-    return APIResponseSuccess()
+
+    # Use TaskManager so output is captured and visible via /api/task_output/{id}
+    task = tm.create_task(cmd, script_env, cwd=str(repo_root))
+    if not task:
+        return APIResponseFail(message="Cannot create script task (another task may be running)")
+
+    def _run_script_task():
+        try:
+            task.execute()
+            task.process.wait()
+            # Give the output reader thread time to flush remaining buffered output
+            import time; time.sleep(0.3)
+            task.status = _TaskStatus.FINISHED if task.status == _TaskStatus.RUNNING else task.status
+            rc = task.process.returncode if task.process else -1
+            if rc != 0:
+                log.warning(f"Script {script_name} exited with code {rc}")
+            else:
+                log.info(f"Script {script_name} finished successfully")
+        except Exception as exc:
+            log.error(f"Script {script_name} failed: {exc}")
+
+    coro = asyncio.to_thread(_run_script_task)
+    asyncio.create_task(coro)
+
+    return APIResponseSuccess(data={"task_id": task.task_id})
 
 
 @router.get("/image_resize/preview")
@@ -1726,9 +1749,9 @@ async def captions_backup_restore(req: CaptionBackupRestoreRequest) -> APIRespon
 
 @router.get("/pick_file")
 async def pick_file(picker_type: str):
-    if picker_type == "folder":
+    if picker_type in ("folder", "output-folder"):
         coro = asyncio.to_thread(open_directory_selector, "")
-    elif picker_type == "model-file":
+    elif picker_type in ("model-file", "output-model-file"):
         file_types = [("checkpoints", "*.safetensors;*.ckpt;*.pt"), ("all files", "*.*")]
         coro = asyncio.to_thread(open_file_selector, "", "Select file", file_types)
     elif picker_type == "text-file":
@@ -1938,6 +1961,73 @@ async def get_aesthetic_infer_image(path: str):
 async def terminate_task(task_id: str):
     tm.terminate_task(task_id)
     return APIResponseSuccess()
+
+
+@router.get("/task_output/{task_id}")
+async def get_task_output(task_id: str, tail: int = 50):
+    """Return recent output lines from a running/finished task."""
+    if task_id not in tm.tasks:
+        return APIResponseFail(message="Task not found")
+    task = tm.tasks[task_id]
+    lines = task.output_lines[-tail:] if hasattr(task, 'output_lines') else []
+    total = len(task.output_lines) if hasattr(task, 'output_lines') else 0
+    return APIResponseSuccess(data={"lines": lines, "total": total})
+
+
+@router.get("/gpu_status")
+async def get_gpu_status() -> APIResponse:
+    """Return real-time GPU VRAM usage."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return APIResponseSuccess(data={"available": False})
+        gpus = []
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            total = props.total_memory
+            allocated = torch.cuda.memory_allocated(i)
+            reserved = torch.cuda.memory_reserved(i)
+            gpus.append({
+                "index": i,
+                "name": props.name,
+                "total_mb": round(total / 1048576),
+                "allocated_mb": round(allocated / 1048576),
+                "reserved_mb": round(reserved / 1048576),
+                "utilization_pct": round(allocated / total * 100, 1) if total > 0 else 0,
+            })
+        return APIResponseSuccess(data={"available": True, "gpus": gpus})
+    except Exception as exc:
+        return APIResponseSuccess(data={"available": False, "error": str(exc)})
+
+
+@router.get("/dataset/list_images")
+async def list_dataset_images(folder: str, limit: int = 8) -> APIResponse:
+    """List image files in a dataset folder for thumbnail preview."""
+    try:
+        folder_path = Path(folder).expanduser().resolve()
+        if not folder_path.is_dir():
+            return APIResponseFail(message="Folder not found")
+        exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        all_images = sorted(
+            [p for p in folder_path.iterdir() if p.is_file() and p.suffix.lower() in exts],
+            key=lambda p: p.name.lower(),
+        )
+        images = [str(p.resolve()) for p in all_images[:limit]]
+        first_tag = ""
+        for img_path in all_images[:1]:
+            txt_path = img_path.with_suffix(".txt")
+            if txt_path.is_file():
+                try:
+                    content = txt_path.read_text(encoding="utf-8-sig").strip()
+                    if content:
+                        first_tag = content.split(",")[0].strip()
+                except Exception:
+                    pass
+                break
+        return APIResponseSuccess(data={"images": images, "total": len(all_images), "first_tag": first_tag})
+    except Exception as exc:
+        return APIResponseFail(message=str(exc))
+
 
 
 @router.get("/graphic_cards")
