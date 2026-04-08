@@ -1782,10 +1782,11 @@ async def get_task_output(task_id: str, tail: int = 50) -> APIResponse:
         return APIResponseFail(message="Task not found")
 
     safe_tail = max(1, min(int(tail or 50), 1000))
-    lines = task.output_lines[-safe_tail:]
+    lines, total, live_line = task.get_output_snapshot(tail=safe_tail)
     return APIResponseSuccess(data={
         "lines": lines,
-        "total": len(task.output_lines),
+        "total": total,
+        "live_line": live_line,
     })
 
 

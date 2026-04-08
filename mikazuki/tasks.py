@@ -36,6 +36,7 @@ class Task:
         self.task_id = task_id
         self.lock = threading.Lock()
         self.output_lines: list[str] = []
+        self.live_line = ""
         self.max_output_lines = 5000
         self.command = command
         self.status = TaskStatus.CREATED
@@ -43,12 +44,103 @@ class Task:
         self.cwd = str(Path(cwd).resolve()) if cwd else str(base_dir_path())
         self._output_thread = None
         self.process = None
+        self._console_live_width = 0
 
     def _append_output_line(self, line: str):
         with self.lock:
             self.output_lines.append(line)
             if len(self.output_lines) > self.max_output_lines:
                 self.output_lines = self.output_lines[-self.max_output_lines :]
+
+    def _set_live_line(self, line: str):
+        with self.lock:
+            self.live_line = line
+
+    def _get_live_line(self):
+        with self.lock:
+            return self.live_line
+
+    def _clear_live_line(self):
+        self._set_live_line("")
+
+    def get_output_snapshot(self, tail: int | None = None):
+        with self.lock:
+            total = len(self.output_lines)
+            lines = list(self.output_lines if tail is None else self.output_lines[-tail:])
+            live_line = self.live_line
+        return lines, total, live_line
+
+    def _emit_console_output(self, line: str, transient: bool = False):
+        if not line:
+            return
+
+        prefix = "\r" if transient or self._console_live_width else ""
+        padding = ""
+        if self._console_live_width > len(line):
+            padding = " " * (self._console_live_width - len(line))
+
+        if transient:
+            print(prefix + line + padding, end="", flush=True)
+            self._console_live_width = len(line)
+            return
+
+        print(prefix + line + padding, flush=True)
+        self._console_live_width = 0
+
+    def _consume_output_record(self, raw_line: bytes, sep: bytes):
+        line = self._decode_output(raw_line).rstrip()
+        if not line:
+            if sep == b"\n":
+                self._clear_live_line()
+            return
+
+        if sep == b"\n":
+            self._emit_console_output(line, transient=False)
+            self._append_output_line(line)
+            self._clear_live_line()
+            return
+
+        if line == self._get_live_line():
+            return
+
+        self._emit_console_output(line, transient=True)
+        self._set_live_line(line)
+
+    def _sync_live_tail(self, buf: bytes):
+        if not buf:
+            return
+
+        line = self._decode_output(buf).rstrip()
+        if not line or line == self._get_live_line():
+            return
+
+        self._emit_console_output(line, transient=True)
+        self._set_live_line(line)
+
+    def _process_output_buffer(self, buf: bytes, eof: bool = False) -> bytes:
+        while True:
+            cr_idx = buf.find(b"\r")
+            lf_idx = buf.find(b"\n")
+            candidates = [idx for idx in (cr_idx, lf_idx) if idx != -1]
+            if not candidates:
+                break
+
+            idx = min(candidates)
+            sep = buf[idx : idx + 1]
+            sep_len = 1
+            if sep == b"\r":
+                if idx + 1 >= len(buf):
+                    if not eof:
+                        break
+                elif buf[idx + 1 : idx + 2] == b"\n":
+                    sep = b"\n"
+                    sep_len = 2
+
+            raw_line = buf[:idx]
+            buf = buf[idx + sep_len :]
+            self._consume_output_record(raw_line, sep)
+
+        return buf
 
     def _decode_output(self, raw: bytes) -> str:
         try:
@@ -70,29 +162,27 @@ class Task:
             if not chunk:
                 break
             buf += chunk
-            while b"\n" in buf:
-                idx = buf.find(b"\n")
-                raw_line = buf[:idx]
-                buf = buf[idx + 1 :]
-                if raw_line.endswith(b"\r"):
-                    raw_line = raw_line[:-1]
-                if b"\r" in raw_line:
-                    raw_line = raw_line.rsplit(b"\r", 1)[-1]
-                line = self._decode_output(raw_line).rstrip()
-                if not line:
-                    continue
-                print(line, flush=True)
-                self._append_output_line(line)
+            buf = self._process_output_buffer(buf)
+            self._sync_live_tail(buf)
 
+        buf = self._process_output_buffer(buf, eof=True)
         if buf:
-            if buf.endswith(b"\r"):
-                buf = buf[:-1]
-            if b"\r" in buf:
-                buf = buf.rsplit(b"\r", 1)[-1]
             line = self._decode_output(buf).rstrip()
             if line:
-                print(line, flush=True)
+                self._emit_console_output(line, transient=False)
                 self._append_output_line(line)
+                self._clear_live_line()
+
+        lines, _, live_line = self.get_output_snapshot(tail=1)
+        last_output_line = lines[-1] if lines else ""
+        if live_line:
+            if live_line != last_output_line:
+                self._emit_console_output(live_line, transient=False)
+                self._append_output_line(live_line)
+            elif self._console_live_width:
+                print("", flush=True)
+                self._console_live_width = 0
+            self._clear_live_line()
 
     def _join_output_thread(self):
         if self._output_thread is not None:
@@ -125,7 +215,8 @@ class Task:
         retcode = self.process.poll()
         if self.status == TaskStatus.RUNNING:
             self.status = TaskStatus.FINISHED
-        stdout = "\n".join(self.output_lines)
+        output_lines, _, _ = self.get_output_snapshot()
+        stdout = "\n".join(output_lines)
         return CompletedProcess(self.process.args, retcode, stdout, None)
 
     def wait(self):
