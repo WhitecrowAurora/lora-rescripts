@@ -10,13 +10,11 @@ output/*
 assets/config.json
 
 py310
-python
 python_blackwell
 git
 wd14_tagger_model
 blackwell-wheels/
 lora-rescripts (*)/
-lora-rescripts - 副本*/
 
 train/*
 logs/*
@@ -32,8 +30,6 @@ tests/
 
 huggingface/hub/models*
 huggingface/hub/version_diffusers_cache.txt
-lora-rescripts.zip
-lora-rescripts-v1.0.8-Beta3.zip
 /backup
 <<<<<<< Updated upstream
 /models
