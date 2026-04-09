@@ -39,3 +39,6 @@ huggingface/hub/version_diffusers_cache.txt
 /models
 >>>>>>> Stashed changes
 *.zip
+/BooruDatasetTagManager
+/ui
+A启动新前端UI.bat
