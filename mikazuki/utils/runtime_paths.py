@@ -14,9 +14,9 @@ RUNTIME_DIRECTORY_ALIASES: dict[str, tuple[str, ...]] = {
     "intel-xpu": ("python_xpu_intel",),
     "intel-xpu-sage": ("python_xpu_intel_sage",),
     "rocm-amd": ("python_rocm_amd",),
-    "rocm-amd-sage": ("python_rocm_amd_sage",),
     "sagebwd-nvidia": ("python_sagebwd_nvidia", "python-sagebwd-nvidia"),
     "sageattention": ("python-sageattention", "python_sageattention"),
+    "sageattention2": ("python-sageattention2", "python_sageattention2"),
     "tageditor": ("python_tageditor",),
     "venv": ("venv",),
     "venv-tageditor": ("venv-tageditor",),
@@ -28,9 +28,9 @@ PROJECT_LOCAL_MAIN_RUNTIME_NAMES: tuple[str, ...] = (
     "intel-xpu",
     "intel-xpu-sage",
     "rocm-amd",
-    "rocm-amd-sage",
     "sagebwd-nvidia",
     "sageattention",
+    "sageattention2",
     "venv",
 )
 

@@ -172,6 +172,7 @@
                 persistent_data_loader_workers: Schema.boolean().default(true).description("保留加载训练集的worker，减少每个 epoch 之间的停顿。"),
                 vae_batch_size: Schema.number().min(1).description("vae 编码批量大小"),
                 cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：梯度检查点时将部分张量卸载到 CPU，节省显存"),
+                pytorch_cuda_expandable_segments: Schema.boolean().default(true).description("训练前自动设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，缓解显存碎片导致的 OOM。一般对速度影响很小；如需排查兼容性或自行管理 allocator，可关闭"),
             }
         },
 

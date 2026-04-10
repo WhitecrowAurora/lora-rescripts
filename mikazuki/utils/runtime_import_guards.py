@@ -18,9 +18,17 @@ _BLOCKED_EXPERIMENTAL_MODULE_PREFIXES = (
 )
 _IMPORT_GUARD_ENV = "MIKAZUKI_EXPERIMENTAL_IMPORT_GUARDS"
 _IMPORT_GUARD_PATCHED_ENV = "MIKAZUKI_EXPERIMENTAL_IMPORT_GUARDS_PATCHED"
+_IMPORT_GUARD_DEBUG_ENV = "MIKAZUKI_DEBUG_RUNTIME_GUARDS"
 _ORIGINAL_FIND_SPEC = None
 _ORIGINAL_METADATA_VERSION = None
 _ORIGINAL_BACKPORT_METADATA_VERSION = None
+
+
+def _log_guard_event(message: str, *args) -> None:
+    if str(os.environ.get(_IMPORT_GUARD_DEBUG_ENV, "") or "").strip() == "1":
+        logger.warning(message, *args)
+        return
+    logger.info(message, *args)
 
 
 class _BlockedRuntimeModuleLoader(importlib.abc.Loader):
@@ -111,7 +119,7 @@ def _install_package_probe_guards(runtime_label: str) -> None:
             backport_module.version = _guarded_backport_metadata_version
 
     os.environ[_IMPORT_GUARD_PATCHED_ENV] = "1"
-    logger.warning(
+    _log_guard_event(
         "Installed experimental runtime package-probe guards for %s: hidden=%s",
         runtime_label,
         ", ".join(_BLOCKED_EXPERIMENTAL_MODULE_PREFIXES),
@@ -153,7 +161,7 @@ def install_experimental_runtime_import_guards() -> None:
         if isinstance(existing, _BlockedRuntimeModuleFinder):
             os.environ[_IMPORT_GUARD_ENV] = "1"
             if removed_modules:
-                logger.warning(
+                _log_guard_event(
                     "Purged preloaded experimental runtime modules for %s before reinstall skip: %s",
                     runtime_label,
                     ", ".join(removed_modules),
@@ -162,13 +170,13 @@ def install_experimental_runtime_import_guards() -> None:
 
     sys.meta_path.insert(0, finder)
     os.environ[_IMPORT_GUARD_ENV] = "1"
-    logger.warning(
+    _log_guard_event(
         "Installed experimental runtime import guards for %s: %s",
         runtime_label,
         ", ".join(_BLOCKED_EXPERIMENTAL_MODULE_PREFIXES),
     )
     if removed_modules:
-        logger.warning(
+        _log_guard_event(
             "Purged preloaded experimental runtime modules for %s: %s",
             runtime_label,
             ", ".join(removed_modules),

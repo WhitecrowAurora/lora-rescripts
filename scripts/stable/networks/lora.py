@@ -112,16 +112,19 @@ class LoRAModule(torch.nn.Module):
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
+        accel_modules = getattr(self.org_module, "_lulynx_fused_projection_delta_modules", None)
+        if accel_modules is None:
+            accel_modules = []
+            setattr(self.org_module, "_lulynx_fused_projection_delta_modules", accel_modules)
+        accel_modules.append(self)
         self.org_module.forward = self.forward
         del self.org_module
 
-    def forward(self, x):
-        org_forwarded = self.org_forward(x)
-
+    def compute_forward_delta(self, x):
         # module dropout
         if self.module_dropout is not None and self.training:
             if torch.rand(1) < self.module_dropout:
-                return org_forwarded
+                return None
 
         lx = self.lora_down(x)
 
@@ -145,8 +148,14 @@ class LoRAModule(torch.nn.Module):
             scale = self.scale
 
         lx = self.lora_up(lx)
+        return lx * self.multiplier * scale
 
-        return org_forwarded + lx * self.multiplier * scale
+    def forward(self, x):
+        org_forwarded = self.org_forward(x)
+        delta = self.compute_forward_delta(x)
+        if delta is None:
+            return org_forwarded
+        return org_forwarded + delta
 
 
 class PiSSAModule(LoRAModule):

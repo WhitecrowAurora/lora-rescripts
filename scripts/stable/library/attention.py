@@ -7,10 +7,32 @@ import os
 import sys
 import torch
 from typing import Optional, Union
-from library.sageattention_compat import call_sageattention, get_runtime_sageattention_source, get_runtime_sageattention_symbols
+from library.sageattention_compat import (
+    call_sageattention,
+    call_sageattention_varlen,
+    get_runtime_sageattention_source,
+    get_runtime_sageattention_symbols,
+)
 from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 
 logger = logging.getLogger(__name__)
+
+_runtime_attention_stats = {
+    "flash_calls": 0,
+    "flash_fallbacks": 0,
+    "sage_calls": 0,
+    "sage_fallbacks": 0,
+}
+
+
+def _increment_runtime_attention_stat(key: str, amount: int = 1) -> None:
+    if key not in _runtime_attention_stats:
+        _runtime_attention_stats[key] = 0
+    _runtime_attention_stats[key] += int(amount)
+
+
+def snapshot_runtime_attention_stats() -> dict:
+    return {key: int(value) for key, value in _runtime_attention_stats.items()}
 
 try:
     import flash_attn
@@ -119,8 +141,6 @@ def _get_tensor_runtime(q: torch.Tensor) -> str:
             return "intel-xpu-sage"
         return "intel-xpu"
     if device_type == "cuda" and bool(getattr(torch.version, "hip", None)):
-        if active_runtime == "rocm-amd-sage":
-            return "rocm-amd-sage"
         return "rocm-amd"
     if device_type == "cuda":
         return "cuda"
@@ -165,7 +185,7 @@ def _build_sageattn_call_kwargs(q: torch.Tensor, *, tensor_layout: str) -> dict:
 
 
 def _should_try_sageattention_fallback(q: torch.Tensor) -> bool:
-    return _get_tensor_runtime(q) in {"intel-xpu", "rocm-amd", "rocm-amd-sage"}
+    return _get_tensor_runtime(q) == "intel-xpu"
 
 
 def _clone_attention_params(attn_params: "AttentionParams", *, attn_mode: str) -> "AttentionParams":
@@ -189,7 +209,7 @@ def _log_flashattention_fallback(q: torch.Tensor, exc: Exception) -> None:
 
 
 def _should_use_rocm_sliced_sdpa(q: torch.Tensor, k: torch.Tensor) -> bool:
-    if _get_tensor_runtime(q) not in {"rocm-amd", "rocm-amd-sage"}:
+    if _get_tensor_runtime(q) != "rocm-amd":
         return False
     if q.dim() != 4 or k.dim() != 4:
         return False
@@ -440,6 +460,7 @@ def _execute_attention_impl(
             del q, k, v
 
     elif attn_params.attn_mode == "sageattn":
+        _increment_runtime_attention_stat("sage_calls")
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
@@ -474,7 +495,7 @@ def _execute_attention_impl(
             sage_kwargs = _build_sageattn_call_kwargs(q, tensor_layout="HND")
 
             # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv. No dropout support
-            x = sageattn_varlen(
+            x = call_sageattention_varlen(
                 q,
                 k,
                 v,
@@ -491,6 +512,7 @@ def _execute_attention_impl(
             x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
 
     elif attn_params.attn_mode == "flash":
+        _increment_runtime_attention_stat("flash_calls")
         _info_once(
             "Unified attention backend active: flash / 公共 attention 已进入 FlashAttention 内核路径。"
         )
@@ -584,10 +606,12 @@ def attention(
         x = _execute_attention_impl(q, k, v, attn_params, drop_rate)
     except Exception as exc:
         if attn_params.attn_mode == "flash":
+            _increment_runtime_attention_stat("flash_fallbacks")
             _log_flashattention_fallback(q, exc)
             fallback_params = _clone_attention_params(attn_params, attn_mode="torch")
             x = _execute_attention_impl(q, k, v, fallback_params, drop_rate)
         elif attn_params.attn_mode == "sageattn" and _should_try_sageattention_fallback(q):
+            _increment_runtime_attention_stat("sage_fallbacks")
             _log_sageattention_fallback(q, exc)
             fallback_params = _clone_attention_params(attn_params, attn_mode="torch")
             x = _execute_attention_impl(q, k, v, fallback_params, drop_rate)

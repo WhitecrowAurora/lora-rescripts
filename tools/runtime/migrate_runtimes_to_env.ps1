@@ -17,7 +17,6 @@ $runtimeSpecs = @(
     [pscustomobject]@{ Name = "intel-xpu"; Primary = "python_xpu_intel"; Aliases = @("python_xpu_intel"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "intel-xpu-sage"; Primary = "python_xpu_intel_sage"; Aliases = @("python_xpu_intel_sage"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "rocm-amd"; Primary = "python_rocm_amd"; Aliases = @("python_rocm_amd"); IncludeByDefault = $true },
-    [pscustomobject]@{ Name = "rocm-amd-sage"; Primary = "python_rocm_amd_sage"; Aliases = @("python_rocm_amd_sage"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "sagebwd-nvidia"; Primary = "python_sagebwd_nvidia"; Aliases = @("python_sagebwd_nvidia", "python-sagebwd-nvidia"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "sageattention"; Primary = "python-sageattention"; Aliases = @("python-sageattention", "python_sageattention"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "venv"; Primary = "venv"; Aliases = @("venv"); IncludeByDefault = $false },

@@ -1,8 +1,10 @@
 param(
-    [ValidateSet("triton-v1")]
+    [ValidateSet("triton-v1", "triton-v2")]
     [string]$Profile = "triton-v1",
     [string]$SageAttentionPackage = "",
-    [string]$TritonPackage = "triton-windows==3.5.1.post24"
+    [string]$TritonPackage = "triton-windows==3.5.1.post24",
+    [ValidateSet("general", "sageattention2", "latest")]
+    [string]$RuntimeTarget = "general"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +16,9 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $null = . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
 
-$runtimeKey = "sageattention"
+$runtimeKey = if ($RuntimeTarget -in @("sageattention2", "latest")) { "sageattention2" } else { "sageattention" }
+$isSageAttention2Runtime = $runtimeKey -eq "sageattention2"
+$runtimeDisplayName = if ($isSageAttention2Runtime) { "SageAttention2" } else { "SageAttention" }
 
 $sageAttentionRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName $runtimeKey
 $sageAttentionRuntimeDirName = $sageAttentionRuntimeInfo.DirectoryName
@@ -266,6 +270,15 @@ function Get-SageAttentionExpectedPackageVersions {
                 Triton = ""
             }
         }
+        "triton-v2" {
+            return @{
+                PythonMinor = "3.12"
+                Torch = "2.6.0+cu124"
+                TorchVision = "0.21.0+cu124"
+                SageAttention = "2.2.0"
+                Triton = "3.5.1.post24"
+            }
+        }
         default {
             return @{
                 PythonMinor = ""
@@ -454,10 +467,19 @@ function Resolve-SageAttentionPackage {
         [string]$RequestedPackage
     )
 
-    $wheelSearchDirs = @(
-        (Join-Path $repoRoot "sageattention-wheels")
-        (Join-Path $repoRoot "sageattention_wheels")
-    )
+    $wheelSearchDirs = if ($isSageAttention2Runtime) {
+        @(
+            (Join-Path $repoRoot "wheel")
+            (Join-Path $repoRoot "sageattention-wheels")
+            (Join-Path $repoRoot "sageattention_wheels")
+        )
+    }
+    else {
+        @(
+            (Join-Path $repoRoot "sageattention-wheels")
+            (Join-Path $repoRoot "sageattention_wheels")
+        )
+    }
 
     if ([string]::IsNullOrWhiteSpace($RequestedPackage)) {
         $localWheel = $null
@@ -466,18 +488,40 @@ function Resolve-SageAttentionPackage {
                 continue
             }
 
-            $patterns = @("*blackwell*.whl", "*sm120*.whl", "*.whl")
+            $patterns = if ($isSageAttention2Runtime) {
+                if ([string]::IsNullOrWhiteSpace($runtimePythonAbiTag)) {
+                    @()
+                }
+                else {
+                    @("*$runtimePythonAbiTag*win_amd64.whl", "*$runtimePythonAbiTag*.whl")
+                }
+            }
+            else {
+                @("*blackwell*.whl", "*sm120*.whl", "*.whl")
+            }
 
             foreach ($pattern in $patterns) {
                 $candidate = Get-ChildItem -LiteralPath $wheelDir -Filter $pattern -File -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -like "sageattention*.whl" } |
                     Sort-Object LastWriteTime -Descending |
                     Select-Object -First 1
-                if ($candidate) {
-                    if ($candidate.Name -notmatch "blackwell|sm120") {
+                if (-not $candidate) {
+                    continue
+                }
+
+                if ($isSageAttention2Runtime) {
+                    if (
+                        $candidate.Name -match [regex]::Escape($runtimePythonAbiTag) `
+                        -and $candidate.Name -match 'win_amd64' `
+                        -and $candidate.Name -notmatch 'linux'
+                    ) {
                         $localWheel = $candidate
                         break
                     }
+                }
+                elseif ($candidate.Name -notmatch "blackwell|sm120") {
+                    $localWheel = $candidate
+                    break
                 }
             }
 
@@ -498,7 +542,7 @@ function Resolve-SageAttentionPackage {
     if ([string]::IsNullOrWhiteSpace($RequestedPackage)) {
         return [pscustomobject]@{
             Kind = "spec"
-            Value = "sageattention==1.0.6"
+            Value = $(if ($isSageAttention2Runtime) { "sageattention==2.2.0" } else { "sageattention==1.0.6" })
         }
     }
 
@@ -537,15 +581,17 @@ function Resolve-SageAttentionPackage {
 }
 
 if (-not (Test-Path $sageAttentionPython)) {
-    throw @"
-SageAttention portable Python was not found.
+    $expectedPythonLine = if ($isSageAttention2Runtime) { "1. Extract a Python 3.11+ embeddable package into $sageAttentionRuntimeDir" } else { "1. Extract a Python 3.11 embeddable package into $sageAttentionRuntimeDir" }
+    $rerunInstallerLine = if ($isSageAttention2Runtime) { "2. Run install_sageattention2.ps1 again" } else { "2. Run install_sageattention.ps1 again" }
+throw @"
+$runtimeDisplayName portable Python was not found.
 
 Expected:
 - $sageAttentionPython
 
 Recommended fix:
-1. Extract a Python 3.11 embeddable package into $sageAttentionRuntimeDir
-2. Run install_sageattention.ps1 again
+${expectedPythonLine}
+${rerunInstallerLine}
 "@
 }
 
@@ -554,6 +600,18 @@ if (-not (Test-PipReady -PythonExe $sageAttentionPython)) {
     & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $sageAttentionRuntimeDirName
     if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $sageAttentionPython)) {
         throw "Failed to initialize $sageAttentionRuntimeDirName."
+    }
+}
+
+$runtimeVersionInfo = Get-PythonRuntimeVersionInfo -PythonExe $sageAttentionPython
+$runtimePythonMinor = if ($runtimeVersionInfo) { "$($runtimeVersionInfo.major).$($runtimeVersionInfo.minor)" } else { "" }
+$runtimePythonAbiTag = if ($runtimeVersionInfo) { "cp$($runtimeVersionInfo.major)$($runtimeVersionInfo.minor)" } else { "" }
+if ($isSageAttention2Runtime) {
+    if (-not $runtimeVersionInfo) {
+        throw "Could not determine the Python version in $sageAttentionRuntimeDirName."
+    }
+    if ($runtimeVersionInfo.major -lt 3 -or ($runtimeVersionInfo.major -eq 3 -and $runtimeVersionInfo.minor -lt 11)) {
+        throw "SageAttention2 requires Python 3.11 or newer, but $sageAttentionRuntimeDirName is using $($runtimeVersionInfo.version)."
     }
 }
 
@@ -582,7 +640,12 @@ if ($torchPackagesReady) {
 }
 else {
     Invoke-Step "Installing PyTorch and torchvision for SageAttention environment ($Profile)..." {
-        & $sageAttentionPython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary torch==2.10.0+cu128 torchvision==0.25.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+        if ($Profile -eq "triton-v2") {
+            & $sageAttentionPython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary torch==2.6.0+cu124 torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+        }
+        else {
+            & $sageAttentionPython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary torch==2.10.0+cu128 torchvision==0.25.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+        }
     }
 }
 
@@ -652,4 +715,4 @@ Invoke-Step "Verifying SageAttention environment..." {
 }
 
 Set-Content -Path $sageAttentionMarker -Value "" -Encoding ASCII
-Write-Host -ForegroundColor Green "SageAttention experimental environment is ready"
+Write-Host -ForegroundColor Green "$runtimeDisplayName experimental environment is ready"

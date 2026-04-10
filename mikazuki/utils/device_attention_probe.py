@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 
-from mikazuki.utils.amd_sageattention import probe_runtime_sageattention
+from mikazuki.utils.runtime_sageattention import probe_runtime_sageattention
 from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 from mikazuki.utils.sagebwd_runtime import probe_runtime_sagebwd
 
@@ -60,6 +60,55 @@ def probe_sageattention_status(torch_module, is_xpu_available) -> dict:
     return status
 
 
+def probe_flashattention_status(torch_module) -> dict:
+    status = {
+        "installed": False,
+        "importable": False,
+        "symbols_ok": False,
+        "reason": "Not checked yet.",
+    }
+
+    if not bool(torch_module.cuda.is_available()):
+        status["reason"] = "CUDA is not available."
+        return status
+
+    if bool(getattr(torch_module.version, "hip", None)):
+        status["reason"] = "FlashAttention 2 is not supported on ROCm in this runtime."
+        return status
+
+    try:
+        capability = torch_module.cuda.get_device_capability(torch_module.cuda.current_device())
+    except Exception:
+        capability = None
+
+    if capability is not None and capability < (8, 0):
+        status["reason"] = f"GPU capability {capability} is below SM80."
+        return status
+
+    try:
+        importlib.import_module("flash_attn")
+        flash_interface = importlib.import_module("flash_attn.flash_attn_interface")
+    except Exception as exc:
+        status["reason"] = f"flash-attn import failed: {short_exc_message(exc)}"
+        return status
+
+    status["installed"] = True
+    status["importable"] = True
+
+    missing_symbols = [
+        symbol_name
+        for symbol_name in ("flash_attn_func", "flash_attn_varlen_func")
+        if getattr(flash_interface, symbol_name, None) is None
+    ]
+    if missing_symbols:
+        status["reason"] = "required flash-attn symbols are missing: " + ", ".join(missing_symbols)
+        return status
+
+    status["symbols_ok"] = True
+    status["reason"] = "ok"
+    return status
+
+
 def build_attention_backend_summary(torch_module, xformers_info: dict, is_xpu_available) -> dict:
     runtime_mode = infer_attention_runtime_mode()
     sdpa_available = bool(
@@ -67,17 +116,18 @@ def build_attention_backend_summary(torch_module, xformers_info: dict, is_xpu_av
         and hasattr(torch_module.nn.functional, "scaled_dot_product_attention")
     )
     sageattention_status = probe_sageattention_status(torch_module, is_xpu_available)
+    flashattention_status = probe_flashattention_status(torch_module)
     sagebwd_probe = probe_runtime_sagebwd() if runtime_mode == "sagebwd-nvidia" else None
 
     preferred_backend = "torch"
-    if runtime_mode == "sageattention" and sageattention_status["symbols_ok"] and torch_module.cuda.is_available():
+    if runtime_mode == "flashattention" and flashattention_status["symbols_ok"] and torch_module.cuda.is_available():
+        preferred_backend = "flashattn"
+    elif runtime_mode in {"sageattention", "sageattention2"} and sageattention_status["symbols_ok"] and torch_module.cuda.is_available():
         preferred_backend = "sageattn"
     elif runtime_mode == "intel-xpu-sage" and sageattention_status["symbols_ok"] and is_xpu_available(torch_module):
         preferred_backend = "sageattn"
     elif runtime_mode in {"intel-xpu", "intel-xpu-sage"} and sdpa_available:
         preferred_backend = "sdpa"
-    elif runtime_mode == "rocm-amd-sage" and sageattention_status["symbols_ok"] and sdpa_available:
-        preferred_backend = "sageattn"
     elif runtime_mode == "rocm-amd" and sdpa_available:
         preferred_backend = "sdpa"
     elif xformers_info.get("supported"):
@@ -102,7 +152,7 @@ def build_attention_backend_summary(torch_module, xformers_info: dict, is_xpu_av
                 f" 当前探测结果：source={sagebwd_probe.get('source', '') or 'unknown'}，"
                 f"native_backward={native_ready}。"
             )
-    elif runtime_mode == "sageattention" and preferred_backend == "sageattn":
+    elif runtime_mode in {"sageattention", "sageattention2"} and preferred_backend == "sageattn":
         detail = (
             "SageAttention runtime active. Routes that explicitly enable sageattn will use SageAttention; "
             "other xformers configs will fall back to SDPA when supported."
@@ -111,28 +161,37 @@ def build_attention_backend_summary(torch_module, xformers_info: dict, is_xpu_av
             "当前为 SageAttention 专用运行时。显式启用 sageattn 的训练路由会使用 SageAttention；"
             "其他仍勾选 xformers 的配置在支持时会自动降级到 SDPA。"
         )
+    elif runtime_mode == "flashattention" and preferred_backend == "flashattn":
+        detail = (
+            "FlashAttention runtime active. Supported SDXL routes will auto-prefer FlashAttention 2 during training; "
+            "Anima routes can resolve to flash automatically or when attn_mode=flash. SDPA remains the safe fallback if a kernel call fails."
+        )
+        detail_zh = (
+            "当前为 FlashAttention 专用运行时。支持的 SDXL 路线在训练时会自动优先尝试 FlashAttention 2；"
+            "Anima 路线会在自动模式或 attn_mode=flash 时切到 flash。若内核调用失败，仍会自动回退到 SDPA。"
+        )
     elif runtime_mode == "intel-xpu-sage" and preferred_backend == "sageattn":
         detail = "Intel XPU Sage runtime active. Anima routes will try SageAttention first and fall back to SDPA automatically if the kernel call fails."
         detail_zh = "当前为 Intel XPU Sage 实验运行时。Anima 路线会优先尝试 SageAttention；若内核调用失败，会自动回退到 SDPA。"
-    elif runtime_mode == "rocm-amd-sage" and preferred_backend == "sageattn":
-        detail = (
-            "AMD ROCm Sage runtime active. AMD experimental Anima routes and the experimental SDXL Sage path "
-            "will try the local ROCm Triton Sage bridge first and fall back to SDPA automatically if the kernel call fails."
-        )
-        detail_zh = (
-            "当前为 AMD ROCm Sage 实验运行时。AMD 实验 Anima 路线与实验性的 SDXL Sage 路线会优先尝试本地 ROCm Triton Sage 桥接层；"
-            "若内核调用失败，会自动回退到 SDPA。"
-        )
     elif preferred_backend == "xformers":
         detail = "xformers is currently the strongest verified attention backend in this runtime."
         detail_zh = "当前运行时里，xformers 是最优先且已验证可用的 attention 后端。"
     elif preferred_backend == "sdpa":
-        if runtime_mode in {"intel-xpu", "intel-xpu-sage"}:
+        if runtime_mode == "flashattention":
+            detail = (
+                "FlashAttention runtime is active, but flash-attn is not currently ready "
+                f"({flashattention_status['reason']}). SDPA is being kept as the safe fallback backend."
+            )
+            detail_zh = (
+                "当前为 FlashAttention 运行时，但 flash-attn 目前不可用"
+                f"（{flashattention_status['reason']}），因此先保留 SDPA 作为安全回退后端。"
+            )
+        elif runtime_mode in {"intel-xpu", "intel-xpu-sage"}:
             detail = "Intel XPU currently defaults to SDPA. Experimental SageAttention requests will probe and then fall back automatically if needed."
             detail_zh = "当前 Intel XPU 运行时默认使用 SDPA。若显式请求实验性 SageAttention，会先探测，失败后自动回退。"
-        elif runtime_mode in {"rocm-amd", "rocm-amd-sage"}:
-            detail = "AMD ROCm currently defaults to SDPA. Experimental SageAttention requests will probe and then fall back automatically if needed."
-            detail_zh = "当前 AMD ROCm 运行时默认使用 SDPA。若显式请求实验性 SageAttention，会先探测，失败后自动回退。"
+        elif runtime_mode == "rocm-amd":
+            detail = "AMD ROCm currently defaults to SDPA. The old AMD SageAttention experimental route has been removed from this build."
+            detail_zh = "当前 AMD ROCm 运行时默认使用 SDPA。本构建已移除旧的 AMD SageAttention 实验入口。"
         else:
             detail = "SDPA is currently the default fallback attention backend in this runtime."
             detail_zh = "当前运行时里，SDPA 是默认的回退 attention 后端。"
@@ -144,6 +203,7 @@ def build_attention_backend_summary(torch_module, xformers_info: dict, is_xpu_av
         "runtime_mode": runtime_mode,
         "preferred_backend": preferred_backend,
         "sdpa_available": sdpa_available,
+        "flashattention": flashattention_status,
         "sageattention": sageattention_status,
         "detail": detail,
         "detail_zh": detail_zh,

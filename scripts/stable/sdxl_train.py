@@ -270,6 +270,7 @@ def train(args):
             args.sdpa,
             getattr(args, "sageattn", False),
             getattr(args, "flashattn", False),
+            getattr(args, "cross_attn_fused_kv", False),
         )
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
             vae.set_use_memory_efficient_attention_xformers(args.xformers and not getattr(args, "flashattn", False))

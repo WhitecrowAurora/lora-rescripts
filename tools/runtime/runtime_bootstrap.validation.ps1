@@ -43,54 +43,6 @@ function Test-ROCmAmdRuntimeReady {
     return $true
 }
 
-function Test-ROCmAmdSageRuntimeReady {
-    param (
-        [string]$PythonExe,
-        [hashtable]$Expected,
-        [ref]$Message
-    )
-
-    $probe = Get-ROCmAmdSageRuntimeProbe -PythonExe $PythonExe
-    if (-not $probe) {
-        $Message.Value = "Could not probe AMD ROCm Sage runtime details."
-        return $false
-    }
-
-    $issues = New-Object System.Collections.Generic.List[string]
-    if ($Expected.PythonMinor -and $probe.python_minor -ne $Expected.PythonMinor) {
-        $issues.Add((Get-ConsoleText -Key 'issue_python_minor_mismatch' -Tokens @{ actual = $probe.python_minor; expected = $Expected.PythonMinor })) | Out-Null
-    }
-    if ($Expected.Torch -and $probe.torch_version -ne $Expected.Torch) {
-        $issues.Add((Get-ConsoleText -Key 'issue_torch_mismatch' -Tokens @{ actual = $probe.torch_version; expected = $Expected.Torch })) | Out-Null
-    }
-    if ($Expected.TorchVision -and $probe.torchvision_version -ne $Expected.TorchVision) {
-        $issues.Add((Get-ConsoleText -Key 'issue_torchvision_mismatch' -Tokens @{ actual = $probe.torchvision_version; expected = $Expected.TorchVision })) | Out-Null
-    }
-    if ($Expected.HipPrefix -and -not [string]::IsNullOrWhiteSpace($probe.hip_version) -and -not $probe.hip_version.StartsWith($Expected.HipPrefix)) {
-        $issues.Add("HIP runtime is $($probe.hip_version), expected prefix $($Expected.HipPrefix)") | Out-Null
-    }
-    if (-not $probe.hip_available) {
-        $issues.Add("Torch is not a ROCm build.") | Out-Null
-    }
-    if (-not $probe.cuda_available) {
-        $issues.Add("ROCm GPU is not available to Torch.") | Out-Null
-    }
-    if (-not $probe.sageattention_ready) {
-        $issues.Add("AMD SageAttention bridge is not ready.") | Out-Null
-    }
-    if ($probe.runtime_error) {
-        $issues.Add($probe.runtime_error) | Out-Null
-    }
-
-    if ($issues.Count -gt 0) {
-        $Message.Value = ($issues -join '; ')
-        return $false
-    }
-
-    $Message.Value = Format-ROCmAmdSageRuntimeSummary -Probe $probe
-    return $true
-}
-
 function Test-IntelXpuRuntimeReady {
     param (
         [string]$PythonExe,
@@ -191,8 +143,7 @@ function Get-SelectedRuntimeValidationState {
         [hashtable]$SageAttentionExpected,
         [hashtable]$IntelXpuExpected,
         [hashtable]$IntelXpuSageExpected,
-        [hashtable]$ROCmAmdExpected,
-        [hashtable]$ROCmAmdSageExpected
+        [hashtable]$ROCmAmdExpected
     )
 
     $state = @{
@@ -209,8 +160,6 @@ function Get-SelectedRuntimeValidationState {
         IntelXpuSageRuntimeMessage = ""
         ROCmAmdRuntimeReady = $true
         ROCmAmdRuntimeMessage = ""
-        ROCmAmdSageRuntimeReady = $true
-        ROCmAmdSageRuntimeMessage = ""
     }
 
     switch ($RuntimeName) {
@@ -229,6 +178,11 @@ function Get-SelectedRuntimeValidationState {
             $state.SageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $PythonExe -Expected $SageAttentionExpected -RuntimeDirName $sageAttentionRuntimeDirName -Message ([ref]$message)
             $state.SageAttentionRuntimeMessage = $message
         }
+        "sageattention2" {
+            $message = ""
+            $state.SageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $PythonExe -Expected $SageAttentionExpected -RuntimeDirName $sageAttention2RuntimeDirName -Message ([ref]$message)
+            $state.SageAttentionRuntimeMessage = $message
+        }
         "intel-xpu" {
             $message = ""
             $state.IntelXpuRuntimeReady = Test-IntelXpuRuntimeReady -PythonExe $PythonExe -Expected $IntelXpuExpected -Message ([ref]$message)
@@ -243,11 +197,6 @@ function Get-SelectedRuntimeValidationState {
             $message = ""
             $state.ROCmAmdRuntimeReady = Test-ROCmAmdRuntimeReady -PythonExe $PythonExe -Expected $ROCmAmdExpected -Message ([ref]$message)
             $state.ROCmAmdRuntimeMessage = $message
-        }
-        "rocm-amd-sage" {
-            $message = ""
-            $state.ROCmAmdSageRuntimeReady = Test-ROCmAmdSageRuntimeReady -PythonExe $PythonExe -Expected $ROCmAmdSageExpected -Message ([ref]$message)
-            $state.ROCmAmdSageRuntimeMessage = $message
         }
     }
 
@@ -268,7 +217,6 @@ function Test-SelectedRuntimeBootstrapReady {
         -and $State.SageAttentionRuntimeReady `
         -and $State.IntelXpuRuntimeReady `
         -and $State.IntelXpuSageRuntimeReady `
-        -and $State.ROCmAmdRuntimeReady `
-        -and $State.ROCmAmdSageRuntimeReady
+        -and $State.ROCmAmdRuntimeReady
     )
 }

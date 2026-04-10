@@ -184,6 +184,16 @@ function Get-LaunchProfiles {
             EnableFlashAttentionStartup = $false
         },
         [pscustomobject]@{
+            Id = 'sageattention2'
+            Label = Get-ConsoleText -Key 'launcher_profile_sageattention2_label'
+            Description = Get-ConsoleText -Key 'launcher_profile_sageattention2_description'
+            PreferredRuntime = 'sageattention2'
+            AttentionPolicy = 'prefer_sage'
+            EnableSageStartup = $false
+            EnableBlackwellStartup = $false
+            EnableFlashAttentionStartup = $false
+        },
+        [pscustomobject]@{
             Id = 'flashattention'
             Label = Get-ConsoleText -Key 'launcher_profile_flashattention_label'
             Description = Get-ConsoleText -Key 'launcher_profile_flashattention_description'
@@ -275,6 +285,7 @@ function Apply-LaunchProfile {
 
 $flashAttentionPython = Get-FirstExistingPath @((Get-RuntimeFileCandidates -RepoRoot $repoRoot -RuntimeName 'flashattention' -RelativeFilePath 'python.exe').Path)
 $sagePython = Get-FirstExistingPath @((Get-RuntimeFileCandidates -RepoRoot $repoRoot -RuntimeName 'sageattention' -RelativeFilePath 'python.exe').Path)
+$sage2Python = Get-FirstExistingPath @((Get-RuntimeFileCandidates -RepoRoot $repoRoot -RuntimeName 'sageattention2' -RelativeFilePath 'python.exe').Path)
 $blackwellPython = Get-FirstExistingPath @((Get-RuntimeFileCandidates -RepoRoot $repoRoot -RuntimeName 'blackwell' -RelativeFilePath 'python.exe').Path)
 
 $requestedConsoleLanguage = $Language
@@ -310,6 +321,7 @@ $selectionPayload = [ordered]@{
     console_language = Get-ConsoleLanguage
     flashattention_runtime_detected = [bool]$flashAttentionPython
     sage_runtime_detected = [bool]$sagePython
+    sage2_runtime_detected = [bool]$sage2Python
     blackwell_runtime_detected = [bool]$blackwellPython
 }
 

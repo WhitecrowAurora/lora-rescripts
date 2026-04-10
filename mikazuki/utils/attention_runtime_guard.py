@@ -68,7 +68,7 @@ def _has_importable_flashattention() -> bool:
 
 def resolve_anima_runtime_attention_backend(gpu_ids=None) -> str:
     runtime_mode = get_attention_runtime_mode()
-    if runtime_mode in {"sageattention", "sagebwd-nvidia", "intel-xpu-sage", "rocm-amd-sage"}:
+    if runtime_mode in {"sageattention", "sageattention2", "sagebwd-nvidia", "intel-xpu-sage"}:
         return "sageattn"
     if runtime_mode == "flashattention":
         return "flash" if _has_importable_flashattention() else "torch"
@@ -245,7 +245,7 @@ def apply_startup_attention_policy(config: dict, parse_boolish) -> Optional[str]
         if runtime_mode in {"intel-xpu", "intel-xpu-sage"}:
             message = "Intel XPU 专用启动模式已自动禁用 xformers / mem_eff_attn。若显式请求 SageAttention，将在训练时按实验方式探测，并在失败后自动回退为 SDPA。"
         else:
-            message = "AMD ROCm 专用启动模式已自动禁用 xformers / mem_eff_attn。若显式请求 SageAttention，将在训练时按实验方式探测，并在失败后自动回退为 SDPA。"
+            message = "AMD ROCm 专用启动模式已自动禁用 xformers / mem_eff_attn，并固定走 SDPA 兼容主线。"
         log.warning(message)
         return message
 
@@ -278,7 +278,7 @@ def apply_startup_attention_policy(config: dict, parse_boolish) -> Optional[str]
         return None
 
     runtime_mode = get_attention_runtime_mode()
-    if policy != "prefer_sage" or runtime_mode not in {"sageattention", "sagebwd-nvidia", "intel-xpu-sage", "rocm-amd-sage"}:
+    if policy != "prefer_sage" or runtime_mode not in {"sageattention", "sageattention2", "sagebwd-nvidia", "intel-xpu-sage"}:
         return None
 
     if parse_boolish(config.get("mem_eff_attn", False)):
@@ -308,8 +308,6 @@ def apply_startup_attention_policy(config: dict, parse_boolish) -> Optional[str]
             message = "启动器当前处于 SageBwd NVIDIA 实验模式。本次训练会先沿用现有 SageAttention 兼容路径，并为后续 SageBwd 接入预留运行时标记。"
         elif runtime_mode == "intel-xpu-sage":
             message = "启动器当前处于 Intel XPU Sage 实验模式，本次训练已自动优先尝试 SageAttention。若内核调用失败，运行时会自动回退到 SDPA。"
-        elif runtime_mode == "rocm-amd-sage":
-            message = "启动器当前处于 AMD ROCm Sage 实验模式，本次训练已自动优先尝试 SageAttention。若内核调用失败，运行时会自动回退到 SDPA。"
         else:
             message = "启动器当前处于 SageAttention 默认模式，本次训练已自动优先使用 SageAttention。"
         log.info(message)
@@ -319,7 +317,7 @@ def apply_startup_attention_policy(config: dict, parse_boolish) -> Optional[str]
 
 def apply_sageattention_runtime_override(config: dict, parse_boolish) -> Optional[str]:
     runtime_mode = get_attention_runtime_mode()
-    if runtime_mode not in {"sageattention", "sagebwd-nvidia"}:
+    if runtime_mode not in {"sageattention", "sageattention2", "sagebwd-nvidia"}:
         return None
 
     if parse_boolish(config.get("mem_eff_attn", False)):

@@ -1,6 +1,6 @@
 function Get-ExperimentalRuntimeDisplayName {
     param(
-        [ValidateSet('intel-xpu', 'intel-xpu-sage', 'rocm-amd', 'rocm-amd-sage')]
+        [ValidateSet('intel-xpu', 'intel-xpu-sage', 'rocm-amd')]
         [string]$RuntimeName,
         [ValidateSet('status', 'python')]
         [string]$Kind = 'status'
@@ -37,16 +37,6 @@ function Get-ExperimentalRuntimeDisplayName {
             if ($language -eq 'zh') { return 'AMD ROCm' }
             if ($language -eq 'ja') { return 'AMD ROCm' }
             return 'AMD ROCm'
-        }
-        'rocm-amd-sage' {
-            if ($Kind -eq 'python') {
-                if ($language -eq 'zh') { return 'AMD ROCm Sage 实验运行时 Python' }
-                if ($language -eq 'ja') { return 'AMD ROCm Sage 実験ランタイム Python' }
-                return 'AMD ROCm Sage experimental Python'
-            }
-            if ($language -eq 'zh') { return 'AMD ROCm Sage' }
-            if ($language -eq 'ja') { return 'AMD ROCm Sage' }
-            return 'AMD ROCm Sage'
         }
     }
 }
@@ -217,14 +207,6 @@ function Format-ROCmAmdRuntimeSummary {
     return "Python $($Probe.python_version); Torch $($Probe.torch_version); TorchVision $($Probe.torchvision_version); HIP $($Probe.hip_version); GPU $($Probe.gpu_name)"
 }
 
-function Format-ROCmAmdSageRuntimeSummary {
-    param(
-        [object]$Probe
-    )
-
-    return "Python $($Probe.python_version); Torch $($Probe.torch_version); TorchVision $($Probe.torchvision_version); Triton $($Probe.triton_version); HIP $($Probe.hip_version); GPU $($Probe.gpu_name); Source $($Probe.sageattention_source)"
-}
-
 function Format-IntelXpuRuntimeSummary {
     param(
         [object]$Probe
@@ -267,7 +249,6 @@ function Get-MainRuntimeModulesForRuntime {
         "intel-xpu" { return $intelRuntimeModules }
         "intel-xpu-sage" { return $intelSageRuntimeModules }
         "rocm-amd" { return $amdRuntimeModules }
-        "rocm-amd-sage" { return $amdRuntimeModules }
         default { return $mainRuntimeModules }
     }
 }

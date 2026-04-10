@@ -34,7 +34,7 @@ from packaging.version import Version
 import torch
 from library.device_utils import init_ipex, clean_memory_on_device
 from library.strategy_base import LatentsCachingStrategy, TokenizeStrategy, TextEncoderOutputsCachingStrategy, TextEncodingStrategy
-from mikazuki.utils.amd_sageattention import load_runtime_sageattention_symbols
+from mikazuki.utils.runtime_sageattention import load_runtime_sageattention_symbols
 from mikazuki.utils.runtime_mode import infer_attention_runtime_mode, is_amd_rocm_runtime, is_intel_xpu_runtime
 from mikazuki.utils.runtime_safe_preview import (
     clamp_safe_preview_request,
@@ -941,7 +941,6 @@ class BaseDataset(torch.utils.data.Dataset):
     def set_current_epoch(self, epoch):
         if not self.current_epoch == epoch:  # epochが切り替わったらバケツをシャッフルする
             if epoch > self.current_epoch:
-                logger.info("epoch is incremented. current_epoch: {}, epoch: {}".format(self.current_epoch, epoch))
                 num_epochs = epoch - self.current_epoch
                 for _ in range(num_epochs):
                     self.current_epoch += 1
@@ -3665,7 +3664,15 @@ def enable_flashattention(*named_models):
         model.set_use_flashattn(True)
 
 
-def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdpa, sageattn=False, flashattn=False):
+def replace_unet_modules(
+    unet: UNet2DConditionModel,
+    mem_eff_attn,
+    xformers,
+    sdpa,
+    sageattn=False,
+    flashattn=False,
+    cross_attn_fused_kv=False,
+):
     if mem_eff_attn:
         logger.info("Enable memory efficient attention for U-Net")
         logger.info("Training attention backend: mem_eff_attn")
@@ -3690,6 +3697,14 @@ def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdp
         logger.info("Training attention backend: sdpa")
         logger.info("当前训练使用的注意力后端：sdpa")
         unet.set_use_sdpa(True)
+
+    if cross_attn_fused_kv:
+        if hasattr(unet, "set_use_cross_attn_fused_kv"):
+            logger.info("Enable experimental fused K/V projection for SDXL cross attention")
+            logger.info("当前已启用 SDXL cross-attn 的 fused K/V projection 实验开关")
+            unet.set_use_cross_attn_fused_kv(True)
+        else:
+            logger.warning("cross_attn_fused_kv was requested, but the current U-Net does not expose this experimental hook.")
 
 
 def _module_has_channels_last_candidate(module: torch.nn.Module) -> bool:
@@ -4390,6 +4405,11 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--flashattn",
         action="store_true",
         help="use FlashAttention 2 for CrossAttention (experimental; requires flash-attn runtime) / CrossAttentionにFlashAttention 2を使う（実験的・flash-attn実行環境が必要） / 为 CrossAttention 启用 FlashAttention 2（实验性，需要 flash-attn 环境）",
+    )
+    parser.add_argument(
+        "--cross_attn_fused_kv",
+        action="store_true",
+        help="enable experimental fused K/V projection for SDXL cross attention / SDXL の cross attention に fused K/V projection 実験機能を使う / 为 SDXL 的 cross attention 启用 fused K/V projection 实验功能",
     )
     parser.add_argument(
         "--vae",

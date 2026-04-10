@@ -56,7 +56,7 @@ def refresh_xformers_status(torch_module=None):
         xformers_status["reason"] = "xformers is disabled for Intel XPU runtime."
         return xformers_status
 
-    if runtime_mode in {"rocm-amd", "rocm-amd-sage"} or bool(getattr(torch_module.version, "hip", None)):
+    if runtime_mode == "rocm-amd" or bool(getattr(torch_module.version, "hip", None)):
         xformers_status["reason"] = "xformers is disabled for AMD ROCm runtime."
         return xformers_status
 
@@ -195,12 +195,13 @@ def check_torch_gpu():
 
         status = refresh_xformers_status(torch)
         attention_summary = build_attention_backend_summary(torch, status, _is_xpu_available)
-        log.info(f"Running on attention backend: {attention_summary['preferred_backend']}")
-        log.info(f"当前运行的注意力后端：{attention_summary['preferred_backend']}")
+        log.info(f"Preferred training attention backend: {attention_summary['preferred_backend']}")
+        log.info(f"当前检测到的训练优先注意力后端：{attention_summary['preferred_backend']}")
         log.info(
             "Attention backend summary: "
             f"preferred={attention_summary['preferred_backend']} | "
             f"runtime={attention_summary['runtime_mode']} | "
+            f"flashattn={'ready' if attention_summary['flashattention']['symbols_ok'] else 'unavailable'} | "
             f"xformers={'ready' if status.get('supported') else 'unavailable'} | "
             f"sdpa={'ready' if attention_summary['sdpa_available'] else 'unavailable'} | "
             f"sageattn={'ready' if attention_summary['sageattention']['symbols_ok'] else 'unavailable'}"
@@ -209,7 +210,17 @@ def check_torch_gpu():
         log.info(f"注意力后端摘要：当前优先后端={attention_summary['preferred_backend']}。{attention_summary['detail_zh']}")
 
         if not status["installed"]:
-            if attention_summary["runtime_mode"] == "sageattention" and attention_summary["sageattention"]["symbols_ok"]:
+            if attention_summary["runtime_mode"] == "flashattention" and attention_summary["flashattention"]["symbols_ok"]:
+                log.info(
+                    f"xformers is not installed in this FlashAttention runtime: {status['reason']}"
+                )
+                log.info(
+                    "This is expected for the dedicated FlashAttention runtime. Supported SDXL routes can still use flash-attn here, and unsupported xformers-style configs will fall back to SDPA when possible."
+                )
+                log.info(
+                    f"FlashAttention 专用运行时中未安装 xformers：{status['reason']}。这属于预期行为；支持的 SDXL 路线仍可使用 flash-attn，不兼容的 xformers 配置会尽量回退到 sdpa。"
+                )
+            elif attention_summary["runtime_mode"] in {"sageattention", "sageattention2"} and attention_summary["sageattention"]["symbols_ok"]:
                 log.info(
                     f"xformers is not installed in this SageAttention runtime: {status['reason']}"
                 )

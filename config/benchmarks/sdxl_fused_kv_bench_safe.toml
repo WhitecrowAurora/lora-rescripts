@@ -1,0 +1,73 @@
+model_train_type = "sdxl-lora"
+pretrained_model_name_or_path = "H:/lora-rescripts/models/silentEraFurrymixNAIXL_v10.safetensors"
+train_data_dir = "H:/lora-rescripts/tmp/sdxl_fused_kv_bench/dataset"
+caption_extension = ".txt"
+prior_loss_weight = 1.0
+
+resolution = "1024,1024"
+enable_bucket = true
+bucket_no_upscale = true
+min_bucket_reso = 1024
+max_bucket_reso = 1024
+bucket_reso_steps = 64
+
+output_dir = "H:/lora-rescripts/tmp/sdxl_fused_kv_bench/output"
+output_name = "sdxl_fused_kv_bench"
+save_model_as = "safetensors"
+save_precision = "fp16"
+save_every_n_steps = 999999
+save_state = false
+save_state_on_train_end = false
+logging_dir = "H:/lora-rescripts/logs/sdxl_fused_kv_bench"
+log_with = "tensorboard"
+log_prefix = "sdxl-fused-kv-bench"
+
+max_train_steps = 20
+train_batch_size = 1
+gradient_checkpointing = true
+gradient_accumulation_steps = 1
+max_data_loader_n_workers = 0
+persistent_data_loader_workers = false
+
+network_module = "networks.lora"
+network_dim = 8
+network_alpha = 8
+network_train_unet_only = true
+network_train_text_encoder_only = false
+
+learning_rate = 0.0001
+unet_lr = 0.0001
+text_encoder_lr = 0.0
+lr_scheduler = "constant"
+lr_warmup_steps = 0
+optimizer_type = "AdamW"
+
+shuffle_caption = false
+keep_tokens = 1
+max_token_length = 225
+
+mixed_precision = "fp16"
+full_fp16 = false
+full_bf16 = false
+no_half_vae = false
+torch_compile = false
+opt_channels_last = false
+mem_eff_attn = false
+xformers = false
+sdpa = false
+flashattn = true
+sageattn = false
+cross_attn_fused_kv = false
+
+cache_latents = true
+cache_latents_to_disk = true
+cache_text_encoder_outputs = true
+cache_text_encoder_outputs_to_disk = true
+skip_cache_check = false
+
+sample_every_n_steps = 0
+sample_every_n_epochs = 0
+sample_at_first = false
+
+experimental_attention_profile_window = 10
+pytorch_cuda_expandable_segments = true

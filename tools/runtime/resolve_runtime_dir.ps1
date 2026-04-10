@@ -28,9 +28,10 @@ $aliasMap = @{
     "python_xpu_intel" = @{ Preferred = "python_xpu_intel"; Names = @("python_xpu_intel") }
     "python_xpu_intel_sage" = @{ Preferred = "python_xpu_intel_sage"; Names = @("python_xpu_intel_sage") }
     "python_rocm_amd" = @{ Preferred = "python_rocm_amd"; Names = @("python_rocm_amd") }
-    "python_rocm_amd_sage" = @{ Preferred = "python_rocm_amd_sage"; Names = @("python_rocm_amd_sage") }
     "python-sageattention" = @{ Preferred = "python-sageattention"; Names = @("python-sageattention", "python_sageattention") }
     "python_sageattention" = @{ Preferred = "python-sageattention"; Names = @("python-sageattention", "python_sageattention") }
+    "python-sageattention2" = @{ Preferred = "python-sageattention2"; Names = @("python-sageattention2", "python_sageattention2") }
+    "python_sageattention2" = @{ Preferred = "python-sageattention2"; Names = @("python-sageattention2", "python_sageattention2") }
     "python_sagebwd_nvidia" = @{ Preferred = "python_sagebwd_nvidia"; Names = @("python_sagebwd_nvidia", "python-sagebwd-nvidia") }
     "python-sagebwd-nvidia" = @{ Preferred = "python_sagebwd_nvidia"; Names = @("python_sagebwd_nvidia", "python-sagebwd-nvidia") }
 }

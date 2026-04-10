@@ -5,7 +5,7 @@ import sys
 from functools import lru_cache
 from typing import Any
 
-from mikazuki.utils.amd_sageattention import load_runtime_sageattention_symbols
+from mikazuki.utils.runtime_sageattention import load_runtime_sageattention_symbols
 from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 
 

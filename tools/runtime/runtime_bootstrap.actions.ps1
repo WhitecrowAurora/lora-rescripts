@@ -23,6 +23,12 @@ function Get-SelectedRuntimeStateProjection {
                 Message = [string]$State.SageAttentionRuntimeMessage
             }
         }
+        "sageattention2" {
+            return [pscustomobject]@{
+                Ready = [bool]$State.SageAttentionRuntimeReady
+                Message = [string]$State.SageAttentionRuntimeMessage
+            }
+        }
         "intel-xpu" {
             return [pscustomobject]@{
                 Ready = [bool]$State.IntelXpuRuntimeReady
@@ -39,12 +45,6 @@ function Get-SelectedRuntimeStateProjection {
             return [pscustomobject]@{
                 Ready = [bool]$State.ROCmAmdRuntimeReady
                 Message = [string]$State.ROCmAmdRuntimeMessage
-            }
-        }
-        "rocm-amd-sage" {
-            return [pscustomobject]@{
-                Ready = [bool]$State.ROCmAmdSageRuntimeReady
-                Message = [string]$State.ROCmAmdSageRuntimeMessage
             }
         }
     }
@@ -81,6 +81,13 @@ function Get-SelectedRuntimeInstallPlan {
                 Arguments = @('-Profile', $SageAttentionProfile)
             }
         }
+        "sageattention2" {
+            return [pscustomobject]@{
+                UsesDedicatedRuntimeNotice = $true
+                Script = 'install_sageattention2.ps1'
+                Arguments = @()
+            }
+        }
         "intel-xpu" {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
@@ -102,13 +109,6 @@ function Get-SelectedRuntimeInstallPlan {
                 Arguments = @()
             }
         }
-        "rocm-amd-sage" {
-            return [pscustomobject]@{
-                UsesDedicatedRuntimeNotice = $true
-                Script = 'install_rocm_amd_sage.ps1'
-                Arguments = @()
-            }
-        }
         default {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $false
@@ -116,6 +116,52 @@ function Get-SelectedRuntimeInstallPlan {
                 Arguments = @()
             }
         }
+    }
+}
+
+function Convert-InstallArgumentListToInvocationPlan {
+    param (
+        [object[]]$Arguments
+    )
+
+    $namedArguments = @{}
+    $positionalArguments = @()
+
+    if ($null -eq $Arguments) {
+        return [pscustomobject]@{
+            NamedArguments = $namedArguments
+            PositionalArguments = $positionalArguments
+        }
+    }
+
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $current = $Arguments[$i]
+        $token = [string]$current
+        if (-not [string]::IsNullOrWhiteSpace($token) -and $token.StartsWith('-')) {
+            $name = $token.TrimStart('-')
+            $hasValue = $false
+            $value = $true
+            if (($i + 1) -lt $Arguments.Count) {
+                $nextToken = [string]$Arguments[$i + 1]
+                if ([string]::IsNullOrWhiteSpace($nextToken) -or -not $nextToken.StartsWith('-')) {
+                    $hasValue = $true
+                    $value = $Arguments[$i + 1]
+                }
+            }
+
+            $namedArguments[$name] = $value
+            if ($hasValue) {
+                $i++
+            }
+            continue
+        }
+
+        $positionalArguments += ,$current
+    }
+
+    return [pscustomobject]@{
+        NamedArguments = $namedArguments
+        PositionalArguments = $positionalArguments
     }
 }
 
@@ -152,7 +198,27 @@ function Install-SelectedRuntimeDependencies {
         Write-ConsoleText -Key 'install_main_dependencies' -ForegroundColor 'Yellow'
     }
 
-    & (Join-Path $repoRoot $plan.Script) @($plan.Arguments)
+    $scriptPath = Join-Path $repoRoot $plan.Script
+    $invocationPlan = Convert-InstallArgumentListToInvocationPlan -Arguments @($plan.Arguments)
+    $namedArguments = $invocationPlan.NamedArguments
+    $positionalArguments = $invocationPlan.PositionalArguments
+
+    if ($namedArguments.Count -gt 0 -and $positionalArguments.Count -gt 0) {
+        & $scriptPath @namedArguments @($positionalArguments)
+        return
+    }
+
+    if ($namedArguments.Count -gt 0) {
+        & $scriptPath @namedArguments
+        return
+    }
+
+    if ($positionalArguments.Count -gt 0) {
+        & $scriptPath @($positionalArguments)
+        return
+    }
+
+    & $scriptPath
 }
 
 function Get-SelectedRuntimeInstallFailureMessage {

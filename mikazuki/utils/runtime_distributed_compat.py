@@ -33,7 +33,7 @@ def apply_torch_distributed_compat_shims() -> None:
     if not patched_names:
         return
 
-    logger.warning(
+    logger.info(
         "Applied torch.distributed compatibility shims for the current runtime: %s",
         ", ".join(patched_names),
     )

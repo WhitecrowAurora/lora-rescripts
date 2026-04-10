@@ -79,7 +79,7 @@ def ensure_project_local_main_python():
     raise RuntimeError(
         "This build is locked to project-local Python by default. "
         "Launch it via run_gui.ps1/run_gui.sh after preparing one of the supported runtime folders under ./env/ (preferred) or the repo root: "
-        "./python, ./python_blackwell, ./python_xpu_intel, ./python_xpu_intel_sage, ./python_rocm_amd, ./python_rocm_amd_sage, ./python_sagebwd_nvidia, ./python-sageattention, or ./venv. "
+        "./python, ./python_blackwell, ./python_xpu_intel, ./python_xpu_intel_sage, ./python_rocm_amd, ./python_sagebwd_nvidia, ./python-sageattention, or ./venv. "
         "Legacy ./python-sagebwd-nvidia and ./python_sageattention folders are also accepted in either location. "
         "For development only, set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 to override this guard intentionally."
     )

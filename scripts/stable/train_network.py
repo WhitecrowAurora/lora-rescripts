@@ -4,6 +4,8 @@ import argparse
 import math
 import os
 import typing
+from collections import defaultdict
+from contextlib import contextmanager
 from typing import Any, List, Union, Optional
 import sys
 import random
@@ -52,6 +54,179 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class ExperimentalAttentionStepProfiler:
+    SECTION_ORDER = (
+        "forward",
+        "backward",
+        "optimizer",
+        "preview",
+        "save",
+    )
+
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        accelerator: Optional[Accelerator],
+        *,
+        route_label: str,
+        is_sdxl: bool,
+    ) -> None:
+        self.route_label = route_label
+        self.is_sdxl = bool(is_sdxl)
+        self.backend = train_util.resolve_attention_backend(args, default="default")
+
+        requested_window = getattr(args, "experimental_attention_profile_window", None)
+        if requested_window in (None, ""):
+            window_size = 50 if self.backend in {"flashattn", "sageattn"} else 0
+        else:
+            try:
+                window_size = int(requested_window)
+            except (TypeError, ValueError):
+                window_size = 0
+
+        self.window_size = max(int(window_size), 0)
+        self.enabled = bool(accelerator is not None and accelerator.is_local_main_process and self.window_size > 0)
+        self._current_step_totals = defaultdict(float)
+        self._window_totals = defaultdict(float)
+        self._window_steps = 0
+        self._micro_step_start: Optional[float] = None
+        self._micro_step_wall_total = 0.0
+        self._last_attention_snapshot = self._snapshot_attention_stats()
+
+        if self.enabled:
+            logger.info(
+                f"{self.route_label}: experimental attention timing profiler enabled for backend={self.backend}. "
+                f"Aggregated timing will be logged every {self.window_size} optimizer step(s)."
+            )
+            logger.info(
+                f"{self.route_label}：已启用实验 attention 步骤剖析器，当前后端={self.backend}。"
+                f"每 {self.window_size} 个优化步会输出一次聚合耗时摘要。"
+            )
+
+    def _snapshot_attention_stats(self) -> dict:
+        snapshot: dict[str, int] = {}
+
+        try:
+            from library import attention as unified_attention
+
+            snapshot.update(
+                {f"unified_{key}": int(value) for key, value in unified_attention.snapshot_runtime_attention_stats().items()}
+            )
+        except Exception:
+            pass
+
+        if self.is_sdxl:
+            try:
+                from library import sdxl_original_unet as sdxl_attention
+
+                snapshot.update(
+                    {f"sdxl_{key}": int(value) for key, value in sdxl_attention.snapshot_sdxl_attention_runtime_stats().items()}
+                )
+            except Exception:
+                pass
+
+        return snapshot
+
+    def _build_attention_delta_summary(self) -> str:
+        current_snapshot = self._snapshot_attention_stats()
+        if not current_snapshot:
+            return ""
+
+        parts: list[str] = []
+        for key in sorted(current_snapshot.keys()):
+            delta = int(current_snapshot.get(key, 0)) - int(self._last_attention_snapshot.get(key, 0))
+            if delta > 0:
+                parts.append(f"{key}+={delta}")
+
+        self._last_attention_snapshot = current_snapshot
+        return " | ".join(parts)
+
+    def begin_micro_step(self) -> None:
+        if not self.enabled:
+            return
+        self._micro_step_start = time.perf_counter()
+
+    def end_micro_step(self) -> None:
+        if not self.enabled or self._micro_step_start is None:
+            return
+        self._micro_step_wall_total += time.perf_counter() - self._micro_step_start
+        self._micro_step_start = None
+
+    def discard_current_step(self) -> None:
+        if not self.enabled:
+            return
+        self._current_step_totals = defaultdict(float)
+        self._micro_step_wall_total = 0.0
+        self._micro_step_start = None
+
+    @contextmanager
+    def section(self, section_name: str):
+        if not self.enabled:
+            yield
+            return
+
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - start_time
+            if elapsed >= 0:
+                self._current_step_totals[section_name] += elapsed
+
+    def finalize_optimizer_step(self, global_step: int) -> None:
+        if not self.enabled:
+            return
+
+        self._window_totals["step_total"] += self._micro_step_wall_total
+        for section_name, elapsed in self._current_step_totals.items():
+            self._window_totals[section_name] += elapsed
+
+        self._window_steps += 1
+        self._current_step_totals = defaultdict(float)
+        self._micro_step_wall_total = 0.0
+
+        if self._window_steps >= self.window_size:
+            self.log_window_summary(global_step)
+            self._window_totals = defaultdict(float)
+            self._window_steps = 0
+
+    def flush_remaining(self, global_step: int) -> None:
+        if not self.enabled:
+            return
+        if self._window_steps > 0 and float(self._window_totals.get("step_total", 0.0)) > 0:
+            self.log_window_summary(global_step)
+        self._window_totals = defaultdict(float)
+        self._window_steps = 0
+
+    def log_window_summary(self, global_step: int) -> None:
+        if not self.enabled or self._window_steps <= 0:
+            return
+
+        total = float(self._window_totals.get("step_total", 0.0))
+        if total <= 0:
+            return
+
+        avg_step_ms = total * 1000.0 / self._window_steps
+        parts = [f"backend={self.backend}", f"avg_step={avg_step_ms:.2f} ms"]
+        parts_zh = [f"后端={self.backend}", f"平均每步={avg_step_ms:.2f} ms"]
+        for section_name in self.SECTION_ORDER:
+            elapsed = float(self._window_totals.get(section_name, 0.0))
+            if elapsed <= 0:
+                continue
+            avg_ms = elapsed * 1000.0 / self._window_steps
+            ratio = elapsed / total * 100.0
+            parts.append(f"{section_name}={avg_ms:.2f} ms ({ratio:.1f}%)")
+            parts_zh.append(f"{section_name}={avg_ms:.2f} ms（{ratio:.1f}%）")
+
+        attention_delta = self._build_attention_delta_summary()
+        if attention_delta:
+            parts.append(f"attention_stats={attention_delta}")
+            parts_zh.append(f"attention统计={attention_delta}")
+
+        logger.info(f"{self.route_label} step timing window @ step {global_step}: " + " | ".join(parts))
+        logger.info(f"{self.route_label} 步骤耗时窗口统计 @ step {global_step}：" + " | ".join(parts_zh))
 
 
 class NetworkTrainer:
@@ -1429,6 +1604,12 @@ class NetworkTrainer:
         loss_recorder = train_util.LossRecorder()
         val_step_loss_recorder = train_util.LossRecorder()
         val_epoch_loss_recorder = train_util.LossRecorder()
+        attention_step_profiler = ExperimentalAttentionStepProfiler(
+            args,
+            accelerator,
+            route_label="SDXL network training" if self.is_sdxl else "Network training",
+            is_sdxl=self.is_sdxl,
+        )
 
         del train_dataset_group
         if val_dataset_group is not None:
@@ -1575,56 +1756,64 @@ class NetworkTrainer:
                     initial_step -= 1
                     continue
 
-                with accelerator.accumulate(training_model):
-                    on_step_start_for_network(text_encoder, unet)
+                attention_step_profiler.begin_micro_step()
+                try:
+                    with accelerator.accumulate(training_model):
+                        on_step_start_for_network(text_encoder, unet)
 
-                    # preprocess batch for each model
-                    self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
+                        # preprocess batch for each model
+                        self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
 
-                    loss = self.process_batch(
-                        batch,
-                        text_encoders,
-                        unet,
-                        network,
-                        vae,
-                        noise_scheduler,
-                        vae_dtype,
-                        weight_dtype,
-                        accelerator,
-                        args,
-                        text_encoding_strategy,
-                        tokenize_strategy,
-                        is_train=True,
-                        train_text_encoder=train_text_encoder,
-                        train_unet=train_unet,
-                    )
+                        with attention_step_profiler.section("forward"):
+                            loss = self.process_batch(
+                                batch,
+                                text_encoders,
+                                unet,
+                                network,
+                                vae,
+                                noise_scheduler,
+                                vae_dtype,
+                                weight_dtype,
+                                accelerator,
+                                args,
+                                text_encoding_strategy,
+                                tokenize_strategy,
+                                is_train=True,
+                                train_text_encoder=train_text_encoder,
+                                train_unet=train_unet,
+                            )
 
-                    current_loss = loss.detach().item()
-                    if safeguard is not None:
-                        safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
-                        if safeguard_decision.reason:
-                            logger.warning(safeguard_decision.reason)
-                        if safeguard_decision.stop_training:
-                            raise RuntimeError(safeguard_decision.reason)
-                        if safeguard_decision.skip_step:
+                        current_loss = loss.detach().item()
+                        if safeguard is not None:
+                            safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                            if safeguard_decision.reason:
+                                logger.warning(safeguard_decision.reason)
+                            if safeguard_decision.stop_training:
+                                raise RuntimeError(safeguard_decision.reason)
+                            if safeguard_decision.skip_step:
+                                optimizer.zero_grad(set_to_none=True)
+                                attention_step_profiler.discard_current_step()
+                                continue
+
+                        with attention_step_profiler.section("backward"):
+                            accelerator.backward(loss)
+                            if accelerator.sync_gradients:
+                                self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                                if args.max_grad_norm != 0.0:
+                                    params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                                if hasattr(network, "update_grad_norms"):
+                                    network.update_grad_norms()
+                                if hasattr(network, "update_norms"):
+                                    network.update_norms()
+
+                        with attention_step_profiler.section("optimizer"):
+                            optimizer.step()
+                            lr_scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
-                            continue
-
-                    accelerator.backward(loss)
-                    if accelerator.sync_gradients:
-                        self.all_reduce_network(accelerator, network)  # sync DDP grad manually
-                        if args.max_grad_norm != 0.0:
-                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-
-                        if hasattr(network, "update_grad_norms"):
-                            network.update_grad_norms()
-                        if hasattr(network, "update_norms"):
-                            network.update_norms()
-
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                finally:
+                    attention_step_profiler.end_micro_step()
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
@@ -1658,26 +1847,33 @@ class NetworkTrainer:
                         ema_model.update(global_step)
 
                     optimizer_eval_fn()
-                    self.sample_images(
-                        accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
-                    )
+                    with attention_step_profiler.section("preview"):
+                        self.sample_images(
+                            accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
+                        )
                     progress_bar.unpause()
 
                     # 指定ステップごとにモデルを保存
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                        accelerator.wait_for_everyone()
-                        if accelerator.is_main_process:
-                            ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, max(0, effective_epoch_no - 1))
+                        with attention_step_profiler.section("save"):
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                save_model(
+                                    ckpt_name, accelerator.unwrap_model(network), global_step, max(0, effective_epoch_no - 1)
+                                )
 
-                            if args.save_state:
-                                train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+                                if args.save_state:
+                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
 
-                            remove_step_no = train_util.get_remove_step_no(args, global_step)
-                            if remove_step_no is not None:
-                                remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                remove_model(remove_ckpt_name)
+                                remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                if remove_step_no is not None:
+                                    remove_ckpt_name = train_util.get_step_ckpt_name(
+                                        args, "." + args.save_model_as, remove_step_no
+                                    )
+                                    remove_model(remove_ckpt_name)
                     optimizer_train_fn()
+                    attention_step_profiler.finalize_optimizer_step(global_step)
 
                     if lulynx_core is not None:
                         lulynx_decision = lulynx_core.on_optimizer_step(
@@ -1913,6 +2109,7 @@ class NetworkTrainer:
         if is_main_process:
             network = accelerator.unwrap_model(network)
 
+        attention_step_profiler.flush_remaining(global_step)
         accelerator.end_training()
         optimizer_eval_fn()
 

@@ -48,12 +48,39 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_sdxl_attention_runtime_stats = {
+    "flash_calls": 0,
+    "flash_fallbacks": 0,
+    "sage_calls": 0,
+    "sage_fallbacks": 0,
+}
+
+
+def _increment_sdxl_attention_runtime_stat(key: str, amount: int = 1) -> None:
+    if key not in _sdxl_attention_runtime_stats:
+        _sdxl_attention_runtime_stats[key] = 0
+    _sdxl_attention_runtime_stats[key] += int(amount)
+
+
+def snapshot_sdxl_attention_runtime_stats() -> dict:
+    return {key: int(value) for key, value in _sdxl_attention_runtime_stats.items()}
+
 
 def _short_exc_message(exc: Exception) -> str:
     message = str(exc).strip()
     if not message:
         return exc.__class__.__name__
     return message.splitlines()[0]
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw_value = str(os.environ.get(name, "") or "").strip()
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _get_sageattention_runtime_name(tensor: torch.Tensor) -> str:
@@ -66,15 +93,13 @@ def _get_sageattention_runtime_name(tensor: torch.Tensor) -> str:
         return "intel-xpu"
 
     if device_type == "cuda" and bool(getattr(torch.version, "hip", None)):
-        if active_runtime == "rocm-amd-sage":
-            return "rocm-amd-sage"
         return "rocm-amd"
 
     return device_type or "unknown"
 
 
 def _should_try_runtime_sageattention_fallback(tensor: torch.Tensor) -> bool:
-    return _get_sageattention_runtime_name(tensor) in {"intel-xpu", "intel-xpu-sage", "rocm-amd", "rocm-amd-sage"}
+    return _get_sageattention_runtime_name(tensor) in {"intel-xpu", "intel-xpu-sage"}
 
 
 @lru_cache(maxsize=8)
@@ -90,6 +115,7 @@ def _warn_sdxl_sageattention_fallback_once(runtime_name: str, source: str, reaso
 
 def _disable_runtime_sageattention_with_warning(tensor: torch.Tensor, reason: str) -> None:
     global _runtime_sageattention_disabled
+    _increment_sdxl_attention_runtime_stat("sage_fallbacks")
     runtime_name = _get_sageattention_runtime_name(tensor)
     _runtime_sageattention_disabled = True
     _warn_sdxl_sageattention_fallback_once(runtime_name, _sageattention_source, reason)
@@ -114,8 +140,51 @@ def _warn_sdxl_flashattention_mask_fallback_once() -> None:
     logger.warning("SDXL FlashAttention 当前不处理 attention mask，已自动回退到 SDPA 路径。")
 
 
+@lru_cache(maxsize=8)
+def _info_sdxl_flashattention_short_crossattn_sdpa_once(threshold: int) -> None:
+    logger.info(
+        "SDXL FlashAttention smart route active: short cross-attn with context_len <= %s now prefers SDPA for better throughput.",
+        threshold,
+    )
+
+
+@lru_cache(maxsize=1)
+def _info_sdxl_crossattn_fused_kv_once() -> None:
+    logger.info(
+        "SDXL experimental cross-attn fused K/V projection is active; compatible LoRA deltas will be added after the fused base projection."
+    )
+
+
+@lru_cache(maxsize=8)
+def _warn_sdxl_crossattn_fused_kv_fallback_once(reason: str) -> None:
+    logger.warning("SDXL experimental cross-attn fused K/V projection fallback: %s", reason)
+
+
+def _should_prefer_sdpa_for_flash_crossattn(x: torch.Tensor, context: Optional[torch.Tensor]) -> bool:
+    if context is None:
+        return False
+
+    threshold = max(_get_int_env("MIKAZUKI_SDXL_FLASH_CROSSATTN_SDPA_THRESHOLD", 256), 0)
+    if threshold <= 0:
+        return False
+
+    if x.ndim < 2 or context.ndim < 2:
+        return False
+
+    query_len = int(x.shape[1])
+    context_len = int(context.shape[1])
+    if context_len <= 0 or context_len > threshold:
+        return False
+    if query_len <= context_len:
+        return False
+
+    _info_sdxl_flashattention_short_crossattn_sdpa_once(threshold)
+    return True
+
+
 def _disable_runtime_flashattention_with_warning(tensor: torch.Tensor, reason: str) -> None:
     global _runtime_flashattention_disabled
+    _increment_sdxl_attention_runtime_stat("flash_fallbacks")
     runtime_name = _get_sageattention_runtime_name(tensor)
     _runtime_flashattention_disabled = True
     _warn_sdxl_flashattention_fallback_once(runtime_name, reason)
@@ -501,6 +570,7 @@ class CrossAttention(nn.Module):
         self.use_sdpa = False
         self.use_flashattn = False
         self.use_sageattn = False
+        self.use_cross_attn_fused_kv = False
 
     def set_use_memory_efficient_attention(self, xformers, mem_eff):
         self.use_memory_efficient_attention_xformers = xformers
@@ -534,6 +604,69 @@ class CrossAttention(nn.Module):
             self.use_sdpa = False
             self.use_flashattn = False
 
+    def set_use_cross_attn_fused_kv(self, enabled: bool):
+        self.use_cross_attn_fused_kv = bool(enabled)
+
+    @staticmethod
+    def _is_native_linear_forward(module: nn.Module) -> bool:
+        if not isinstance(module, nn.Linear):
+            return False
+        return getattr(module.forward, "__func__", None) is nn.Linear.forward
+
+    @staticmethod
+    def _get_supported_projection_delta_modules(module: nn.Module):
+        if CrossAttention._is_native_linear_forward(module):
+            return []
+
+        delta_modules = getattr(module, "_lulynx_fused_projection_delta_modules", None)
+        if not delta_modules:
+            return None
+
+        supported_modules = []
+        for delta_module in delta_modules:
+            if not hasattr(delta_module, "compute_forward_delta"):
+                return None
+            supported_modules.append(delta_module)
+        return supported_modules
+
+    def _project_context_kv(self, context: torch.Tensor, *, allow_fused: bool):
+        if not allow_fused:
+            return self.to_k(context), self.to_v(context)
+
+        k_delta_modules = self._get_supported_projection_delta_modules(self.to_k)
+        v_delta_modules = self._get_supported_projection_delta_modules(self.to_v)
+        if k_delta_modules is None or v_delta_modules is None:
+            _warn_sdxl_crossattn_fused_kv_fallback_once(
+                "detected an unsupported projection patch on to_k/to_v; using the original unfused path."
+            )
+            return self.to_k(context), self.to_v(context)
+
+        if (self.to_k.bias is None) != (self.to_v.bias is None):
+            _warn_sdxl_crossattn_fused_kv_fallback_once(
+                "to_k and to_v bias layout is inconsistent; using the original unfused path."
+            )
+            return self.to_k(context), self.to_v(context)
+
+        kv_weight = torch.cat((self.to_k.weight, self.to_v.weight), dim=0)
+        kv_bias = None
+        if self.to_k.bias is not None:
+            kv_bias = torch.cat((self.to_k.bias, self.to_v.bias), dim=0)
+
+        kv = F.linear(context, kv_weight, kv_bias)
+        k_out, v_out = kv.split((self.to_k.out_features, self.to_v.out_features), dim=-1)
+
+        for delta_module in k_delta_modules:
+            delta = delta_module.compute_forward_delta(context)
+            if delta is not None:
+                k_out = k_out + delta
+        for delta_module in v_delta_modules:
+            delta = delta_module.compute_forward_delta(context)
+            if delta is not None:
+                v_out = v_out + delta
+
+        _info_sdxl_crossattn_fused_kv_once()
+        return k_out, v_out
+
     def reshape_heads_to_batch_dim(self, tensor):
         batch_size, seq_len, dim = tensor.shape
         head_size = self.heads
@@ -560,10 +693,10 @@ class CrossAttention(nn.Module):
         if self.use_sdpa:
             return self.forward_sdpa(hidden_states, context, mask)
 
+        use_cross_attn_fused_kv = self.use_cross_attn_fused_kv and context is not None
         query = self.to_q(hidden_states)
         context = context if context is not None else hidden_states
-        key = self.to_k(context)
-        value = self.to_v(context)
+        key, value = self._project_context_kv(context, allow_fused=use_cross_attn_fused_kv)
 
         query = self.reshape_heads_to_batch_dim(query)
         key = self.reshape_heads_to_batch_dim(key)
@@ -605,11 +738,11 @@ class CrossAttention(nn.Module):
         import xformers.ops
 
         h = self.heads
+        use_cross_attn_fused_kv = self.use_cross_attn_fused_kv and context is not None
         q_in = self.to_q(x)
         context = context if context is not None else x
         context = context.to(x.dtype)
-        k_in = self.to_k(context)
-        v_in = self.to_v(context)
+        k_in, v_in = self._project_context_kv(context, allow_fused=use_cross_attn_fused_kv)
 
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b n h d", h=h), (q_in, k_in, v_in))
         del q_in, k_in, v_in
@@ -632,11 +765,11 @@ class CrossAttention(nn.Module):
         k_bucket_size = 1024
 
         h = self.heads
+        use_cross_attn_fused_kv = self.use_cross_attn_fused_kv and context is not None
         q = self.to_q(x)
         context = context if context is not None else x
         context = context.to(x.dtype)
-        k = self.to_k(context)
-        v = self.to_v(context)
+        k, v = self._project_context_kv(context, allow_fused=use_cross_attn_fused_kv)
         del context, x
 
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
@@ -650,11 +783,11 @@ class CrossAttention(nn.Module):
 
     def forward_sdpa(self, x, context=None, mask=None):
         h = self.heads
+        use_cross_attn_fused_kv = self.use_cross_attn_fused_kv and context is not None
         q_in = self.to_q(x)
         context = context if context is not None else x
         context = context.to(x.dtype)
-        k_in = self.to_k(context)
-        v_in = self.to_v(context)
+        k_in, v_in = self._project_context_kv(context, allow_fused=use_cross_attn_fused_kv)
 
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q_in, k_in, v_in))
         del q_in, k_in, v_in
@@ -681,18 +814,21 @@ class CrossAttention(nn.Module):
             return self.forward_sdpa(x, context=context, mask=mask)
         if x.dtype not in (torch.float16, torch.bfloat16):
             return self.forward_sdpa(x, context=context, mask=mask)
+        if _should_prefer_sdpa_for_flash_crossattn(x, context):
+            return self.forward_sdpa(x, context=context, mask=mask)
 
         h = self.heads
+        use_cross_attn_fused_kv = self.use_cross_attn_fused_kv and context is not None
         q_in = self.to_q(x)
         context = context if context is not None else x
         context = context.to(x.dtype)
-        k_in = self.to_k(context)
-        v_in = self.to_v(context)
+        k_in, v_in = self._project_context_kv(context, allow_fused=use_cross_attn_fused_kv)
 
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b n h d", h=h), (q_in, k_in, v_in))
         del q_in, k_in, v_in
 
         try:
+            _increment_sdxl_attention_runtime_stat("flash_calls")
             _info_sdxl_flashattention_backend_once()
             out = unified_attention.flash_attn_func(q.contiguous(), k.contiguous(), v.contiguous(), 0.0)
         except Exception as exc:
@@ -722,16 +858,17 @@ class CrossAttention(nn.Module):
             return self.forward_sdpa(x, context=context, mask=mask)
 
         h = self.heads
+        use_cross_attn_fused_kv = self.use_cross_attn_fused_kv and context is not None
         q_in = self.to_q(x)
         context = context if context is not None else x
         context = context.to(x.dtype)
-        k_in = self.to_k(context)
-        v_in = self.to_v(context)
+        k_in, v_in = self._project_context_kv(context, allow_fused=use_cross_attn_fused_kv)
 
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q_in, k_in, v_in))
         del q_in, k_in, v_in
 
         try:
+            _increment_sdxl_attention_runtime_stat("sage_calls")
             out = call_sageattention(
                 q.contiguous(),
                 k.contiguous(),
@@ -849,6 +986,9 @@ class BasicTransformerBlock(nn.Module):
         self.attn1.set_use_sageattn(sageattn_enabled)
         self.attn2.set_use_sageattn(sageattn_enabled)
 
+    def set_use_cross_attn_fused_kv(self, enabled: bool):
+        self.attn2.set_use_cross_attn_fused_kv(enabled)
+
     def forward_body(self, hidden_states, context=None, timestep=None):
         # 1. Self-Attention
         norm_hidden_states = self.norm1(hidden_states)
@@ -945,6 +1085,10 @@ class Transformer2DModel(nn.Module):
     def set_use_sageattn(self, sageattn_enabled: bool):
         for transformer in self.transformer_blocks:
             transformer.set_use_sageattn(sageattn_enabled)
+
+    def set_use_cross_attn_fused_kv(self, enabled: bool):
+        for transformer in self.transformer_blocks:
+            transformer.set_use_cross_attn_fused_kv(enabled)
 
     def forward(self, hidden_states, encoder_hidden_states=None, timestep=None):
         # 1. Input
@@ -1290,6 +1434,13 @@ class SdxlUNet2DConditionModel(nn.Module):
             for module in block:
                 if hasattr(module, "set_use_flashattn"):
                     module.set_use_flashattn(flashattn_enabled)
+
+    def set_use_cross_attn_fused_kv(self, enabled: bool) -> None:
+        blocks = self.input_blocks + [self.middle_block] + self.output_blocks
+        for block in blocks:
+            for module in block:
+                if hasattr(module, "set_use_cross_attn_fused_kv"):
+                    module.set_use_cross_attn_fused_kv(enabled)
 
     def set_gradient_checkpointing(self, value=False):
         blocks = self.input_blocks + [self.middle_block] + self.output_blocks

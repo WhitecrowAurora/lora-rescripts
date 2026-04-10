@@ -1,0 +1,50 @@
+[model_arguments]
+pretrained_model_name_or_path = "H:/lora-rescripts/models/diffusion_models/anima-preview2.safetensors"
+vae = "H:/lora-rescripts/models/vae/qwen_image_vae.safetensors"
+qwen3 = "H:/lora-rescripts/models/text_encoders/qwen_3_06b_base.safetensors"
+
+[dataset_arguments]
+train_data_dir = "H:/lora-rescripts/sucai"
+reg_data_dir = ""
+caption_extension = ".txt"
+resolution = "2048,2048"
+enable_bucket = true
+bucket_no_upscale = true
+min_bucket_reso = 1024
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+
+[additional_network_arguments]
+network_module = "networks.lora_anima"
+network_dim = 16
+network_alpha = 16
+network_train_unet_only = true
+network_train_text_encoder_only = false
+
+[optimizer_arguments]
+learning_rate = 1e-4
+unet_lr = 1e-4
+optimizer_type = "AdamW"
+lr_scheduler = "constant"
+
+[training_arguments]
+max_train_steps = 100
+train_batch_size = 1
+gradient_accumulation_steps = 1
+mixed_precision = "fp16"
+save_precision = "fp16"
+seed = 1337
+max_data_loader_n_workers = 0
+sample_every_n_steps = 0
+sample_every_n_epochs = 0
+cache_latents = true
+cache_latents_to_disk = true
+cache_text_encoder_outputs = true
+cache_text_encoder_outputs_to_disk = true
+skip_cache_check = false
+anima_profile_window = 25
+
+[saving_arguments]
+save_model_as = "safetensors"
+output_dir = "H:/lora-rescripts/tmp/anima_speed_bench"
+logging_dir = "H:/lora-rescripts/logs/anima_speed_bench"

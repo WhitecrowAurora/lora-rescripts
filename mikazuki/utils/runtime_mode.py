@@ -9,8 +9,8 @@ from mikazuki.utils.runtime_paths import executable_matches_runtime
 RUNTIME_ENVIRONMENT_ALIASES = {}
 
 INTEL_XPU_RUNTIME_NAMES = {"intel-xpu", "intel-xpu-sage"}
-AMD_ROCM_RUNTIME_NAMES = {"rocm-amd", "rocm-amd-sage"}
-SAGEATTENTION_RUNTIME_NAMES = {"sageattention"}
+AMD_ROCM_RUNTIME_NAMES = {"rocm-amd"}
+SAGEATTENTION_RUNTIME_NAMES = {"sageattention", "sageattention2"}
 
 
 def normalize_runtime_name(runtime_name: str) -> str:
@@ -27,12 +27,12 @@ def infer_runtime_environment_name(executable: str | None = None) -> str:
         return "intel-xpu-sage"
     if executable_matches_runtime(executable, "intel-xpu"):
         return "intel-xpu"
-    if executable_matches_runtime(executable, "rocm-amd-sage"):
-        return "rocm-amd-sage"
     if executable_matches_runtime(executable, "rocm-amd"):
         return "rocm-amd"
     if executable_matches_runtime(executable, "blackwell"):
         return "blackwell"
+    if executable_matches_runtime(executable, "sageattention2"):
+        return "sageattention2"
     if executable_matches_runtime(executable, "sageattention"):
         return "sageattention"
     if executable_matches_runtime(executable, "tageditor") or executable_matches_runtime(executable, "venv-tageditor"):
@@ -59,8 +59,6 @@ def infer_attention_runtime_mode(environ: Mapping[str, str] | None = None, execu
         return "intel-xpu-sage"
     if str(env.get("MIKAZUKI_INTEL_XPU_STARTUP", "") or "").strip() == "1":
         return "intel-xpu"
-    if str(env.get("MIKAZUKI_ROCM_AMD_SAGE_STARTUP", "") or "").strip() == "1":
-        return "rocm-amd-sage"
     if str(env.get("MIKAZUKI_ROCM_AMD_STARTUP", "") or "").strip() == "1":
         return "rocm-amd"
 

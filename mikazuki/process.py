@@ -62,6 +62,61 @@ def apply_windows_accelerate_env(customize_env: dict):
         customize_env["USE_LIBUV"] = "0"
 
 
+def _flag_enabled(value, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def merge_pytorch_cuda_alloc_conf(existing_conf: str, *, expandable_segments_enabled: bool) -> str:
+    passthrough_tokens: list[str] = []
+    keyed_tokens: dict[str, str] = {}
+
+    for raw_part in str(existing_conf or "").split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            key, value = part.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if key:
+                keyed_tokens[key] = value
+                continue
+        passthrough_tokens.append(part)
+
+    keyed_tokens["expandable_segments"] = "True" if expandable_segments_enabled else "False"
+    rendered_tokens = [*passthrough_tokens, *(f"{key}:{value}" for key, value in keyed_tokens.items())]
+    return ",".join(rendered_tokens)
+
+
+def apply_training_memory_allocator_env(customize_env: dict, config_data: dict) -> None:
+    expandable_segments_enabled = _flag_enabled(
+        config_data.get("pytorch_cuda_expandable_segments"),
+        default=True,
+    )
+    merged_conf = merge_pytorch_cuda_alloc_conf(
+        customize_env.get("PYTORCH_CUDA_ALLOC_CONF", ""),
+        expandable_segments_enabled=expandable_segments_enabled,
+    )
+    customize_env["PYTORCH_CUDA_ALLOC_CONF"] = merged_conf
+
+    if expandable_segments_enabled:
+        log.info(
+            "[memory] enabled PyTorch CUDA expandable_segments to reduce fragmentation-related OOM. "
+            f"PYTORCH_CUDA_ALLOC_CONF={merged_conf}"
+        )
+    else:
+        log.info(
+            "[memory] PyTorch CUDA expandable_segments disabled by training config. "
+            f"PYTORCH_CUDA_ALLOC_CONF={merged_conf}"
+        )
+
+
 def ensure_main_distributed_autosave(toml_path: str, distributed_runtime: Optional[dict]) -> tuple[bool, str]:
     runtime = distributed_runtime if isinstance(distributed_runtime, dict) else {}
     if not runtime.get("is_multi_machine") or int(runtime.get("machine_rank", 0) or 0) != 0:
@@ -210,6 +265,7 @@ def run_train(
     customize_env["PYTHONWARNINGS"] = "ignore::FutureWarning,ignore::UserWarning"
     ensure_repo_on_pythonpath(customize_env)
     apply_windows_accelerate_env(customize_env)
+    apply_training_memory_allocator_env(customize_env, config_data)
 
     direct_launch_summary = (
         trainer_definition.direct_launch_summary

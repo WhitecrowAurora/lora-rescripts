@@ -5,9 +5,9 @@ $script:RuntimeDirectoryAliases = @{
     "intel-xpu" = @("python_xpu_intel")
     "intel-xpu-sage" = @("python_xpu_intel_sage")
     "rocm-amd" = @("python_rocm_amd")
-    "rocm-amd-sage" = @("python_rocm_amd_sage")
     "sagebwd-nvidia" = @("python_sagebwd_nvidia", "python-sagebwd-nvidia")
     "sageattention" = @("python-sageattention", "python_sageattention")
+    "sageattention2" = @("python-sageattention2", "python_sageattention2")
     "tageditor" = @("python_tageditor")
     "venv" = @("venv")
     "venv-tageditor" = @("venv-tageditor")
@@ -30,6 +30,22 @@ function Get-RuntimeDirectoryNames {
     return @($RuntimeName)
 }
 
+function Resolve-RuntimeDirectoryNameList {
+    param(
+        [string]$RuntimeName,
+        [string[]]$DirectoryNames
+    )
+
+    $resolvedNames = @($DirectoryNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (-not $resolvedNames -or $resolvedNames.Count -eq 0) {
+        $resolvedNames = @((Get-RuntimeDirectoryNames -RuntimeName $RuntimeName) | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_)
+            })
+    }
+
+    return @($resolvedNames)
+}
+
 function Get-RuntimeDirectoryCandidates {
     param(
         [string]$RepoRoot,
@@ -39,10 +55,7 @@ function Get-RuntimeDirectoryCandidates {
 
     $repoRootPath = [System.IO.Path]::GetFullPath($RepoRoot)
     $envRoot = Join-Path $repoRootPath "env"
-    $resolvedNames = @($DirectoryNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if (-not $resolvedNames -or $resolvedNames.Count -eq 0) {
-        $resolvedNames = Get-RuntimeDirectoryNames -RuntimeName $RuntimeName
-    }
+    $resolvedNames = Resolve-RuntimeDirectoryNameList -RuntimeName $RuntimeName -DirectoryNames $DirectoryNames
 
     $candidates = New-Object System.Collections.Generic.List[object]
     foreach ($dirName in $resolvedNames) {
@@ -75,16 +88,13 @@ function Resolve-RuntimeDirectoryInfo {
 
     $repoRootPath = [System.IO.Path]::GetFullPath($RepoRoot)
     $envRoot = Join-Path $repoRootPath "env"
-    $resolvedNames = @($DirectoryNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if (-not $resolvedNames -or $resolvedNames.Count -eq 0) {
-        $resolvedNames = Get-RuntimeDirectoryNames -RuntimeName $RuntimeName
-    }
+    $resolvedNames = Resolve-RuntimeDirectoryNameList -RuntimeName $RuntimeName -DirectoryNames $DirectoryNames
     if (-not $resolvedNames -or $resolvedNames.Count -eq 0) {
         throw "No runtime directory names were provided for '$RuntimeName'."
     }
 
     if ([string]::IsNullOrWhiteSpace($PreferredDirectoryName)) {
-        $PreferredDirectoryName = $resolvedNames[0]
+        $PreferredDirectoryName = [string]($resolvedNames | Select-Object -First 1)
     }
 
     foreach ($candidate in (Get-RuntimeDirectoryCandidates -RepoRoot $repoRootPath -RuntimeName $RuntimeName -DirectoryNames $resolvedNames)) {

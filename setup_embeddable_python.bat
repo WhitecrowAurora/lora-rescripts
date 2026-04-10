@@ -114,13 +114,13 @@ if "%AUTO_MODE%"=="0" pause
 exit /b 0
 
 :copy_bootstrap_runtime_packages
-set "BOOTSTRAP_CANDIDATES=python env\python python_tageditor env\python_tageditor python_blackwell env\python_blackwell python_xpu_intel env\python_xpu_intel python_xpu_intel_sage env\python_xpu_intel_sage python_rocm_amd env\python_rocm_amd python_rocm_amd_sage env\python_rocm_amd_sage python-sageattention env\python-sageattention python_sageattention env\python_sageattention python_sagebwd_nvidia env\python_sagebwd_nvidia python-sagebwd-nvidia env\python-sagebwd-nvidia"
+set "BOOTSTRAP_CANDIDATES=python env\python python_tageditor env\python_tageditor python_blackwell env\python_blackwell python_xpu_intel env\python_xpu_intel python_xpu_intel_sage env\python_xpu_intel_sage python_rocm_amd env\python_rocm_amd python-sageattention env\python-sageattention python_sageattention env\python_sageattention python_sagebwd_nvidia env\python_sagebwd_nvidia python-sagebwd-nvidia env\python-sagebwd-nvidia"
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
   "$repo = Get-Location;" ^
   "$targetDir = '%TARGET_DIR%';" ^
   "$targetSite = Join-Path (Join-Path $repo $targetDir) 'Lib\site-packages';" ^
   "$patterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
-  "$candidates = @('env\python','python','env\python_tageditor','python_tageditor','env\python_blackwell','python_blackwell','env\python_xpu_intel','python_xpu_intel','env\python_xpu_intel_sage','python_xpu_intel_sage','env\python_rocm_amd','python_rocm_amd','env\python_rocm_amd_sage','python_rocm_amd_sage','env\python-sageattention','python-sageattention','env\python_sageattention','python_sageattention','env\python_sagebwd_nvidia','python_sagebwd_nvidia','env\python-sagebwd-nvidia','python-sagebwd-nvidia');" ^
+  "$candidates = @('env\python','python','env\python_tageditor','python_tageditor','env\python_blackwell','python_blackwell','env\python_xpu_intel','python_xpu_intel','env\python_xpu_intel_sage','python_xpu_intel_sage','env\python_rocm_amd','python_rocm_amd','env\python-sageattention','python-sageattention','env\python_sageattention','python_sageattention','env\python_sagebwd_nvidia','python_sagebwd_nvidia','env\python-sagebwd-nvidia','python-sagebwd-nvidia');" ^
   "$copied = $false;" ^
   "foreach($candidate in $candidates){" ^
   "  if($candidate -ieq $targetDir){ continue }" ^

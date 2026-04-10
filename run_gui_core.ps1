@@ -74,6 +74,12 @@ $sageAttentionRuntimeDir = $sageAttentionRuntimeInfo.DirectoryPath
 $sageAttentionPython = Join-Path $sageAttentionRuntimeDir "python.exe"
 $sageAttentionDepsMarker = Join-Path $sageAttentionRuntimeDir ".deps_installed"
 
+$sageAttention2RuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "sageattention2"
+$sageAttention2RuntimeDirName = $sageAttention2RuntimeInfo.DirectoryName
+$sageAttention2RuntimeDir = $sageAttention2RuntimeInfo.DirectoryPath
+$sageAttention2Python = Join-Path $sageAttention2RuntimeDir "python.exe"
+$sageAttention2DepsMarker = Join-Path $sageAttention2RuntimeDir ".deps_installed"
+
 $intelXpuRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "intel-xpu"
 $intelXpuRuntimeDirName = $intelXpuRuntimeInfo.DirectoryName
 $intelXpuRuntimeDir = $intelXpuRuntimeInfo.DirectoryPath
@@ -91,12 +97,6 @@ $rocmAmdRuntimeDirName = $rocmAmdRuntimeInfo.DirectoryName
 $rocmAmdRuntimeDir = $rocmAmdRuntimeInfo.DirectoryPath
 $rocmAmdPython = Join-Path $rocmAmdRuntimeDir "python.exe"
 $rocmAmdDepsMarker = Join-Path $rocmAmdRuntimeDir ".deps_installed"
-
-$rocmAmdSageRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "rocm-amd-sage"
-$rocmAmdSageRuntimeDirName = $rocmAmdSageRuntimeInfo.DirectoryName
-$rocmAmdSageRuntimeDir = $rocmAmdSageRuntimeInfo.DirectoryPath
-$rocmAmdSagePython = Join-Path $rocmAmdSageRuntimeDir "python.exe"
-$rocmAmdSageDepsMarker = Join-Path $rocmAmdSageRuntimeDir ".deps_installed"
 
 $portableRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "portable"
 $portableRuntimeDir = $portableRuntimeInfo.DirectoryPath
@@ -119,10 +119,10 @@ $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
 $preferFlashAttentionRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "flashattention"
 $preferBlackwellRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "blackwell"
 $preferSageAttentionRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "sageattention"
+$preferSageAttention2Runtime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "sageattention2"
 $preferIntelXpuRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "intel-xpu"
 $preferIntelXpuSageRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "intel-xpu-sage"
 $preferRocmAmdRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "rocm-amd"
-$preferRocmAmdSageRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "rocm-amd-sage"
 $rocmAmdRecommendedGraphicsDriverVersion = "26.2.2"
 $intelXpuRecommendedGraphicsDriverPackageVersion = "32.0.101.6127_101.6044"
 $intelXpuRecommendedGraphicsDriverDiscreteVersion = "32.0.101.6127"
@@ -135,6 +135,7 @@ $intelSageRuntimeModules = @($intelRuntimeModules + @("sageattention"))
 $amdRuntimeModules = @($baseRuntimeModules + @("cv2"))
 $blackwellPreferredProfile = "czmahi-20250502"
 $sageAttentionPreferredProfile = "triton-v1"
+$sageAttention2PreferredProfile = "triton-v2"
 
 . (Join-Path $repoRoot "tools\runtime\console_i18n.ps1")
 Set-ConsoleLanguage -Language $(if ($Env:MIKAZUKI_CONSOLE_LANG) { $Env:MIKAZUKI_CONSOLE_LANG } else { 'auto' }) | Out-Null
@@ -153,9 +154,6 @@ function Get-ConsoleRuntimeDisplayName {
     if ($RuntimeName -eq 'rocm-amd') {
         return Get-ExperimentalRuntimeDisplayName -RuntimeName 'rocm-amd' -Kind $Kind
     }
-    if ($RuntimeName -eq 'rocm-amd-sage') {
-        return Get-ExperimentalRuntimeDisplayName -RuntimeName 'rocm-amd-sage' -Kind $Kind
-    }
     if ($RuntimeName -eq 'intel-xpu-sage') {
         return Get-ExperimentalRuntimeDisplayName -RuntimeName 'intel-xpu-sage' -Kind $Kind
     }
@@ -171,6 +169,9 @@ function Get-SageRuntimeDisplayNameFromDirName {
         [string]$RuntimeDirName
     )
 
+    if ($RuntimeDirName -in (Get-RuntimeDirectoryNames -RuntimeName 'sageattention2')) {
+        return Get-ConsoleRuntimeDisplayName -RuntimeName 'sageattention2'
+    }
     return Get-ConsoleRuntimeDisplayName -RuntimeName 'sageattention'
 }
 
@@ -333,29 +334,45 @@ function New-MissingDedicatedRuntimeMessage {
         [string]$ExpectedPath,
         [string]$PythonMinor,
         [string]$RuntimeDirName,
+        [string]$RuntimeDirPath,
         [string]$RerunScript
     )
+
+    $runtimeDirDisplay = $RuntimeDirName
+    if (-not [string]::IsNullOrWhiteSpace($RuntimeDirPath)) {
+        try {
+            $repoRootPath = [System.IO.Path]::GetFullPath($repoRoot)
+            $runtimeDirFullPath = [System.IO.Path]::GetFullPath($RuntimeDirPath)
+            if ($runtimeDirFullPath.StartsWith($repoRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $relativeDir = $runtimeDirFullPath.Substring($repoRootPath.Length).TrimStart('\', '/')
+                if (-not [string]::IsNullOrWhiteSpace($relativeDir)) {
+                    $runtimeDirDisplay = $relativeDir -replace '/', '\'
+                }
+            }
+        }
+        catch {
+        }
+    }
 
     return Get-ConsoleText -Key 'missing_dedicated_runtime' -Tokens @{
         runtime = Get-ConsoleRuntimeDisplayName -RuntimeName $RuntimeName
         expected_path = $ExpectedPath
         python_minor = $PythonMinor
-        runtime_dir = $RuntimeDirName
+        runtime_dir = $runtimeDirDisplay
         rerun_script = $RerunScript
     }
 }
 
-
-if ((@($preferFlashAttentionRuntime, $preferBlackwellRuntime, $preferSageAttentionRuntime, $preferIntelXpuRuntime, $preferIntelXpuSageRuntime, $preferRocmAmdRuntime, $preferRocmAmdSageRuntime) | Where-Object { $_ }).Count -gt 1) {
+if ((@($preferFlashAttentionRuntime, $preferBlackwellRuntime, $preferSageAttentionRuntime, $preferSageAttention2Runtime, $preferIntelXpuRuntime, $preferIntelXpuSageRuntime, $preferRocmAmdRuntime) | Where-Object { $_ }).Count -gt 1) {
     switch (Get-ConsoleLanguage) {
         'zh' {
-            throw '同一时间只能指定一个专用运行时。请清理 MIKAZUKI_PREFERRED_RUNTIME，或在 flashattention / blackwell / sageattention / intel-xpu / intel-xpu-sage / rocm-amd / rocm-amd-sage 中只保留一个。'
+            throw '同一时间只能指定一个专用运行时。请清理 MIKAZUKI_PREFERRED_RUNTIME，或在 flashattention / blackwell / sageattention / sageattention2 / intel-xpu / intel-xpu-sage / rocm-amd 中只保留一个。'
         }
         'ja' {
-            throw '専用ランタイムは同時に 1 つだけ指定できます。MIKAZUKI_PREFERRED_RUNTIME を消去するか、flashattention / blackwell / sageattention / intel-xpu / intel-xpu-sage / rocm-amd / rocm-amd-sage のどれか 1 つだけを指定してください。'
+            throw '専用ランタイムは同時に 1 つだけ指定できます。MIKAZUKI_PREFERRED_RUNTIME を消去するか、flashattention / blackwell / sageattention / sageattention2 / intel-xpu / intel-xpu-sage / rocm-amd のどれか 1 つだけを指定してください。'
         }
         default {
-            throw 'Only one dedicated runtime can be preferred at a time. Clear MIKAZUKI_PREFERRED_RUNTIME or choose flashattention / blackwell / sageattention / intel-xpu / intel-xpu-sage / rocm-amd / rocm-amd-sage.'
+            throw 'Only one dedicated runtime can be preferred at a time. Clear MIKAZUKI_PREFERRED_RUNTIME or choose flashattention / blackwell / sageattention / sageattention2 / intel-xpu / intel-xpu-sage / rocm-amd.'
         }
     }
 }
@@ -411,7 +428,7 @@ function Remove-AmdRuntimeIncompatiblePackageSafeguard {
         [string]$RuntimeName
     )
 
-    if ($RuntimeName -notin @("rocm-amd", "rocm-amd-sage")) {
+    if ($RuntimeName -notin @("rocm-amd")) {
         return
     }
     if (-not (Test-PipReady -PythonExe $PythonExe)) {
@@ -573,7 +590,7 @@ function Set-DedicatedRuntimeCaches {
         [string]$PythonExe
     )
 
-    if ($RuntimeName -notin @("flashattention", "blackwell", "sageattention", "intel-xpu", "intel-xpu-sage", "rocm-amd", "rocm-amd-sage")) {
+    if ($RuntimeName -notin @("flashattention", "blackwell", "sageattention", "sageattention2", "intel-xpu", "intel-xpu-sage", "rocm-amd")) {
         return
     }
 
@@ -583,7 +600,7 @@ function Set-DedicatedRuntimeCaches {
     }
 
     $cacheRoot = Join-Path $runtimeRoot ".cache"
-    if ($RuntimeName -in @("rocm-amd", "rocm-amd-sage", "intel-xpu", "intel-xpu-sage")) {
+    if ($RuntimeName -in @("rocm-amd", "intel-xpu", "intel-xpu-sage")) {
         $torchInductorCacheDir = if ($Env:TORCHINDUCTOR_CACHE_DIR) { $Env:TORCHINDUCTOR_CACHE_DIR } else { Join-Path $cacheRoot "torchinductor" }
         foreach ($path in @($cacheRoot, $torchInductorCacheDir)) {
             if (-not (Test-Path $path)) {
@@ -670,6 +687,15 @@ function Get-SageAttentionExpectedPackageVersions {
                 TorchVision = "0.25.0+cu128"
                 SageAttention = ""
                 Triton = ""
+            }
+        }
+        "triton-v2" {
+            return @{
+                PythonMinor = "3.12"
+                Torch = "2.6.0+cu124"
+                TorchVision = "0.21.0+cu124"
+                SageAttention = "2.2.0"
+                Triton = "3.5.1.post24"
             }
         }
         default {
@@ -1088,31 +1114,31 @@ function Test-FlashAttentionRuntimeReady {
 
 function Get-MainPythonSelection {
     if ($preferFlashAttentionRuntime -and -not (Test-Path $flashAttentionPython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'flashattention' -ExpectedPath $flashAttentionPython -PythonMinor '3.11/3.12' -RuntimeDirName $flashAttentionRuntimeDirName -RerunScript 'run_For_FlashAttention_Experimental.bat')
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'flashattention' -ExpectedPath $flashAttentionPython -PythonMinor '3.11/3.12' -RuntimeDirName $flashAttentionRuntimeDirName -RuntimeDirPath $flashAttentionRuntimeDir -RerunScript 'run_For_FlashAttention_Experimental.bat')
     }
 
     if ($preferBlackwellRuntime -and -not (Test-Path $blackwellPython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'blackwell' -ExpectedPath $blackwellPython -PythonMinor '3.12' -RuntimeDirName $blackwellRuntimeInfo.DirectoryName -RerunScript 'run_For_Only_Blackwell.bat')
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'blackwell' -ExpectedPath $blackwellPython -PythonMinor '3.12' -RuntimeDirName $blackwellRuntimeInfo.DirectoryName -RuntimeDirPath $blackwellRuntimeDir -RerunScript 'run_For_Only_Blackwell.bat')
     }
 
     if ($preferSageAttentionRuntime -and -not (Test-Path $sageAttentionPython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'sageattention' -ExpectedPath $sageAttentionPython -PythonMinor '3.11' -RuntimeDirName $sageAttentionRuntimeDirName -RerunScript 'run_For_SageAttention_Experimental.bat')
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'sageattention' -ExpectedPath $sageAttentionPython -PythonMinor '3.11' -RuntimeDirName $sageAttentionRuntimeDirName -RuntimeDirPath $sageAttentionRuntimeDir -RerunScript 'run_For_SageAttention_Experimental.bat')
+    }
+
+    if ($preferSageAttention2Runtime -and -not (Test-Path $sageAttention2Python)) {
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'sageattention2' -ExpectedPath $sageAttention2Python -PythonMinor '3.11+' -RuntimeDirName $sageAttention2RuntimeDirName -RuntimeDirPath $sageAttention2RuntimeDir -RerunScript 'run_For_SageAttention2_Experimental.bat')
     }
 
     if ($preferIntelXpuRuntime -and -not (Test-Path $intelXpuPython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'intel-xpu' -ExpectedPath $intelXpuPython -PythonMinor '3.10/3.11' -RuntimeDirName $intelXpuRuntimeDirName -RerunScript 'run_For_Intel_XPU_Experimental.bat')
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'intel-xpu' -ExpectedPath $intelXpuPython -PythonMinor '3.10/3.11' -RuntimeDirName $intelXpuRuntimeDirName -RuntimeDirPath $intelXpuRuntimeDir -RerunScript 'run_For_Intel_XPU_Experimental.bat')
     }
 
     if ($preferIntelXpuSageRuntime -and -not (Test-Path $intelXpuSagePython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'intel-xpu-sage' -ExpectedPath $intelXpuSagePython -PythonMinor '3.10/3.11' -RuntimeDirName $intelXpuSageRuntimeDirName -RerunScript 'run_For_Intel_XPU_SageAttention_Experimental.bat')
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'intel-xpu-sage' -ExpectedPath $intelXpuSagePython -PythonMinor '3.10/3.11' -RuntimeDirName $intelXpuSageRuntimeDirName -RuntimeDirPath $intelXpuSageRuntimeDir -RerunScript 'run_For_Intel_XPU_SageAttention_Experimental.bat')
     }
 
     if ($preferRocmAmdRuntime -and -not (Test-Path $rocmAmdPython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'rocm-amd' -ExpectedPath $rocmAmdPython -PythonMinor '3.12' -RuntimeDirName $rocmAmdRuntimeDirName -RerunScript 'run_For_AMD_ROCm_Experimental.bat')
-    }
-
-    if ($preferRocmAmdSageRuntime -and -not (Test-Path $rocmAmdSagePython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'rocm-amd-sage' -ExpectedPath $rocmAmdSagePython -PythonMinor '3.12' -RuntimeDirName $rocmAmdSageRuntimeDirName -RerunScript 'run_For_AMD_ROCm_SageAttention_Experimental.bat')
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'rocm-amd' -ExpectedPath $rocmAmdPython -PythonMinor '3.12' -RuntimeDirName $rocmAmdRuntimeDirName -RuntimeDirPath $rocmAmdRuntimeDir -RerunScript 'run_For_AMD_ROCm_Experimental.bat')
     }
 
     if ($preferFlashAttentionRuntime -and (Test-Path $flashAttentionPython)) {
@@ -1163,6 +1189,22 @@ function Get-MainPythonSelection {
         }
     }
 
+    if ($preferSageAttention2Runtime -and (Test-Path $sageAttention2Python)) {
+        Write-ConsoleText -Key 'using_runtime_python' -Tokens @{ runtime = (Get-ConsoleRuntimeDisplayName -RuntimeName 'sageattention2' -Kind 'python') } -ForegroundColor 'Green'
+        if (-not (Test-PipReady -PythonExe $sageAttention2Python)) {
+            Write-ConsoleText -Key 'runtime_python_not_initialized' -Tokens @{ runtime_dir = $sageAttention2RuntimeDirName } -ForegroundColor 'Yellow'
+            & (Join-Path $repoRoot 'setup_embeddable_python.bat') --auto $sageAttention2RuntimeDirName
+            if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $sageAttention2Python)) {
+                throw (Get-ConsoleText -Key 'runtime_python_incomplete' -Tokens @{ runtime = (Get-ConsoleRuntimeDisplayName -RuntimeName 'sageattention2' -Kind 'python') })
+            }
+        }
+        return @{
+            PythonExe = $sageAttention2Python
+            DepsMarker = $sageAttention2DepsMarker
+            Runtime = 'sageattention2'
+        }
+    }
+
     if ($preferIntelXpuRuntime -and (Test-Path $intelXpuPython)) {
         Write-ConsoleText -Key 'using_runtime_python' -Tokens @{ runtime = (Get-ConsoleRuntimeDisplayName -RuntimeName 'intel-xpu' -Kind 'python') } -ForegroundColor 'Green'
         if (-not (Test-PipReady -PythonExe $intelXpuPython)) {
@@ -1208,22 +1250,6 @@ function Get-MainPythonSelection {
             PythonExe = $rocmAmdPython
             DepsMarker = $rocmAmdDepsMarker
             Runtime = 'rocm-amd'
-        }
-    }
-
-    if ($preferRocmAmdSageRuntime -and (Test-Path $rocmAmdSagePython)) {
-        Write-ConsoleText -Key 'using_runtime_python' -Tokens @{ runtime = (Get-ConsoleRuntimeDisplayName -RuntimeName 'rocm-amd-sage' -Kind 'python') } -ForegroundColor 'Green'
-        if (-not (Test-PipReady -PythonExe $rocmAmdSagePython)) {
-            Write-ConsoleText -Key 'runtime_python_not_initialized' -Tokens @{ runtime_dir = $rocmAmdSageRuntimeDirName } -ForegroundColor 'Yellow'
-            & (Join-Path $repoRoot 'setup_embeddable_python.bat') --auto $rocmAmdSageRuntimeDirName
-            if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $rocmAmdSagePython)) {
-                throw (Get-ConsoleText -Key 'runtime_python_incomplete' -Tokens @{ runtime = (Get-ConsoleRuntimeDisplayName -RuntimeName 'rocm-amd-sage' -Kind 'python') })
-            }
-        }
-        return @{
-            PythonExe = $rocmAmdSagePython
-            DepsMarker = $rocmAmdSageDepsMarker
-            Runtime = 'rocm-amd-sage'
         }
     }
 
@@ -1280,22 +1306,39 @@ function Get-MainPythonSelection {
     throw (Get-ConsoleText -Key 'no_project_local_python_found' -Tokens @{ portable_path = $portablePython; venv_path = $venvPython })
 }
 
-$flashAttentionExpectedPackages = Get-FlashAttentionExpectedPackageVersions
-$blackwellExpectedPackages = Get-BlackwellExpectedPackageVersions -Profile $blackwellPreferredProfile
-$sageAttentionExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $sageAttentionPreferredProfile
-$intelXpuExpectedPackages = Get-IntelXpuExpectedPackageVersions
-$intelXpuSageExpectedPackages = Get-IntelXpuSageExpectedPackageVersions
-$rocmAmdExpectedPackages = Get-ROCmAmdExpectedPackageVersions
-$rocmAmdSageExpectedPackages = Get-ROCmAmdSageExpectedPackageVersions
 $mainPython = Get-MainPythonSelection
 $pythonExe = $mainPython.PythonExe
 $depsMarker = $mainPython.DepsMarker
 $runtimeName = $mainPython.Runtime
 switch ($runtimeName) {
+    'rocm-amd' {
+        $runtimeHelperPath = Get-ExperimentalRuntimeModulePath -Name 'amd'
+        Assert-PowerShellModuleSyntax -Path $runtimeHelperPath -Label 'Runtime helper module'
+        . $runtimeHelperPath
+    }
+    'intel-xpu' {
+        $runtimeHelperPath = Get-ExperimentalRuntimeModulePath -Name 'intel'
+        Assert-PowerShellModuleSyntax -Path $runtimeHelperPath -Label 'Runtime helper module'
+        . $runtimeHelperPath
+    }
+    'intel-xpu-sage' {
+        $runtimeHelperPath = Get-ExperimentalRuntimeModulePath -Name 'intel'
+        Assert-PowerShellModuleSyntax -Path $runtimeHelperPath -Label 'Runtime helper module'
+        . $runtimeHelperPath
+    }
+}
+$flashAttentionExpectedPackages = Get-FlashAttentionExpectedPackageVersions
+$blackwellExpectedPackages = Get-BlackwellExpectedPackageVersions -Profile $blackwellPreferredProfile
+$selectedSageAttentionProfile = if ($runtimeName -eq 'sageattention2') { $sageAttention2PreferredProfile } else { $sageAttentionPreferredProfile }
+$sageAttentionExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $selectedSageAttentionProfile
+$intelXpuExpectedPackages = if ($runtimeName -in @('intel-xpu', 'intel-xpu-sage')) { Get-IntelXpuExpectedPackageVersions } else { @{} }
+$intelXpuSageExpectedPackages = if ($runtimeName -eq 'intel-xpu-sage') { Get-IntelXpuSageExpectedPackageVersions } else { @{} }
+$rocmAmdExpectedPackages = if ($runtimeName -eq 'rocm-amd') { Get-ROCmAmdExpectedPackageVersions } else { @{} }
+switch ($runtimeName) {
     'flashattention' { Ensure-EmbeddedRuntimeRepoBootstrap -RuntimeDir $flashAttentionRuntimeDir -RuntimeName $runtimeName }
     'sageattention' { Ensure-EmbeddedRuntimeRepoBootstrap -RuntimeDir $sageAttentionRuntimeDir -RuntimeName $runtimeName }
+    'sageattention2' { Ensure-EmbeddedRuntimeRepoBootstrap -RuntimeDir $sageAttention2RuntimeDir -RuntimeName $runtimeName }
     'rocm-amd' { Ensure-EmbeddedRuntimeRepoBootstrap -RuntimeDir $rocmAmdRuntimeDir -RuntimeName $runtimeName }
-    'rocm-amd-sage' { Ensure-EmbeddedRuntimeRepoBootstrap -RuntimeDir $rocmAmdSageRuntimeDir -RuntimeName $runtimeName }
     'intel-xpu' { Ensure-EmbeddedRuntimeRepoBootstrap -RuntimeDir $intelXpuRuntimeDir -RuntimeName $runtimeName }
     'intel-xpu-sage' { Ensure-EmbeddedRuntimeRepoBootstrap -RuntimeDir $intelXpuSageRuntimeDir -RuntimeName $runtimeName }
 }
@@ -1303,32 +1346,12 @@ if ($runtimeName -eq "rocm-amd") {
     if (-not $Env:MIKAZUKI_STARTUP_ATTENTION_POLICY) {
         $Env:MIKAZUKI_STARTUP_ATTENTION_POLICY = "runtime_guarded"
     }
-    if (-not $Env:MIKAZUKI_ALLOW_AMD_ROCM_SAGEATTN) {
-        $Env:MIKAZUKI_ALLOW_AMD_ROCM_SAGEATTN = "1"
-    }
     if (-not $Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB) {
         $Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB = "0.75"
     }
     if (-not $Env:MIKAZUKI_ROCM_SDPA_SLICE_GB) {
         $Env:MIKAZUKI_ROCM_SDPA_SLICE_GB = "0.35"
     }
-    Write-ROCmAmdGraphicsDriverNotice -MinimumVersion $rocmAmdRecommendedGraphicsDriverVersion
-    Write-ROCmAmdWindowsPrereqNotice
-}
-elseif ($runtimeName -eq "rocm-amd-sage") {
-    if (-not $Env:MIKAZUKI_STARTUP_ATTENTION_POLICY) {
-        $Env:MIKAZUKI_STARTUP_ATTENTION_POLICY = "runtime_guarded"
-    }
-    if (-not $Env:MIKAZUKI_ALLOW_AMD_ROCM_SAGEATTN) {
-        $Env:MIKAZUKI_ALLOW_AMD_ROCM_SAGEATTN = "1"
-    }
-    if (-not $Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB) {
-        $Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB = "0.75"
-    }
-    if (-not $Env:MIKAZUKI_ROCM_SDPA_SLICE_GB) {
-        $Env:MIKAZUKI_ROCM_SDPA_SLICE_GB = "0.35"
-    }
-    $Env:MIKAZUKI_ROCM_AMD_SAGE_STARTUP = "1"
     Write-ROCmAmdGraphicsDriverNotice -MinimumVersion $rocmAmdRecommendedGraphicsDriverVersion
     Write-ROCmAmdWindowsPrereqNotice
 }
@@ -1376,8 +1399,7 @@ $runtimeState = Get-SelectedRuntimeValidationState `
     -SageAttentionExpected $sageAttentionExpectedPackages `
     -IntelXpuExpected $intelXpuExpectedPackages `
     -IntelXpuSageExpected $intelXpuSageExpectedPackages `
-    -ROCmAmdExpected $rocmAmdExpectedPackages `
-    -ROCmAmdSageExpected $rocmAmdSageExpectedPackages
+    -ROCmAmdExpected $rocmAmdExpectedPackages
 Write-SelectedRuntimeNotReadyNotice -RuntimeName $runtimeName -State $runtimeState
 if (-not (Test-SelectedRuntimeBootstrapReady -DepsMarker $depsMarker -State $runtimeState)) {
     Install-SelectedRuntimeDependencies `
@@ -1391,6 +1413,8 @@ if (-not (Test-SelectedRuntimeBootstrapReady -DepsMarker $depsMarker -State $run
     Set-DedicatedRuntimeCaches -RuntimeName $runtimeName -PythonExe $pythonExe
     Remove-AmdRuntimeIncompatiblePackageSafeguard -PythonExe $pythonExe -RuntimeName $runtimeName
     $selectedMainRuntimeModules = Get-MainRuntimeModulesForRuntime -RuntimeName $runtimeName
+    $selectedSageAttentionProfile = if ($runtimeName -eq 'sageattention2') { $sageAttention2PreferredProfile } else { $sageAttentionPreferredProfile }
+    $sageAttentionExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $selectedSageAttentionProfile
     $runtimeState = Get-SelectedRuntimeValidationState `
         -PythonExe $pythonExe `
         -RuntimeName $runtimeName `
@@ -1400,8 +1424,7 @@ if (-not (Test-SelectedRuntimeBootstrapReady -DepsMarker $depsMarker -State $run
         -SageAttentionExpected $sageAttentionExpectedPackages `
         -IntelXpuExpected $intelXpuExpectedPackages `
         -IntelXpuSageExpected $intelXpuSageExpectedPackages `
-        -ROCmAmdExpected $rocmAmdExpectedPackages `
-        -ROCmAmdSageExpected $rocmAmdSageExpectedPackages
+        -ROCmAmdExpected $rocmAmdExpectedPackages
     if ($LASTEXITCODE -ne 0 -or -not (Test-SelectedRuntimeBootstrapReady -DepsMarker $depsMarker -State $runtimeState)) {
         throw (Get-SelectedRuntimeInstallFailureMessage -RuntimeName $runtimeName -State $runtimeState)
     }
@@ -1423,7 +1446,10 @@ if ($Env:MIKAZUKI_FLASHATTENTION_STARTUP -eq "1" -or $runtimeName -eq "flashatte
     Write-ConsoleText -Key 'startup_mode_flashattention' -ForegroundColor 'Yellow'
 }
 
-if ($Env:MIKAZUKI_SAGEATTENTION_STARTUP -eq "1") {
+if ($runtimeName -eq "sageattention2") {
+    Write-ConsoleText -Key 'startup_mode_sageattention2' -ForegroundColor 'Yellow'
+}
+elseif ($Env:MIKAZUKI_SAGEATTENTION_STARTUP -eq "1" -or $runtimeName -eq "sageattention") {
     Write-ConsoleText -Key 'startup_mode_sageattention' -ForegroundColor 'Yellow'
 }
 
@@ -1440,23 +1466,6 @@ if ($Env:MIKAZUKI_ROCM_AMD_STARTUP -eq "1" -or $runtimeName -eq "rocm-amd") {
         default {
             Write-Host -ForegroundColor Yellow "AMD ROCm startup mode enabled. This runtime prepares the dedicated ROCm environment and keeps the AMD experimental training route isolated from the main runtime."
             Write-Host -ForegroundColor Yellow "ROCm attention guard: startup policy=$($Env:MIKAZUKI_STARTUP_ATTENTION_POLICY); slice trigger=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB)GB; slice target=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_GB)GB."
-        }
-    }
-}
-
-if ($Env:MIKAZUKI_ROCM_AMD_SAGE_STARTUP -eq "1" -or $runtimeName -eq "rocm-amd-sage") {
-    switch (Get-ConsoleLanguage) {
-        'zh' {
-            Write-Host -ForegroundColor Yellow "已启用 AMD ROCm Sage 启动模式。这个运行时会把 AMD ROCm Sage 实验链路隔离到单独的 $rocmAmdSageRuntimeDirName 环境，不影响现有 AMD ROCm 主线。"
-            Write-Host -ForegroundColor Yellow "ROCm Sage attention guard：startup policy=$($Env:MIKAZUKI_STARTUP_ATTENTION_POLICY)；slice trigger=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB)GB；slice target=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_GB)GB。"
-        }
-        'ja' {
-            Write-Host -ForegroundColor Yellow "AMD ROCm Sage 起動モードが有効です。このランタイムは AMD ROCm Sage 実験ルートを専用の $rocmAmdSageRuntimeDirName 環境へ分離し、既存の AMD ROCm ルートには影響しません。"
-            Write-Host -ForegroundColor Yellow "ROCm Sage attention guard: startup policy=$($Env:MIKAZUKI_STARTUP_ATTENTION_POLICY); slice trigger=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB)GB; slice target=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_GB)GB."
-        }
-        default {
-            Write-Host -ForegroundColor Yellow "AMD ROCm Sage startup mode enabled. This runtime isolates the AMD ROCm Sage experiment in $rocmAmdSageRuntimeDirName and leaves the current AMD ROCm runtime untouched."
-            Write-Host -ForegroundColor Yellow "ROCm Sage attention guard: startup policy=$($Env:MIKAZUKI_STARTUP_ATTENTION_POLICY); slice trigger=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB)GB; slice target=$($Env:MIKAZUKI_ROCM_SDPA_SLICE_GB)GB."
         }
     }
 }
@@ -1497,7 +1506,7 @@ if ($Env:MIKAZUKI_INTEL_XPU_SAGE_STARTUP -eq "1" -or $runtimeName -eq "intel-xpu
 
 if (
     -not ($args -contains "--disable-tageditor") `
-    -and $runtimeName -in @("intel-xpu", "intel-xpu-sage", "rocm-amd", "rocm-amd-sage") `
+    -and $runtimeName -in @("intel-xpu", "intel-xpu-sage", "rocm-amd") `
     -and -not (Test-Path $portableTagEditorPython) `
     -and -not (Test-Path $venvTagEditorPython)
 ) {
@@ -1532,7 +1541,7 @@ if (-not ($args -contains "--disable-tageditor")) {
     }
     else {
         $fallbackMainPython = $null
-        if ($runtimeName -in @("flashattention", "blackwell", "sageattention", "intel-xpu", "intel-xpu-sage", "rocm-amd")) {
+        if ($runtimeName -in @("flashattention", "blackwell", "sageattention", "sageattention2", "intel-xpu", "intel-xpu-sage", "rocm-amd")) {
             if (Test-Path $portablePython) {
                 $fallbackMainPython = $portablePython
                 $tagEditorMarker = Join-Path $portableRuntimeDir ".tageditor_installed"

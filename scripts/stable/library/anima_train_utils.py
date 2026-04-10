@@ -18,7 +18,7 @@ from PIL import Image
 
 from library.device_utils import init_ipex, clean_memory_on_device, synchronize_device
 from library import anima_models, anima_utils, train_util, qwen_image_autoencoder_kl
-from mikazuki.utils.amd_sageattention import probe_runtime_sageattention
+from mikazuki.utils.runtime_sageattention import probe_runtime_sageattention
 from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 from mikazuki.utils.runtime_safe_preview import clamp_safe_preview_request
 
@@ -288,13 +288,11 @@ def resolve_default_anima_attn_mode() -> str:
         return "sageattn"
     if runtime_mode == "intel-xpu-sage" and _has_working_sageattention():
         return "sageattn"
-    if runtime_mode == "rocm-amd-sage" and _has_working_sageattention():
-        return "sageattn"
     if runtime_mode == "flashattention" and _has_importable_flashattention():
         return "flash"
     if runtime_mode == "blackwell":
         return "torch"
-    if runtime_mode in {"intel-xpu", "intel-xpu-sage", "rocm-amd", "rocm-amd-sage"}:
+    if runtime_mode in {"intel-xpu", "intel-xpu-sage", "rocm-amd"}:
         return "torch"
     if _has_importable_xformers():
         return "xformers"
@@ -693,7 +691,7 @@ def should_use_anima_pinned_memory(accelerator: Optional[Accelerator]) -> bool:
         return False
 
     runtime_mode = _infer_anima_runtime_mode()
-    if runtime_mode in {"rocm-amd", "rocm-amd-sage"} and os.name == "nt":
+    if runtime_mode == "rocm-amd" and os.name == "nt":
         return False
 
     return bool(accelerator.device.type == "cuda" and torch.cuda.is_available())

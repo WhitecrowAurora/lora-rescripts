@@ -8,7 +8,7 @@ echo ========================================
 echo.
 echo AMD ROCm experimental mode:
 echo - uses the dedicated python_rocm_amd runtime
-echo - defaults to SDPA safe mode, but keeps experimental SageAttention probe path available
+echo - defaults to the guarded SDPA training path
 echo - currently isolates the AMD experimental route to Anima LoRA
 echo - keeps the main runtime and NVIDIA paths untouched
 echo.
@@ -18,7 +18,6 @@ set "MIKAZUKI_AMD_EXPERIMENTAL=1"
 set "MIKAZUKI_ROCM_AMD_STARTUP=1"
 set "MIKAZUKI_PREFERRED_RUNTIME=rocm-amd"
 set "MIKAZUKI_STARTUP_ATTENTION_POLICY=runtime_guarded"
-set "MIKAZUKI_ALLOW_AMD_ROCM_SAGEATTN=1"
 set "MIKAZUKI_ROCM_SDPA_SLICE_TRIGGER_GB=0.75"
 set "MIKAZUKI_ROCM_SDPA_SLICE_GB=0.35"
 

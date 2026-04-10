@@ -1,0 +1,92 @@
+========================================
+Cleanup SD-rescripts Workspace
+========================================
+
+[1/9] Removing Python cache...
+[Done]
+
+[2/9] Resetting runtime folders to initial state...
+[Done]
+
+[3/9] Optional data cleanup...
+Delete output folder? (Y/N, default Y)
+[3/9 Confirm] > [Keep] output
+
+Delete HuggingFace cache/config folders? (Y/N, default Y)
+This can free a lot of space, but model/download cache will be rebuilt later.
+[HF Confirm] > [Deleted] HuggingFace cache/config
+Includes: hub, accelerate, datasets, modules, xet, assets, token files
+
+[4/9] Slim bundled main Python packages for distribution? (Y/N, default Y)
+This will physically remove installed runtime packages like torch / torchvision / xformers / diffusers / transformers / numpy / scipy / onnxruntime.
+It also removes YOLO and aesthetic scorer related packages such as opencv-python / matplotlib / polars / PyYAML / open-clip-torch / timm / tqdm.
+It keeps only pip / setuptools / wheel bootstrap components so first startup can auto-install dependencies again.
+It does not delete the python folder itself; only Lib\site-packages / Scripts / share payload is slimmed.
+[Input] Press Enter to slim the main python runtime. Enter N to keep it.
+[4/9 Confirm] > [Main] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python)
+[Done] Main Python slimmed (env\python)
+
+[5/9] Slim bundled tag editor Python packages too? (Y/N, default Y)
+This will physically remove gradio / transformers / timm / torch and other tag editor runtime packages.
+It keeps only pip / setuptools / wheel bootstrap components.
+It does not delete the python_tageditor folder itself; only runtime payload is slimmed.
+[Input] Press Enter to slim the tag editor runtime. Enter N to keep it.
+[5/9 Confirm] > [TagEditor] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python_tageditor)
+[Done] TagEditor Python slimmed (env\python_tageditor)
+
+[6/9] Slim bundled Blackwell / FlashAttention Python packages too? (Y/N, default Y)
+This will physically remove torch / torchvision / xformers and other Blackwell runtime packages.
+It also covers the dedicated FlashAttention runtime if detected.
+It keeps only pip / setuptools / wheel bootstrap components.
+It does not delete the python_blackwell / python-flashattention folders themselves; only runtime payload is slimmed.
+[Input] Press Enter to slim the Blackwell / FlashAttention runtimes. Enter N to keep them.
+[6/9 Confirm] > [Blackwell] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python_blackwell)
+[Done] Blackwell Python slimmed (env\python_blackwell)
+[FlashAttention] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python-flashattention)
+[Done] FlashAttention Python slimmed (env\python-flashattention)
+[Skip] FlashAttention Legacy Python not found: python_flashattention
+
+[7/9] Slim bundled Intel XPU Python packages too? (Y/N, default Y)
+This will physically remove torch / torchvision / intel-xpu related packages from the Intel runtimes.
+It also covers the Intel XPU Sage runtime if detected.
+It keeps only pip / setuptools / wheel bootstrap components.
+[Input] Press Enter to slim the Intel XPU runtimes. Enter N to keep them.
+[7/9 Confirm] > [Intel XPU] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python_xpu_intel)
+[Done] Intel XPU Python slimmed (env\python_xpu_intel)
+[Skip] Intel XPU Sage Python not found: python_xpu_intel_sage
+
+[8/9] Slim bundled AMD ROCm Python packages too? (Y/N, default Y)
+This will physically remove torch / torchvision / ROCm related packages from the AMD runtimes.
+It keeps only pip / setuptools / wheel bootstrap components.
+[Input] Press Enter to slim the AMD ROCm runtimes. Enter N to keep them.
+[8/9 Confirm] > [AMD ROCm] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python_rocm_amd)
+[Done] AMD ROCm Python slimmed (env\python_rocm_amd)
+
+[9/9] Slim bundled SageAttention Python packages too? (Y/N, default Y)
+This will physically remove torch / torchvision / triton / sageattention and other SageAttention runtime packages.
+It also covers the dedicated SageAttention2 runtime if detected.
+It also covers the experimental SageBwd NVIDIA runtime if detected.
+It also removes YOLO and aesthetic scorer related packages such as opencv-python / matplotlib / polars / PyYAML / open-clip-torch / timm / tqdm.
+It keeps only pip / setuptools / wheel bootstrap components.
+It does not delete the SageAttention / SageAttention2 / SageBwd runtime folders themselves; only runtime payload is slimmed.
+If both hyphen and legacy underscore runtime folders exist, all detected SageAttention runtimes will be slimmed here.
+[Input] Press Enter to slim the SageAttention / SageAttention2 / SageBwd runtimes. Enter N to keep them.
+[9/9 Confirm] > [SageAttention] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python-sageattention)
+[Done] SageAttention Python slimmed (env\python-sageattention)
+[SageAttention Legacy] Removing site-packages, scripts and share payload while keeping bootstrap tools... (python_sageattention)
+[Done] SageAttention Legacy Python slimmed (python_sageattention)
+[SageAttention2] Removing site-packages, scripts and share payload while keeping bootstrap tools... (env\python-sageattention2)
+[Done] SageAttention2 Python slimmed (env\python-sageattention2)
+[Skip] SageAttention2 Legacy Python not found: python_sageattention2
+[Skip] SageBwd NVIDIA Python not found: python_sagebwd_nvidia
+[Skip] SageBwd NVIDIA Legacy Python not found: python-sagebwd-nvidia
+
+Cleanup summary:
+- Always cleared: __pycache__, *.pyc, logs, config\autosave, tmp, frontend\.vitepress\cache, runtime .cache / torch_compile_debug
+- Always checked for caches in both root runtimes and env\ runtimes when detected
+- Optional: output, huggingface cache/config, main python deps, tag editor deps, Blackwell / FlashAttention deps, Intel XPU deps, AMD ROCm deps, SageAttention deps
+- Main/Blackwell/FlashAttention/Intel/AMD slimming removes most installed runtime payload and will require reinstall on next startup
+- SageAttention python slimming also covers SageAttention2 and the experimental SageBwd NVIDIA runtime, removes triton / sageattention-related payloads / YOLO extras / aesthetic scorer extras, and will require reinstall on next startup
+- Main remaining bulky folder should drop massively after choosing Y for main python slimming
+
+Press any key to continue . . . 

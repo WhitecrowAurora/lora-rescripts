@@ -28,7 +28,7 @@ def _tensor_grad_summary(torch, tensor):
 
 def _run_direct_case(torch, call_sageattention):
     device = "cuda"
-    dtype = torch.bfloat16
+    dtype = torch.float16
     batch, seq_len, channels, heads = 2, 16, 256, 4
     head_dim = channels // heads
 
@@ -61,7 +61,7 @@ def _run_direct_case(torch, call_sageattention):
 
 def _run_attention_module_case(torch, attention_module):
     device = "cuda"
-    dtype = torch.bfloat16
+    dtype = torch.float16
     batch, seq_len, heads, head_dim = 2, 16, 4, 64
 
     q = torch.randn(batch, seq_len, heads, head_dim, device=device, dtype=dtype, requires_grad=True)
@@ -81,25 +81,67 @@ def _run_attention_module_case(torch, attention_module):
     }
 
 
+def _run_varlen_case(torch, call_sageattention_varlen):
+    device = "cuda"
+    dtype = torch.float16
+    batch, heads, head_dim = 2, 4, 64
+    lengths = [9, 7]
+    total_tokens = sum(lengths)
+
+    q = torch.randn(total_tokens, heads, head_dim, device=device, dtype=dtype, requires_grad=True)
+    k = torch.randn(total_tokens, heads, head_dim, device=device, dtype=dtype, requires_grad=True)
+    v = torch.randn(total_tokens, heads, head_dim, device=device, dtype=dtype, requires_grad=True)
+    cu = torch.tensor([0, lengths[0], total_tokens], device=device, dtype=torch.int32)
+
+    out = call_sageattention_varlen(
+        q,
+        k,
+        v,
+        cu,
+        cu,
+        max(lengths),
+        max(lengths),
+        is_causal=False,
+        sm_scale=head_dim**-0.5,
+    )
+    loss = out.float().square().mean()
+    loss.backward()
+
+    return {
+        "loss": float(loss.item()),
+        "q": _tensor_grad_summary(torch, q.grad),
+        "k": _tensor_grad_summary(torch, k.grad),
+        "v": _tensor_grad_summary(torch, v.grad),
+    }
+
+
 def main() -> None:
     _setup_repo_paths()
 
     result = {
         "success": False,
         "runtime_source": "",
+        "runtime_version": "",
         "cuda_available": False,
         "direct_case": {},
         "attention_module_case": {},
+        "varlen_case": {},
         "error": "",
     }
 
     try:
         import torch
         from library import attention as attention_module
-        from library.sageattention_compat import call_sageattention, get_runtime_sageattention_source
+        from library.sageattention_compat import (
+            call_sageattention,
+            call_sageattention_varlen,
+            get_runtime_sageattention_source,
+            get_runtime_sageattention_version,
+        )
 
         result["cuda_available"] = bool(torch.cuda.is_available())
         result["runtime_source"] = get_runtime_sageattention_source()
+        result["runtime_version"] = get_runtime_sageattention_version()
         if not result["cuda_available"]:
             result["error"] = "CUDA is not available."
             print(json.dumps(result, ensure_ascii=False))
@@ -107,6 +149,7 @@ def main() -> None:
 
         result["direct_case"] = _run_direct_case(torch, call_sageattention)
         result["attention_module_case"] = _run_attention_module_case(torch, attention_module)
+        result["varlen_case"] = _run_varlen_case(torch, call_sageattention_varlen)
 
         checks = [
             result["direct_case"]["to_q"]["present"],
@@ -116,6 +159,9 @@ def main() -> None:
             result["attention_module_case"]["q"]["present"],
             result["attention_module_case"]["k"]["present"],
             result["attention_module_case"]["v"]["present"],
+            result["varlen_case"]["q"]["present"],
+            result["varlen_case"]["k"]["present"],
+            result["varlen_case"]["v"]["present"],
             result["direct_case"]["to_q"]["finite"],
             result["direct_case"]["to_k"]["finite"],
             result["direct_case"]["to_v"]["finite"],
@@ -123,6 +169,9 @@ def main() -> None:
             result["attention_module_case"]["q"]["finite"],
             result["attention_module_case"]["k"]["finite"],
             result["attention_module_case"]["v"]["finite"],
+            result["varlen_case"]["q"]["finite"],
+            result["varlen_case"]["k"]["finite"],
+            result["varlen_case"]["v"]["finite"],
         ]
         result["success"] = all(checks)
     except Exception as exc:

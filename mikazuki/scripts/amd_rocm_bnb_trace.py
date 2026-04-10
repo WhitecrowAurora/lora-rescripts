@@ -434,7 +434,6 @@ def build_report() -> dict[str, object]:
         "embedded_python_pth": inspect_embedded_python_pth(),
         "guard_env": {
             "MIKAZUKI_ROCM_AMD_STARTUP": os.environ.get("MIKAZUKI_ROCM_AMD_STARTUP", ""),
-            "MIKAZUKI_ROCM_AMD_SAGE_STARTUP": os.environ.get("MIKAZUKI_ROCM_AMD_SAGE_STARTUP", ""),
             "MIKAZUKI_PREFERRED_RUNTIME": os.environ.get("MIKAZUKI_PREFERRED_RUNTIME", ""),
             "MIKAZUKI_EXPERIMENTAL_IMPORT_GUARDS": os.environ.get("MIKAZUKI_EXPERIMENTAL_IMPORT_GUARDS", ""),
             "MIKAZUKI_EXPERIMENTAL_IMPORT_GUARDS_PATCHED": os.environ.get("MIKAZUKI_EXPERIMENTAL_IMPORT_GUARDS_PATCHED", ""),

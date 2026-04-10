@@ -969,6 +969,7 @@ async def create_toml_file(request: Request):
     json_data = await request.body()
 
     config: dict = json.loads(json_data.decode("utf-8"))
+    config.setdefault("pytorch_cuda_expandable_segments", True)
     try:
         train_utils.fix_config_types(config)
     except (TypeError, ValueError) as exc:

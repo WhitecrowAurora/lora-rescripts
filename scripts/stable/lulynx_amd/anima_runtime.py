@@ -6,7 +6,6 @@ import os
 from argparse import Namespace
 
 import torch
-from mikazuki.utils.amd_sageattention import probe_runtime_sageattention
 from mikazuki.utils.runtime_safe_preview import apply_runtime_safe_preview_policy
 
 
@@ -88,15 +87,6 @@ _AMD_ARCH_PROFILE_MODIFIERS = {
         "sdpa_slice_target_scale": 1.0,
     },
 }
-
-
-def _probe_experimental_sageattention() -> dict[str, object]:
-    return probe_runtime_sageattention()
-
-
-def _requested_sageattention(args: Namespace) -> bool:
-    attn_mode = str(getattr(args, "attn_mode", "") or "").strip().lower()
-    return bool(attn_mode == "sageattn" or getattr(args, "sageattn", False) or getattr(args, "use_sage_attn", False))
 
 
 def _get_device_visibility_hint() -> str:
@@ -453,11 +443,12 @@ def apply_anima_amd_experimental_policy(args: Namespace) -> list[str]:
     _apply_rocm_attention_guard(args, messages)
 
     requested_attn_mode = str(getattr(args, "attn_mode", "") or "").strip().lower()
-    wants_sageattention = _requested_sageattention(args)
-    sage_probe = _probe_experimental_sageattention() if wants_sageattention else {"ready": False, "reason": ""}
+    requested_legacy_sage = bool(
+        requested_attn_mode == "sageattn" or getattr(args, "sageattn", False) or getattr(args, "use_sage_attn", False)
+    )
     args._amd_requested_attn_mode = requested_attn_mode or "auto"
     args._amd_device_visibility_hint = _get_device_visibility_hint()
-    if requested_attn_mode not in {"", "none", "null", "torch", "sdpa", "sageattn"}:
+    if requested_attn_mode not in {"", "none", "null", "torch", "sdpa"}:
         messages.append(f"AMD 实验核心暂不启用 {requested_attn_mode} attention，已强制改用 SDPA。")
     args.attn_mode = "torch"
 
@@ -514,25 +505,14 @@ def apply_anima_amd_experimental_policy(args: Namespace) -> list[str]:
         args.anima_nan_check_interval = 1
         messages.append("AMD 实验核心已自动把 anima_nan_check_interval 改为 1。")
 
-    if wants_sageattention and sage_probe["ready"]:
-        args.attn_mode = "sageattn"
-        args.sageattn = True
-        if hasattr(args, "use_sage_attn"):
-            args.use_sage_attn = True
-        if hasattr(args, "sdpa"):
-            args.sdpa = False
-        messages.append("AMD 实验核心将试运行实验性 SageAttention；若内核调用失败，运行时会自动回退为 SDPA。")
-    else:
-        if bool(getattr(args, "sageattn", False)):
-            args.sageattn = False
-        if hasattr(args, "use_sage_attn") and bool(getattr(args, "use_sage_attn", False)):
-            args.use_sage_attn = False
-        if hasattr(args, "sdpa"):
-            args.sdpa = True
-        if wants_sageattention:
-            messages.append(
-                f"AMD 实验核心当前未检测到可用的 SageAttention 构建（{sage_probe['reason'] or 'runtime probe failed'}），已自动回退为 SDPA。"
-            )
+    if bool(getattr(args, "sageattn", False)):
+        args.sageattn = False
+    if hasattr(args, "use_sage_attn") and bool(getattr(args, "use_sage_attn", False)):
+        args.use_sage_attn = False
+    if hasattr(args, "sdpa"):
+        args.sdpa = True
+    if requested_legacy_sage:
+        messages.append("当前构建已移除 AMD ROCm SageAttention 实验入口；AMD 实验核心已自动回退为 SDPA。")
 
     _apply_safe_preview_settings(args, messages)
     _apply_mixed_precision_policy(args, messages, runtime_probe)
