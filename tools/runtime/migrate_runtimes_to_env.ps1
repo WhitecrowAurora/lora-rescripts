@@ -14,11 +14,13 @@ $runtimeSpecs = @(
     [pscustomobject]@{ Name = "portable"; Primary = "python"; Aliases = @("python"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "tageditor"; Primary = "python_tageditor"; Aliases = @("python_tageditor"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "blackwell"; Primary = "python_blackwell"; Aliases = @("python_blackwell"); IncludeByDefault = $true },
+    [pscustomobject]@{ Name = "flashattention"; Primary = "python-flashattention"; Aliases = @("python-flashattention", "python_flashattention"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "intel-xpu"; Primary = "python_xpu_intel"; Aliases = @("python_xpu_intel"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "intel-xpu-sage"; Primary = "python_xpu_intel_sage"; Aliases = @("python_xpu_intel_sage"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "rocm-amd"; Primary = "python_rocm_amd"; Aliases = @("python_rocm_amd"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "sagebwd-nvidia"; Primary = "python_sagebwd_nvidia"; Aliases = @("python_sagebwd_nvidia", "python-sagebwd-nvidia"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "sageattention"; Primary = "python-sageattention"; Aliases = @("python-sageattention", "python_sageattention"); IncludeByDefault = $true },
+    [pscustomobject]@{ Name = "sageattention2"; Primary = "python-sageattention2"; Aliases = @("python-sageattention2", "python_sageattention2"); IncludeByDefault = $true },
     [pscustomobject]@{ Name = "venv"; Primary = "venv"; Aliases = @("venv"); IncludeByDefault = $false },
     [pscustomobject]@{ Name = "venv-tageditor"; Primary = "venv-tageditor"; Aliases = @("venv-tageditor"); IncludeByDefault = $false }
 )
