@@ -612,7 +612,8 @@ class NetworkTrainer:
         is_train=True,
         train_text_encoder=True,
         train_unet=True,
-    ) -> torch.Tensor:
+        return_per_sample_loss: bool = False,
+    ):
         """
         Process a batch for the network
         """
@@ -705,7 +706,10 @@ class NetworkTrainer:
 
         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-        return loss.mean()
+        mean_loss = loss.mean()
+        if return_per_sample_loss:
+            return mean_loss, loss
+        return mean_loss
 
     def cast_text_encoder(self, args):
         return True  # default for other than HunyuanImage
@@ -1274,7 +1278,7 @@ class NetworkTrainer:
         safeguard = train_util.create_training_safeguard(args)
         ema_model = train_util.create_model_ema(args, [("network", accelerator.unwrap_model(network))])
         if lulynx_core is not None:
-            lulynx_core.attach_runtime(train_text_encoder=train_text_encoder)
+            lulynx_core.attach_runtime(train_text_encoder=train_text_encoder, network=accelerator.unwrap_model(network))
 
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1756,6 +1760,7 @@ class NetworkTrainer:
                     initial_step -= 1
                     continue
 
+                lulynx_step_logs = {}
                 attention_step_profiler.begin_micro_step()
                 try:
                     with accelerator.accumulate(training_model):
@@ -1765,7 +1770,9 @@ class NetworkTrainer:
                         self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
 
                         with attention_step_profiler.section("forward"):
-                            loss = self.process_batch(
+                            return_per_sample_loss = lulynx_core is not None and lulynx_core.requires_per_sample_losses()
+                            per_sample_losses = None
+                            batch_result = self.process_batch(
                                 batch,
                                 text_encoders,
                                 unet,
@@ -1781,7 +1788,12 @@ class NetworkTrainer:
                                 is_train=True,
                                 train_text_encoder=train_text_encoder,
                                 train_unet=train_unet,
+                                return_per_sample_loss=return_per_sample_loss,
                             )
+                            if return_per_sample_loss:
+                                loss, per_sample_losses = batch_result
+                            else:
+                                loss = batch_result
 
                         current_loss = loss.detach().item()
                         if safeguard is not None:
@@ -1796,7 +1808,16 @@ class NetworkTrainer:
                                 continue
 
                         with attention_step_profiler.section("backward"):
-                            accelerator.backward(loss)
+                            if lulynx_core is not None:
+                                lulynx_core.backward(
+                                    loss=loss,
+                                    accelerator=accelerator,
+                                    optimizer=optimizer,
+                                    network=accelerator.unwrap_model(network),
+                                    per_sample_losses=per_sample_losses,
+                                )
+                            else:
+                                accelerator.backward(loss)
                             if accelerator.sync_gradients:
                                 self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                                 if args.max_grad_norm != 0.0:
@@ -1885,6 +1906,7 @@ class NetworkTrainer:
                             accelerator=accelerator,
                             network=accelerator.unwrap_model(network),
                         )
+                        lulynx_step_logs = dict(lulynx_decision.logs or {})
                         if lulynx_decision.stop_training and lulynx_stop_reason is None:
                             lulynx_stop_reason = lulynx_decision.reason or "Lulynx experimental core requested stop."
 
@@ -1909,6 +1931,8 @@ class NetworkTrainer:
                         mean_grad_norm,
                         mean_combined_norm,
                     )
+                    if lulynx_step_logs:
+                        logs.update(lulynx_step_logs)
                     self.step_logging(accelerator, logs, global_step, effective_epoch_no)
 
                 # VALIDATION PER STEP: global_step is already incremented

@@ -66,7 +66,7 @@ Schema.intersect([
 
         Schema.union([
             Schema.object({
-                lora_type: Schema.const("lora").required(),
+                lora_type: Schema.const("lora").default("lora"),
                 network_module: Schema.const("networks.lora_anima").default("networks.lora_anima").hidden(),
                 network_dropout: Schema.number().step(0.01).default(0).description("LoRA dropout 概率"),
                 pissa_init: Schema.boolean().default(false).description("启用 PiSSA 初始化（实验性，仅在 LoRA 适配器类型下生效）"),

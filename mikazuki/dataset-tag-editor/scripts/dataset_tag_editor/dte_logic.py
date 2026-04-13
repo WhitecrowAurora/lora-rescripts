@@ -748,8 +748,6 @@ class DatasetTagEditor(Singleton):
 
             for img_path, img in result:
                 imgpaths.append(img_path)
-                if not use_temp_dir and max_res <= 0:
-                    img.already_saved_as = img_path
                 images_raw[img_path] = img
             
             logger.write(f"Total {len(imgpaths)} valid images")
@@ -764,8 +762,6 @@ class DatasetTagEditor(Singleton):
                     images[img_path].thumbnail(img_res)
             else:
                 for img_path, img in images_raw.items():
-                    if not use_temp_dir:
-                        img.already_saved_as = img_path
                     images[img_path] = img
             return images
 

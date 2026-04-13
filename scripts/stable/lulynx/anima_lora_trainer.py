@@ -403,7 +403,8 @@ class AnimaNetworkTrainer:
         profiler: Optional[anima_train_utils.AnimaStepTimingProfiler] = None,
         use_non_blocking: bool = False,
         run_nan_check: bool = True,
-    ) -> torch.Tensor:
+        return_per_sample_loss: bool = False,
+    ):
         with (profiler.step_section("data/latents") if profiler is not None else nullcontext()):
             with torch.no_grad():
                 if "latents" in batch and batch["latents"] is not None:
@@ -517,7 +518,10 @@ class AnimaNetworkTrainer:
                 loss = apply_masked_loss(loss, batch)
             loss = loss.mean(dim=list(range(1, loss.ndim)))
             loss = loss * batch["loss_weights"]
-            return loss.mean()
+            mean_loss = loss.mean()
+            if return_per_sample_loss:
+                return mean_loss, loss
+            return mean_loss
 
     def prepare_text_encoder_grad_ckpt_workaround(self, text_encoder):
         first_param = next(text_encoder.parameters())
@@ -1062,7 +1066,7 @@ class AnimaNetworkTrainer:
             ema_named_models.extend(accelerator.unwrap_model(network).get_extra_ema_modules())
         ema_model = train_util.create_model_ema(args, ema_named_models)
         if lulynx_core is not None:
-            lulynx_core.attach_runtime(train_text_encoder=train_text_encoder)
+            lulynx_core.attach_runtime(train_text_encoder=train_text_encoder, network=accelerator.unwrap_model(network))
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -1199,10 +1203,13 @@ class AnimaNetworkTrainer:
 
                 nan_check_step = epoch * len(train_dataloader) + step + 1
                 run_nan_check = anima_train_utils.should_run_anima_nan_check(args, nan_check_step)
+                lulynx_step_logs = {}
                 anima_step_profiler.begin_micro_step()
                 try:
                     with accelerator.accumulate(training_model):
-                        loss = self.process_batch(
+                        return_per_sample_loss = lulynx_core is not None and lulynx_core.requires_per_sample_losses()
+                        per_sample_losses = None
+                        batch_result = self.process_batch(
                             batch,
                             text_encoders,
                             dit,
@@ -1219,7 +1226,12 @@ class AnimaNetworkTrainer:
                             profiler=anima_step_profiler,
                             use_non_blocking=use_non_blocking,
                             run_nan_check=run_nan_check,
+                            return_per_sample_loss=return_per_sample_loss,
                         )
+                        if return_per_sample_loss:
+                            loss, per_sample_losses = batch_result
+                        else:
+                            loss = batch_result
 
                         current_loss = loss.detach().item()
                         if safeguard is not None:
@@ -1234,7 +1246,16 @@ class AnimaNetworkTrainer:
                                 continue
 
                         with anima_step_profiler.step_section("backward"):
-                            accelerator.backward(loss)
+                            if lulynx_core is not None:
+                                lulynx_core.backward(
+                                    loss=loss,
+                                    accelerator=accelerator,
+                                    optimizer=optimizer,
+                                    network=accelerator.unwrap_model(network),
+                                    per_sample_losses=per_sample_losses,
+                                )
+                            else:
+                                accelerator.backward(loss)
 
                         with anima_step_profiler.step_section("optimizer_step"):
                             if accelerator.sync_gradients:
@@ -1297,6 +1318,7 @@ class AnimaNetworkTrainer:
                             accelerator=accelerator,
                             network=accelerator.unwrap_model(network),
                         )
+                        lulynx_step_logs = dict(lulynx_decision.logs or {})
                         if lulynx_decision.stop_training and lulynx_stop_reason is None:
                             lulynx_stop_reason = lulynx_decision.reason or "Lulynx experimental core requested stop."
                     anima_step_profiler.finalize_optimizer_step(global_step)
@@ -1310,6 +1332,8 @@ class AnimaNetworkTrainer:
                 if len(accelerator.trackers) > 0:
                     step_logs = {"loss": current_loss}
                     train_util.append_lr_to_logs_with_names(step_logs, lr_scheduler, args.optimizer_type, lr_descriptions or [])
+                    if lulynx_step_logs:
+                        step_logs.update(lulynx_step_logs)
                     accelerator.log(step_logs, step=global_step)
 
                 if lulynx_stop_reason is not None:
@@ -1352,6 +1376,13 @@ class AnimaNetworkTrainer:
                     network=network,
                 )
             optimizer_train_fn()
+            train_util.maybe_run_epoch_cooldown(
+                args,
+                accelerator,
+                epoch + 1,
+                num_train_epochs,
+                context_label="anima network training",
+            )
 
             if lulynx_stop_reason is not None:
                 break

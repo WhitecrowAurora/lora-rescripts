@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 import datetime
 import importlib
+import inspect
 import json
 import logging
 import pathlib
@@ -947,7 +948,8 @@ class BaseDataset(torch.utils.data.Dataset):
                     self.shuffle_buckets()
                 # self.current_epoch seem to be set to 0 again in the next epoch. it may be caused by skipped_dataloader?
             else:
-                logger.warning("epoch is not incremented. current_epoch: {}, epoch: {}".format(self.current_epoch, epoch))
+                # DataLoader workers can observe stale local epoch state briefly.
+                # Updating silently avoids noisy duplicated console output.
                 self.current_epoch = epoch
 
     def set_current_step(self, step):
@@ -4129,6 +4131,8 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
         nargs="*",
         help='additional arguments for optimizer (like "weight_decay=0.01 betas=0.9,0.999 ...") / オプティマイザの追加引数（例： "weight_decay=0.01 betas=0.9,0.999 ..."）',
     )
+    parser.add_argument("--prodigy_d0", type=float, default=None, help="Prodigy d0 / Prodigy の d0")
+    parser.add_argument("--prodigy_d_coef", type=float, default=None, help="Prodigy d coefficient / Prodigy の d 係数")
 
     # parser.add_argument(
     #     "--optimizer_schedulefree_wrapper",
@@ -5871,6 +5875,29 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
 
             logger.info(f"use Prodigy optimizer | {optimizer_kwargs}")
             optimizer_class = prodigyopt.Prodigy
+            try:
+                prodigy_signature = inspect.signature(optimizer_class.__init__)
+                supported_kwargs = set(prodigy_signature.parameters.keys())
+            except (TypeError, ValueError):
+                supported_kwargs = None
+
+            def _supports_prodigy_kwarg(name):
+                return supported_kwargs is None or name in supported_kwargs
+
+            def _inject_prodigy_kwarg(name, value):
+                if value in (None, "") or name in optimizer_kwargs:
+                    return
+                if not _supports_prodigy_kwarg(name):
+                    logger.info(f"Prodigy runtime does not expose kwarg {name}; skipping injected value.")
+                    return
+                optimizer_kwargs[name] = value
+
+            _inject_prodigy_kwarg("d0", getattr(args, "prodigy_d0", None))
+            _inject_prodigy_kwarg("d_coef", getattr(args, "prodigy_d_coef", None))
+            _inject_prodigy_kwarg("decouple", getattr(args, "lulynx_prodigy_decouple", None))
+            _inject_prodigy_kwarg("use_bias_correction", getattr(args, "lulynx_prodigy_use_bias_correction", None))
+            _inject_prodigy_kwarg("safeguard_warmup", getattr(args, "lulynx_prodigy_safeguard_warmup", None))
+            _inject_prodigy_kwarg("growth_rate", getattr(args, "lulynx_prodigy_growth_rate", None))
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     elif optimizer_type == "Adafactor".lower():

@@ -6,7 +6,7 @@
 
     const LULYNX_EXPERIMENTAL_CORE_COMMON = Schema.intersect([
         Schema.object({
-            lulynx_experimental_core_enabled: Schema.boolean().default(false).description("启用 Lulynx 实验核心。集中管理 SafeGuard、EMA、ResourceManager、BlockWeightManager、SmartRank 与 AutoController"),
+            lulynx_experimental_core_enabled: Schema.boolean().default(false).description("启用 Lulynx 实验核心。集中管理 SafeGuard、EMA、ResourceManager、BlockWeightManager、SmartRank、AutoController、LISA、PCGrad、Pause、Prodigy Guard 与轻量监控"),
         }),
         Schema.union([
             Schema.object({
@@ -17,6 +17,11 @@
                 lulynx_block_weight_enabled: Schema.boolean().default(false).description("启用 Lulynx BlockWeightManager。按模型结构分配分层学习率"),
                 lulynx_smart_rank_enabled: Schema.boolean().default(false).description("启用 Lulynx SmartRank。周期性压缩低能量 rank 通道"),
                 lulynx_auto_controller_enabled: Schema.boolean().default(false).description("启用 Lulynx AutoController。根据 loss 平台自动控速、降学习率或提前停止"),
+                lulynx_lisa_enabled: Schema.boolean().default(false).description("启用实验性 LISA。周期性只激活一部分适配器模块参与下一阶段训练"),
+                lulynx_pcgrad_enabled: Schema.boolean().default(false).description("启用实验性 PCGrad。对逐样本 loss 做冲突梯度投影"),
+                lulynx_pause_enabled: Schema.boolean().default(false).description("启用 Lulynx Pause。桥接到现有 cooldown 逻辑，在 epoch 之间做散热暂停"),
+                lulynx_prodigy_guard_enabled: Schema.boolean().default(false).description("启用 Prodigy 专用护栏参数与学习率钳制"),
+                lulynx_advanced_stats_enabled: Schema.boolean().default(false).description("启用轻量监控项与 SVD 采样统计"),
             }),
             Schema.object({}),
         ]),
@@ -81,6 +86,55 @@
                 lulynx_auto_early_stop_patience: Schema.number().min(1).default(6).description("连续多少次平台期后提前停止训练"),
                 lulynx_auto_min_lr: Schema.number().min(0).step(0.0000001).default(0.0000001).description("自动降学习率时的最小学习率下限"),
                 lulynx_auto_freeze_text_encoder_on_plateau: Schema.boolean().default(false).description("平台期持续时自动冻结文本编码器侧 LoRA 参数"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_lisa_enabled: Schema.const(true).required(),
+                lulynx_lisa_active_ratio: Schema.number().min(0.05).max(1).step(0.01).default(0.2).description("每轮 LISA 激活的适配器模块比例"),
+                lulynx_lisa_interval: Schema.number().min(1).default(1).description("每 N 个优化 step 重排一次 LISA 激活模块"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_pcgrad_enabled: Schema.const(true).required(),
+                lulynx_pcgrad_conflict_threshold: Schema.number().min(-1).max(1).step(0.01).default(0).description("PCGrad 判定梯度冲突的余弦阈值。低于该值时执行投影"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_pause_enabled: Schema.const(true).required(),
+                lulynx_pause_every_n_epochs: Schema.number().min(1).description("每 N 个 epoch 在保存与预览后暂停一次。会桥接到 cooldown_every_n_epochs"),
+                lulynx_pause_minutes: Schema.number().min(0).step(0.5).description("每次暂停至少等待多少分钟。会桥接到 cooldown_minutes"),
+                lulynx_pause_until_temp_c: Schema.number().min(1).description("暂停时等待显卡温度降到多少摄氏度以下。会桥接到 cooldown_until_temp_c"),
+                lulynx_pause_poll_seconds: Schema.number().min(1).default(15).description("温度轮询间隔（秒）。会桥接到 cooldown_poll_seconds"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_prodigy_guard_enabled: Schema.const(true).required(),
+                lulynx_prodigy_decouple: Schema.boolean().default(false).description("若当前 Prodigy 版本支持，则注入 decouple 参数"),
+                lulynx_prodigy_use_bias_correction: Schema.boolean().default(false).description("若当前 Prodigy 版本支持，则注入 use_bias_correction 参数"),
+                lulynx_prodigy_safeguard_warmup: Schema.boolean().default(false).description("若当前 Prodigy 版本支持，则注入 safeguard_warmup 参数"),
+                lulynx_prodigy_growth_rate: Schema.number().min(0).step(0.0001).description("若当前 Prodigy 版本支持，则注入 growth_rate 参数"),
+                lulynx_prodigy_lr_min: Schema.number().min(0).step(0.0000001).description("Prodigy 运行时学习率下限钳制"),
+                lulynx_prodigy_lr_max: Schema.number().min(0).step(0.0000001).description("Prodigy 运行时学习率上限钳制"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_advanced_stats_enabled: Schema.const(true).required(),
+                lulynx_svd_sample_interval: Schema.number().min(1).default(100).description("每 N 个优化 step 采样一次轻量高级统计与 SVD 指标"),
             }),
             Schema.object({}),
         ]),

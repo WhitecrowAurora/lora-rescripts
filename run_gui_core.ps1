@@ -186,6 +186,9 @@ function Convert-BlackwellRuntimeErrorMessage {
     if ($Message -match '^torch import failed:\s*(.*)$') {
         return (Get-ConsoleText -Key 'issue_torch_import_failed') + ": $($Matches[1])"
     }
+    if ($Message -match "No module named 'triton'") {
+        return (Get-ConsoleText -Key 'issue_triton_import_failed') + ": $Message"
+    }
     return $Message
 }
 
