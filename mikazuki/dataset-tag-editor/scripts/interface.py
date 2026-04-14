@@ -173,12 +173,16 @@ def save_pil_to_cache(pil_image: Image.Image, *args, **kwargs):
     pil_image.save(file_obj, pnginfo=(metadata if use_metadata else None))
 
     pil_image.already_saved_as = file_obj.name
+    register_tmp_file(interface, file_obj.name)
     
     return file_obj.name
 
 
 def save_file_to_cache_nocache(file_path: str | Path, cache_dir: str) -> str:
-    return str(Path(file_path).resolve())
+    resolved_path = str(Path(file_path).resolve())
+    if os.path.isfile(resolved_path):
+        register_tmp_file(interface, resolved_path)
+    return resolved_path
 
 
 def save_file_to_cache_cacheonce(file_path: str | Path, cache_dir: str) -> str:
@@ -198,6 +202,7 @@ def save_file_to_cache_cacheonce(file_path: str | Path, cache_dir: str) -> str:
     if not Path(full_temp_file_path).exists():
         shutil.copy2(file_path, full_temp_file_path)
 
+    register_tmp_file(interface, full_temp_file_path)
     return full_temp_file_path
 
 
@@ -440,7 +445,7 @@ def main():
         if settings.current.use_temp_files and settings.current.temp_directory != "":
             state.temp_dir = Path(settings.current.temp_directory)
         
-        os.environ['GRADIO_TEMP_DIR'] = state.temp_dir.name
+        os.environ['GRADIO_TEMP_DIR'] = str(state.temp_dir)
         
         # override save function to prevent from making anonying temporaly files
         gr.gradio.processing_utils.save_pil_to_cache = save_pil_to_cache

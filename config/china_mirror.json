@@ -4,5 +4,5 @@
     "pip_index_url":  "https://pypi.tuna.tsinghua.edu.cn/simple",
     "pip_find_links":  "https://mirror.sjtu.edu.cn/pytorch-wheels/torch_stable.html",
     "hf_endpoint":  "https://hf-mirror.com",
-    "updated_at":  "2026-04-14 13:14:26"
+    "updated_at":  "2026-04-14 22:39:02"
 }

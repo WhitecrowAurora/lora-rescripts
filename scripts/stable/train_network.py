@@ -1,6 +1,7 @@
+import argparse
 import gc
 import importlib
-import argparse
+import inspect
 import math
 import os
 import typing
@@ -593,6 +594,12 @@ class NetworkTrainer:
     def on_validation_step_end(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype):
         pass
 
+    def configure_model_runtime(self, args, accelerator, network, text_encoders, unet):
+        pass
+
+    def configure_dataset_runtime_policy(self, args):
+        train_util.configure_bucket_runtime_policy(mode=None, target_edge=None)
+
     # endregion
 
     def process_batch(
@@ -754,6 +761,7 @@ class NetworkTrainer:
             route_label="SDXL LoRA" if self.is_sdxl else "Stable LoRA",
             route_kind="sdxl" if self.is_sdxl else "stable",
         )
+        self.configure_dataset_runtime_policy(args)
 
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
@@ -988,9 +996,23 @@ class NetworkTrainer:
             accelerator.print(f"load network weights from {args.network_weights}: {info}")
 
         if args.gradient_checkpointing:
-            if args.cpu_offload_checkpointing:
+            supports_cpu_offload_checkpointing = False
+            try:
+                supports_cpu_offload_checkpointing = "cpu_offload" in inspect.signature(
+                    unet.enable_gradient_checkpointing
+                ).parameters
+            except (TypeError, ValueError):
+                supports_cpu_offload_checkpointing = False
+
+            if args.cpu_offload_checkpointing and supports_cpu_offload_checkpointing:
                 unet.enable_gradient_checkpointing(cpu_offload=True)
             else:
+                if args.cpu_offload_checkpointing and not supports_cpu_offload_checkpointing:
+                    accelerator.print(
+                        "WARNING: cpu_offload_checkpointing is not supported by the current U-Net/DiT route. "
+                        "Falling back to standard gradient checkpointing. "
+                        "/ 当前训练路由不支持 cpu_offload_checkpointing，已自动回退为普通梯度检查点。"
+                    )
                 unet.enable_gradient_checkpointing()
 
             for t_enc, flag in zip(text_encoders, self.get_text_encoders_train_flags(args, text_encoders)):
@@ -1190,6 +1212,7 @@ class NetworkTrainer:
         del t_enc
 
         accelerator.unwrap_model(network).prepare_grad_etc(text_encoder, unet)
+        self.configure_model_runtime(args, accelerator, network, text_encoders, unet)
 
         if not cache_latents:  # キャッシュしない場合はVAEを使うのでVAEを準備する
             vae.requires_grad_(False)
@@ -1915,7 +1938,7 @@ class NetworkTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-                progress_bar.set_postfix(**{**max_mean_logs, **logs})
+                progress_bar.set_postfix(**{**max_mean_logs, **logs}, refresh=False)
 
                 if is_tracking:
                     logs = self.generate_step_logs(
@@ -1981,7 +2004,8 @@ class NetworkTrainer:
                             val_step_loss_recorder.add(epoch=epoch, step=val_timesteps_step, loss=current_loss)
                             val_progress_bar.update(1)
                             val_progress_bar.set_postfix(
-                                {"val_avg_loss": val_step_loss_recorder.moving_average, "timestep": timestep}
+                                {"val_avg_loss": val_step_loss_recorder.moving_average, "timestep": timestep},
+                                refresh=False,
                             )
 
                             # if is_tracking:
@@ -2065,7 +2089,8 @@ class NetworkTrainer:
                         val_epoch_loss_recorder.add(epoch=epoch, step=val_timesteps_step, loss=current_loss)
                         val_progress_bar.update(1)
                         val_progress_bar.set_postfix(
-                            {"val_epoch_avg_loss": val_epoch_loss_recorder.moving_average, "timestep": timestep}
+                            {"val_epoch_avg_loss": val_epoch_loss_recorder.moving_average, "timestep": timestep},
+                            refresh=False,
                         )
 
                         # if is_tracking:

@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import gc
+import json
 import math
 import os
 from multiprocessing import Value
@@ -64,6 +65,7 @@ def train(args):
         args.cache_text_encoder_outputs = True
 
     anima_train_utils.log_anima_runtime_summary(args, route_label="Anima finetune")
+    component_cpu_offload = anima_train_utils.should_use_anima_component_cpu_offload(args)
 
     if args.cpu_offload_checkpointing and not args.gradient_checkpointing:
         logger.warning("cpu_offload_checkpointing is enabled, so gradient_checkpointing is also enabled")
@@ -371,7 +373,7 @@ def train(args):
     dit.to(dit_weight_dtype)  # convert dit to target weight dtype
 
     # move text encoder to GPU if not cached
-    if not args.cache_text_encoder_outputs and qwen3_text_encoder is not None:
+    if not args.cache_text_encoder_outputs and qwen3_text_encoder is not None and not component_cpu_offload:
         qwen3_text_encoder.to(accelerator.device)
 
     clean_memory_on_device(accelerator.device)
@@ -399,12 +401,66 @@ def train(args):
 
     # Move non-training models back to GPU
     if not args.cache_text_encoder_outputs and qwen3_text_encoder is not None:
-        qwen3_text_encoder.to(accelerator.device)
+        anima_train_utils.move_anima_module(
+            qwen3_text_encoder,
+            "cpu" if component_cpu_offload else accelerator.device,
+            dtype=weight_dtype,
+        )
     if not cache_latents and vae is not None:
-        vae.to(accelerator.device, dtype=weight_dtype)
+        anima_train_utils.move_anima_module(
+            vae,
+            "cpu" if component_cpu_offload else accelerator.device,
+            dtype=weight_dtype,
+        )
 
     if args.full_fp16:
         train_util.patch_accelerator_for_fp16_training(accelerator)
+
+    steps_from_state = None
+
+    def save_state_hook(models, weights, output_dir):
+        train_state_file = os.path.join(output_dir, "train_state.json")
+        mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
+        effective_current_epoch = int(current_epoch.value) + mixed_resolution_phase_start_epoch
+        logger.info(f"save train state to {train_state_file} at epoch {effective_current_epoch} step {current_step.value + 1}")
+        state_payload = {
+            "current_epoch": effective_current_epoch,
+            "current_step": current_step.value + 1,
+        }
+        if mixed_resolution_phase_start_epoch > 0:
+            state_payload["mixed_resolution_local_epoch"] = int(current_epoch.value)
+        mixed_resolution_plan_id = str(getattr(args, "mixed_resolution_plan_id", "") or "").strip()
+        if mixed_resolution_plan_id:
+            state_payload["mixed_resolution_plan_id"] = mixed_resolution_plan_id
+        mixed_phase_index = getattr(args, "mixed_resolution_phase_index", None)
+        if mixed_phase_index is not None:
+            state_payload["mixed_resolution_phase_index"] = mixed_phase_index
+        mixed_phase_target_step = getattr(args, "mixed_resolution_phase_target_step", None)
+        if mixed_phase_target_step is not None:
+            state_payload["mixed_resolution_phase_target_step"] = mixed_phase_target_step
+        mixed_phase_target_epoch = getattr(args, "mixed_resolution_phase_target_epoch", None)
+        if mixed_phase_target_epoch is not None:
+            state_payload["mixed_resolution_phase_target_epoch"] = mixed_phase_target_epoch
+        logging_run_dir = str(getattr(args, "logging_run_dir", "") or "").strip()
+        if not logging_run_dir:
+            logging_run_dir = str(getattr(accelerator, "project_dir", "") or "").strip()
+        if logging_run_dir:
+            state_payload["logging_run_dir"] = logging_run_dir
+            state_payload["logging_dir"] = logging_run_dir
+        with open(train_state_file, "w", encoding="utf-8") as handle:
+            json.dump(state_payload, handle)
+
+    def load_state_hook(models, input_dir):
+        nonlocal steps_from_state
+        train_state_file = os.path.join(input_dir, "train_state.json")
+        if os.path.exists(train_state_file):
+            with open(train_state_file, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            steps_from_state = data["current_step"]
+            logger.info(f"load train state from {train_state_file}: {data}")
+
+    accelerator.register_save_state_pre_hook(save_state_hook)
+    accelerator.register_load_state_pre_hook(load_state_hook)
 
     # resume
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
@@ -438,18 +494,76 @@ def train(args):
     if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
         args.save_every_n_epochs = math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
 
+    mixed_resolution_epoch_display_offset = int(getattr(args, "mixed_resolution_epoch_display_offset", 0) or 0)
+    mixed_resolution_phase_target_epoch = int(getattr(args, "mixed_resolution_phase_target_epoch", 0) or 0)
+    mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
+    displayed_num_train_epochs = mixed_resolution_phase_target_epoch if mixed_resolution_phase_target_epoch > 0 else num_train_epochs
+
+    def get_effective_epoch_no(epoch_index: int) -> int:
+        return max(1, epoch_index + 1 + mixed_resolution_epoch_display_offset)
+
+    initial_step = 0
+    if args.initial_epoch is not None or args.initial_step is not None:
+        if steps_from_state is not None:
+            logger.warning(
+                "steps from the state is ignored because initial_step is specified / initial_stepが指定されているため、stateからのステップ数は無視されます"
+            )
+        if args.initial_step is not None:
+            initial_step = args.initial_step
+        else:
+            initial_step = (args.initial_epoch - 1) * math.ceil(
+                len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
+            )
+    else:
+        if steps_from_state is not None:
+            initial_step = steps_from_state
+            steps_from_state = None
+
+    if initial_step > 0:
+        assert (
+            args.max_train_steps > initial_step
+        ), f"max_train_steps should be greater than initial step / max_train_stepsは初期ステップより大きい必要があります: {args.max_train_steps} vs {initial_step}"
+
+    epoch_to_start = 0
+    progress_start_step = 0
+    steps_per_epoch_for_resume = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    if initial_step > 0:
+        if args.skip_until_initial_step:
+            if not args.resume:
+                logger.info(
+                    "initial_step is specified but not resuming. lr scheduler will be started from the beginning / initial_stepが指定されていますがresumeしていないため、lr schedulerは最初から始まります"
+                )
+            logger.info(f"skipping {initial_step} steps / {initial_step}ステップをスキップします")
+            initial_step *= args.gradient_accumulation_steps
+            epoch_to_start = initial_step // steps_per_epoch_for_resume
+            progress_start_step = initial_step
+        else:
+            epoch_to_start = initial_step // steps_per_epoch_for_resume
+            progress_start_step = initial_step
+            initial_step = 0
+
     accelerator.print("running training / 学習開始")
     accelerator.print(f"  num examples / サンプル数: {train_dataset_group.num_train_images}")
     accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-    accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
+    accelerator.print(f"  num epochs / epoch数: {displayed_num_train_epochs}")
+    if mixed_resolution_phase_target_epoch > 0:
+        accelerator.print(
+            f"  mixed-resolution epoch window / 阶段分辨率连续 epoch 区间: "
+            f"{mixed_resolution_phase_start_epoch + 1} -> {mixed_resolution_phase_target_epoch}"
+        )
     accelerator.print(
         f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
     )
     accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
     accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
 
-    progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
-    global_step = 0
+    progress_bar = tqdm(
+        range(args.max_train_steps - progress_start_step),
+        smoothing=0,
+        disable=not accelerator.is_local_main_process,
+        desc="steps",
+    )
+    global_step = progress_start_step
 
     noise_scheduler = FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=args.discrete_flow_shift)
     # Copy for noise and timestep generation, because noise_scheduler may be changed during training in future
@@ -475,6 +589,12 @@ def train(args):
 
     if is_swapping_blocks:
         accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
+
+    if initial_step > 0:
+        for skip_epoch in range(epoch_to_start):
+            logger.info(f"skipping epoch {skip_epoch + 1} because initial_step (multiplied) is {initial_step}")
+            initial_step -= len(train_dataloader)
+        global_step = progress_start_step
 
     # For --sample_at_first
     optimizer_eval_fn()
@@ -507,21 +627,31 @@ def train(args):
     anima_step_profiler = anima_train_utils.AnimaStepTimingProfiler(args, accelerator, route_label="Anima finetune")
     use_non_blocking = anima_train_utils.should_use_anima_non_blocking(accelerator)
     epoch = 0
-    for epoch in range(num_train_epochs):
-        accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
-        current_epoch.value = epoch + 1
+    for epoch in range(epoch_to_start, num_train_epochs):
+        effective_epoch_no = get_effective_epoch_no(epoch)
+        accelerator.print(f"\nepoch {effective_epoch_no}/{displayed_num_train_epochs}")
+        current_epoch.value = max(1, effective_epoch_no - mixed_resolution_phase_start_epoch)
 
         for m in training_models:
             m.train()
 
-        for step, batch in enumerate(train_dataloader):
+        skipped_dataloader = None
+        if initial_step > 0:
+            skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
+            initial_step = 1
+
+        for step, batch in enumerate(skipped_dataloader or train_dataloader):
             current_step.value = global_step
+            if initial_step > 0:
+                initial_step -= 1
+                continue
             anima_step_profiler.begin_micro_step()
             nan_check_step = epoch * len(train_dataloader) + step + 1
             run_nan_check = anima_train_utils.should_run_anima_nan_check(args, nan_check_step)
 
             try:
                 with accelerator.accumulate(*training_models):
+                    released_component_vram = False
                     with anima_step_profiler.step_section("data/latents"):
                         if "latents" in batch and batch["latents"] is not None:
                             latents = anima_train_utils.move_anima_tensor(
@@ -534,6 +664,13 @@ def train(args):
                                 latents = latents.squeeze(2)  # (B, C, 1, H, W) -> (B, C, H, W)
                         else:
                             with torch.no_grad():
+                                if component_cpu_offload and vae is not None:
+                                    anima_train_utils.move_anima_module(
+                                        vae,
+                                        accelerator.device,
+                                        dtype=weight_dtype,
+                                        non_blocking=use_non_blocking,
+                                    )
                                 # images are already [-1, 1] from IMAGE_TRANSFORMS, add temporal dim
                                 images = anima_train_utils.move_anima_tensor(
                                     batch["images"],
@@ -545,6 +682,9 @@ def train(args):
                                 latents = vae.encode_pixels_to_latents(images).to(
                                     accelerator.device, dtype=dit_weight_dtype, non_blocking=use_non_blocking
                                 )
+                                if component_cpu_offload and vae is not None:
+                                    anima_train_utils.move_anima_module(vae, "cpu", dtype=weight_dtype)
+                                    released_component_vram = True
 
                             if run_nan_check and torch.any(torch.isnan(latents)):
                                 accelerator.print("NaN found in latents, replacing with zeros")
@@ -566,10 +706,20 @@ def train(args):
                         else:
                             # Encode on-the-fly
                             input_ids_list = batch["input_ids_list"]
+                            if component_cpu_offload and qwen3_text_encoder is not None:
+                                anima_train_utils.move_anima_module(
+                                    qwen3_text_encoder,
+                                    accelerator.device,
+                                    dtype=weight_dtype,
+                                    non_blocking=use_non_blocking,
+                                )
                             with torch.no_grad():
                                 prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = text_encoding_strategy.encode_tokens(
                                     tokenize_strategy, [qwen3_text_encoder], input_ids_list
                                 )
+                            if component_cpu_offload and qwen3_text_encoder is not None:
+                                anima_train_utils.move_anima_module(qwen3_text_encoder, "cpu", dtype=weight_dtype)
+                                released_component_vram = True
 
                         prompt_embeds = anima_train_utils.move_anima_tensor(
                             prompt_embeds,
@@ -593,6 +743,9 @@ def train(args):
                             accelerator.device,
                             non_blocking=use_non_blocking,
                         )
+
+                    if released_component_vram and accelerator.device.type == "cuda":
+                        clean_memory_on_device(accelerator.device)
 
                     with anima_step_profiler.step_section("noise_prepare"):
                         noise = torch.randn_like(latents)
@@ -718,8 +871,8 @@ def train(args):
                                 False,
                                 accelerator,
                                 save_dtype,
-                                epoch,
-                                num_train_epochs,
+                                max(0, effective_epoch_no - 1),
+                                displayed_num_train_epochs,
                                 global_step,
                                 accelerator.unwrap_model(dit) if train_dit else None,
                             )
@@ -741,13 +894,13 @@ def train(args):
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
             avr_loss: float = loss_recorder.moving_average
             logs = {"avr_loss": avr_loss}
-            progress_bar.set_postfix(**logs)
+            progress_bar.set_postfix(**logs, refresh=False)
 
             if global_step >= args.max_train_steps:
                 break
 
         if len(accelerator.trackers) > 0:
-            logs = {"loss/epoch": loss_recorder.moving_average, "epoch": epoch + 1}
+            logs = {"loss/epoch": loss_recorder.moving_average, "epoch": effective_epoch_no}
             accelerator.log(logs, step=global_step)
 
         accelerator.wait_for_everyone()
@@ -763,8 +916,8 @@ def train(args):
                         True,
                         accelerator,
                         save_dtype,
-                        epoch,
-                        num_train_epochs,
+                        effective_epoch_no - 1,
+                        displayed_num_train_epochs,
                         global_step,
                         accelerator.unwrap_model(dit) if train_dit else None,
                     )
@@ -773,7 +926,7 @@ def train(args):
             anima_train_utils.sample_images(
                 accelerator,
                 args,
-                epoch + 1,
+                effective_epoch_no,
                 global_step,
                 dit,
                 vae,
@@ -785,8 +938,8 @@ def train(args):
         train_util.maybe_run_epoch_cooldown(
             args,
             accelerator,
-            epoch + 1,
-            num_train_epochs,
+            effective_epoch_no,
+            displayed_num_train_epochs,
             context_label="Anima finetune",
         )
 
@@ -809,7 +962,7 @@ def train(args):
                 anima_train_utils.save_anima_model_on_train_end,
                 args,
                 save_dtype,
-                epoch,
+                displayed_num_train_epochs,
                 global_step,
                 dit,
             )

@@ -56,6 +56,23 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
+            enable_mixed_resolution_training: Schema.boolean().default(false).description("启用阶段分辨率训练（实验性，支持 Anima）。1024 基准使用 512/768/1024；2048 基准使用 1024/1536/2048"),
+        }).description("阶段分辨率训练"),
+        Schema.union([
+            Schema.object({
+                enable_mixed_resolution_training: Schema.const(true).required(),
+                staged_resolution_ratio_512: Schema.number().min(0).max(100).step(1).default(20).description("512 阶段占比（百分比）。当最终分辨率最大边小于 512 时会忽略"),
+                staged_resolution_ratio_768: Schema.number().min(0).max(100).step(1).default(30).description("768 阶段占比（百分比）。当最终分辨率最大边小于 768 时会忽略"),
+                staged_resolution_ratio_1024: Schema.number().min(0).max(100).step(1).default(50).description("1024 阶段占比（百分比）。1024 基准和 2048 基准都会用到"),
+                staged_resolution_ratio_1536: Schema.number().min(0).max(100).step(1).default(30).description("1536 阶段占比（百分比）。仅 2048 基准会用到"),
+                staged_resolution_ratio_2048: Schema.number().min(0).max(100).step(1).default(50).description("2048 阶段占比（百分比）。仅 2048 基准会用到"),
+            }),
+            Schema.object({}),
+        ]),
+    ]),
+
+    Schema.intersect([
+        Schema.object({
             learning_rate: Schema.string().default("2e-6").description("学习率"),
             lr_scheduler: Schema.union([
                 "linear",

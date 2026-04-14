@@ -134,6 +134,46 @@ def query_gpu_metrics(target_ids: Optional[Sequence[object]] = None) -> dict:
     }
 
 
+def query_gpu_memory(target_ids: Optional[Sequence[object]] = None) -> dict:
+    normalized_targets = _normalize_target_ids(target_ids)
+    args = [
+        "--query-gpu=index,memory.total,memory.used,memory.free",
+        "--format=csv,noheader,nounits",
+    ]
+    if normalized_targets:
+        args.extend(["-i", ",".join(normalized_targets)])
+
+    ok, stdout, error = _run_nvidia_smi(args, timeout_sec=NVIDIA_SMI_QUERY_TIMEOUT_SEC)
+    if not ok:
+        return {
+            "ok": False,
+            "error": error,
+            "gpus": [],
+        }
+
+    gpu_rows: list[dict] = []
+    for row in stdout.splitlines():
+        if not row.strip():
+            continue
+        parts = [part.strip() for part in row.split(",")]
+        while len(parts) < 4:
+            parts.append("")
+        gpu_rows.append(
+            {
+                "index": parts[0],
+                "memory_total_mb": _parse_numeric_value(parts[1]),
+                "memory_used_mb": _parse_numeric_value(parts[2]),
+                "memory_free_mb": _parse_numeric_value(parts[3]),
+            }
+        )
+
+    return {
+        "ok": True,
+        "error": "",
+        "gpus": gpu_rows,
+    }
+
+
 def apply_gpu_power_limit(
     requested_limit_w: int,
     *,

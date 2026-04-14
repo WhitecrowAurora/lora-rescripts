@@ -103,6 +103,30 @@ HIGH_VRAM = False
 
 _ARGPARSE_ZH_HELP_FALLBACK = " / 中文说明：请参考前面的英文描述。"
 _EPOCH_COOLDOWN_WARNING_KEYS = set()
+_RUNTIME_BUCKET_POLICY = {
+    "mode": None,
+    "target_edge": None,
+}
+
+
+def configure_bucket_runtime_policy(*, mode: Optional[str] = None, target_edge: Optional[int] = None) -> None:
+    normalized_mode = str(mode or "").strip().lower() or None
+    if normalized_mode not in {"long_edge", "short_edge"}:
+        normalized_mode = None
+
+    normalized_target_edge = None
+    if target_edge is not None:
+        try:
+            normalized_target_edge = max(64, int(target_edge))
+        except (TypeError, ValueError):
+            normalized_target_edge = None
+
+    _RUNTIME_BUCKET_POLICY["mode"] = normalized_mode
+    _RUNTIME_BUCKET_POLICY["target_edge"] = normalized_target_edge
+
+
+def get_bucket_runtime_policy() -> dict[str, Optional[int | str]]:
+    return dict(_RUNTIME_BUCKET_POLICY)
 
 
 def _build_trilingual_status_pattern(
@@ -387,6 +411,9 @@ class BucketManager:
         self.min_size = min_size
         self.max_size = max_size
         self.reso_steps = reso_steps
+        runtime_bucket_policy = get_bucket_runtime_policy()
+        self.runtime_resolution_mode = runtime_bucket_policy["mode"]
+        self.runtime_target_edge = runtime_bucket_policy["target_edge"]
 
         self.resos = []
         self.reso_to_id = {}
@@ -461,7 +488,24 @@ class BucketManager:
             # logger.info(f"use predef, {image_width}, {image_height}, {reso}, {resized_size}")
         else:
             # 縮小のみを行う
-            if image_width * image_height > self.max_area:
+            if self.runtime_resolution_mode in {"long_edge", "short_edge"} and self.runtime_target_edge is not None:
+                target_edge = max(self.reso_steps, int(self.runtime_target_edge))
+                if self.runtime_resolution_mode == "short_edge":
+                    current_edge = min(image_width, image_height)
+                else:
+                    current_edge = max(image_width, image_height)
+
+                scale = 1.0 if current_edge <= 0 else min(1.0, target_edge / current_edge)
+                if self.max_size is not None:
+                    scale = min(scale, self.max_size / max(image_width, image_height))
+
+                resized_width = max(self.reso_steps, int(image_width * scale + 0.5))
+                resized_height = max(self.reso_steps, int(image_height * scale + 0.5))
+                resized_size = (resized_width, resized_height)
+                bucket_width = max(self.reso_steps, self.round_to_steps(resized_width))
+                bucket_height = max(self.reso_steps, self.round_to_steps(resized_height))
+                reso = (bucket_width, bucket_height)
+            elif image_width * image_height > self.max_area:
                 # 画像が大きすぎるのでアスペクト比を保ったまま縮小することを前提にbucketを決める
                 resized_width = math.sqrt(self.max_area * aspect_ratio)
                 resized_height = self.max_area / resized_width
@@ -488,12 +532,13 @@ class BucketManager:
             else:
                 resized_size = (image_width, image_height)  # リサイズは不要
 
-            # 画像のサイズ未満をbucketのサイズとする（paddingせずにcroppingする）
-            bucket_width = resized_size[0] - resized_size[0] % self.reso_steps
-            bucket_height = resized_size[1] - resized_size[1] % self.reso_steps
-            # logger.info(f"use arbitrary {image_width}, {image_height}, {resized_size}, {bucket_width}, {bucket_height}")
+            if self.runtime_resolution_mode not in {"long_edge", "short_edge"} or self.runtime_target_edge is None:
+                # 画像のサイズ未満をbucketのサイズとする（paddingせずにcroppingする）
+                bucket_width = resized_size[0] - resized_size[0] % self.reso_steps
+                bucket_height = resized_size[1] - resized_size[1] % self.reso_steps
+                # logger.info(f"use arbitrary {image_width}, {image_height}, {resized_size}, {bucket_width}, {bucket_height}")
 
-            reso = (bucket_width, bucket_height)
+                reso = (bucket_width, bucket_height)
 
         self.add_if_new_reso(reso)
 
@@ -7268,10 +7313,23 @@ def sample_images_common(
 
     # unwrap unet and text_encoder(s)
     unet = accelerator.unwrap_model(unet_wrapped)
+    original_text_encoder_states = []
     if isinstance(text_encoder, (list, tuple)):
         text_encoder = [accelerator.unwrap_model(te) for te in text_encoder]
+        for te in text_encoder:
+            try:
+                first_param = next(te.parameters())
+                original_text_encoder_states.append((first_param.device, first_param.dtype))
+            except StopIteration:
+                original_text_encoder_states.append((torch.device("cpu"), torch.float32))
     else:
         text_encoder = accelerator.unwrap_model(text_encoder)
+        if text_encoder is not None:
+            try:
+                first_param = next(text_encoder.parameters())
+                original_text_encoder_states.append((first_param.device, first_param.dtype))
+            except StopIteration:
+                original_text_encoder_states.append((torch.device("cpu"), torch.float32))
 
     # read prompts
     if args.sample_prompts.endswith(".txt"):
@@ -7351,6 +7409,16 @@ def sample_images_common(
     torch.set_rng_state(rng_state)
     if torch.cuda.is_available() and cuda_rng_state is not None:
         torch.cuda.set_rng_state(cuda_rng_state)
+
+    if isinstance(text_encoder, list):
+        for te, (original_device, original_dtype) in zip(text_encoder, original_text_encoder_states):
+            restore_dtype = torch.float32 if original_device.type == "cpu" else original_dtype
+            te.to(original_device, dtype=restore_dtype)
+    elif text_encoder is not None and original_text_encoder_states:
+        original_device, original_dtype = original_text_encoder_states[0]
+        restore_dtype = torch.float32 if original_device.type == "cpu" else original_dtype
+        text_encoder.to(original_device, dtype=restore_dtype)
+
     vae.to(org_vae_device)
 
     clean_memory_on_device(accelerator.device)

@@ -46,6 +46,26 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
+            sdxl_low_vram_optimization: Schema.boolean().default(false).description("低显存优化（≤6GB）。开启后会按低显存预设自动调整缓存、预览和训练目标"),
+        }).description("低显存优化（≤6GB）"),
+        Schema.union([
+            Schema.object({
+                sdxl_low_vram_optimization: Schema.const(true).required(),
+                sdxl_low_vram_resolution_mode: Schema.union(["long_edge", "short_edge"]).default("long_edge").description("分辨率规划模式。推荐 `long_edge`；`short_edge` 细节更强但更吃显存"),
+                sdxl_low_vram_bucket_reso_steps: Schema.number().default(32).description("低显存模式 bucket 步长。推荐 32，可改为 64"),
+                sdxl_low_vram_two_phase_cache: Schema.boolean().default(true).description("启用两阶段缓存流程。会优先把缓存阶段与正式训练阶段解耦"),
+                sdxl_low_vram_component_cpu_residency: Schema.boolean().default(true).description("启用非训练组件 CPU 驻留。VAE / 文本编码器会尽量只在需要时临时上 GPU"),
+                sdxl_low_vram_fixed_block_swap: Schema.boolean().default(true).description("启用固定档 U-Net block swap。会把 SDXL U-Net 的 input/middle/output blocks 分段搬运到 GPU 执行，以换取更低显存占用"),
+                sdxl_low_vram_preview_policy: Schema.union(["every_2_epochs", "every_4_epochs", "disable"]).default("every_4_epochs").description("低显存模式预览策略。默认每 4 个 epoch 生成一次，也可改成每 2 个 epoch 或完全关闭"),
+                sdxl_low_vram_auto_protection: Schema.boolean().default(true).description("启用 OOM 自动保护。预览 OOM 时会先降频，再自动关闭预览；训练阶段会给出更明确的低显存建议"),
+                sdxl_low_vram_auto_resolution_probe: Schema.boolean().default(true).description("启动前自动分辨率探测。会先用 3 步预跑检查专用显存与共享显存占用，必要时按 64 为单位自动下调目标边长"),
+            }),
+            Schema.object({}),
+        ]),
+    ]),
+
+    Schema.intersect([
+        Schema.object({
             enable_mixed_resolution_training: Schema.boolean().default(false).description("启用阶段分辨率训练（实验性，仅支持 SDXL）。1024 基准使用 512/768/1024；2048 基准使用 1024/1536/2048"),
         }).description("阶段分辨率训练"),
         Schema.union([
@@ -102,7 +122,9 @@ Schema.intersect([
         SHARED_SCHEMAS.NETWORK_OPTION_BASEWEIGHT,
     ]),
 
-    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_SDXL,
+    Schema.intersect([
+        SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_SDXL,
+    ]).description("Lulynx 实验核心"),
     SHARED_SCHEMAS.PREVIEW_IMAGE,
     SHARED_SCHEMAS.LOG_SETTINGS,
     SHARED_SCHEMAS.VALIDATION_SETTINGS,

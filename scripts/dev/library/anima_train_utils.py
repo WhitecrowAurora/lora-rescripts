@@ -135,6 +135,40 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Disable internal VAE caching mechanism to reduce memory usage. Encoding / decoding will also be faster, but this differs from official behavior."
         + " / VAEのメモリ使用量を減らすために内部のキャッシュ機構を無効にします。エンコード/デコードも速くなりますが、公式の動作とは異なります。",
     )
+    parser.add_argument(
+        "--anima_component_cpu_offload",
+        action="store_true",
+        help="Keep frozen Anima helper components on CPU between training subphases when latents or text outputs are not cached. This can reduce VRAM, but it will slow training noticeably."
+        + " / latents や text encoder outputs をキャッシュしていない場合、凍結済みの補助コンポーネント（Qwen3 / VAE）を学習の合間に CPU へ退避させます。VRAM は減りますが、学習速度はかなり低下します。",
+    )
+
+
+def should_use_anima_component_cpu_offload(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "anima_component_cpu_offload", False))
+
+
+def move_anima_module(
+    module: Optional[torch.nn.Module],
+    device: Optional[torch.device | str],
+    *,
+    dtype: Optional[torch.dtype] = None,
+    non_blocking: bool = False,
+):
+    if module is None or device is None:
+        return module
+
+    target_device = torch.device(device)
+    try:
+        if dtype is None:
+            module.to(target_device, non_blocking=non_blocking)
+        else:
+            module.to(target_device, dtype=dtype, non_blocking=non_blocking)
+    except TypeError:
+        if dtype is None:
+            module.to(target_device)
+        else:
+            module.to(target_device, dtype=dtype)
+    return module
 
 
 # Loss weighting

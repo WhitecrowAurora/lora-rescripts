@@ -648,11 +648,154 @@ def apply_stable_tlora_ui_overrides(config: dict) -> None:
     assign_network_args(config, network_args)
 
 
+def _parse_resolution_pair(value) -> Optional[Tuple[int, int]]:
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    normalized = text.lower().replace("x", ",")
+    parts = [part.strip() for part in normalized.split(",") if part.strip()]
+    if len(parts) < 2:
+        return None
+
+    try:
+        return int(float(parts[0])), int(float(parts[1]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_sdxl_low_vram_resolution_mode(value) -> str:
+    normalized = str(value or "").strip().lower()
+    if "short" in normalized or "短" in normalized:
+        return "short_edge"
+    return "long_edge"
+
+
+def _normalize_sdxl_low_vram_preview_policy(value) -> str:
+    normalized = str(value or "").strip().lower()
+    if "disable" in normalized or "off" in normalized or "关闭" in normalized:
+        return "disable"
+    if "2" in normalized:
+        return "every_2_epochs"
+    return "every_4_epochs"
+
+
+def apply_sdxl_low_vram_ui_overrides(config: dict) -> list[str]:
+    model_train_type = str(config.get("model_train_type", "") or "").strip().lower()
+    if model_train_type != "sdxl-lora":
+        return []
+
+    if not parse_boolish(config.get("sdxl_low_vram_optimization")):
+        return []
+
+    warnings: list[str] = []
+
+    resolution_mode = _normalize_sdxl_low_vram_resolution_mode(config.get("sdxl_low_vram_resolution_mode"))
+    preview_policy = _normalize_sdxl_low_vram_preview_policy(config.get("sdxl_low_vram_preview_policy"))
+    two_phase_cache = parse_boolish(config.get("sdxl_low_vram_two_phase_cache", True))
+    component_cpu_residency = parse_boolish(config.get("sdxl_low_vram_component_cpu_residency", True))
+    fixed_block_swap = parse_boolish(config.get("sdxl_low_vram_fixed_block_swap", True))
+    auto_protection = parse_boolish(config.get("sdxl_low_vram_auto_protection", True))
+    auto_resolution_probe = parse_boolish(config.get("sdxl_low_vram_auto_resolution_probe", True))
+
+    try:
+        bucket_steps = int(config.get("sdxl_low_vram_bucket_reso_steps", 32) or 32)
+    except (TypeError, ValueError):
+        bucket_steps = 32
+    if bucket_steps not in {32, 64}:
+        bucket_steps = 32
+
+    resolution_pair = _parse_resolution_pair(config.get("resolution"))
+    if resolution_pair is None:
+        resolution_pair = (1024, 1024)
+    width, height = resolution_pair
+    target_edge = max(width, height) if resolution_mode == "long_edge" else min(width, height)
+    target_edge = max(64, int(target_edge))
+
+    config["enable_bucket"] = True
+    config["bucket_no_upscale"] = True
+    config["bucket_reso_steps"] = bucket_steps
+    config["gradient_checkpointing"] = True
+    config["cache_latents"] = True
+    config["cache_text_encoder_outputs"] = True
+    config["network_train_unet_only"] = True
+    config["network_train_text_encoder_only"] = False
+    config["sample_at_first"] = False
+    config["sdxl_bucket_resolution_mode"] = resolution_mode
+    config["sdxl_bucket_target_edge"] = target_edge
+    config["sdxl_component_cpu_residency"] = component_cpu_residency
+    config["sdxl_fixed_block_swap"] = fixed_block_swap
+    config["sdxl_low_vram_two_phase_cache"] = two_phase_cache
+    config["sdxl_low_vram_auto_protection"] = auto_protection
+    config["sdxl_low_vram_auto_resolution_probe"] = auto_resolution_probe
+    config["sdxl_low_vram_probe_dedicated_limit_ratio"] = 0.95
+    config["_runtime_safe_preview_enabled"] = preview_policy != "disable"
+    config["_runtime_preview_backend"] = "sdpa-safe"
+    config["_runtime_safe_preview_max_width"] = 768
+    config["_runtime_safe_preview_max_height"] = 768
+    config["_runtime_safe_preview_max_steps"] = 12
+    config["_runtime_safe_preview_cfg_cap"] = 5.5
+
+    if parse_boolish(config.get("shuffle_caption")):
+        config["shuffle_caption"] = False
+        warnings.append("低显存优化已自动关闭 shuffle_caption，以兼容 SDXL 文本编码器输出缓存。")
+
+    for numeric_key in (
+        "caption_dropout_rate",
+        "caption_dropout_every_n_epochs",
+        "caption_tag_dropout_rate",
+        "token_warmup_step",
+    ):
+        raw_value = config.get(numeric_key)
+        if raw_value in (None, "", 0, 0.0):
+            continue
+        config[numeric_key] = 0
+        warnings.append(f"低显存优化已自动将 `{numeric_key}` 设为 0，以保证文本编码器缓存稳定可复用。")
+
+    for bool_key in ("random_crop", "color_aug"):
+        if parse_boolish(config.get(bool_key)):
+            config[bool_key] = False
+            warnings.append(f"低显存优化已自动关闭 `{bool_key}`，以兼容 latent 缓存。")
+
+    config.pop("sample_every_n_steps", None)
+    if preview_policy == "disable":
+        config["enable_preview"] = False
+        config["sample_every_n_epochs"] = 0
+        config["_runtime_safe_preview_enabled"] = False
+    else:
+        config["enable_preview"] = True
+        config["sample_every_n_epochs"] = 2 if preview_policy == "every_2_epochs" else 4
+
+    warnings.append(
+        "已启用 SDXL 低显存优化（≤6GB）：强制开启 gradient_checkpointing、cache_latents、cache_text_encoder_outputs，"
+        f"并切换为 `{'long_edge' if resolution_mode == 'long_edge' else 'short_edge'}` 边长规划、bucket_step={bucket_steps}。"
+    )
+    if fixed_block_swap:
+        warnings.append("低显存优化已启用固定档 U-Net block swap：训练和预览会按 input/middle/output blocks 分段搬运 U-Net，以换取更低显存占用。")
+    if auto_resolution_probe:
+        warnings.append("低显存优化已启用启动前自动分辨率探测：会先做 3 步预跑；若检测到共享显存或专用显存峰值超过 95%，会按 64 为单位自动下调目标边长。")
+    if preview_policy != "disable":
+        warnings.append("低显存优化已对预览启用前置硬钳制：单张预览最长边会在生成前被压到不高于 768，步数不高于 12。")
+
+    return warnings
+
+
 def apply_training_ui_overrides(config: dict) -> list[str]:
+    warnings = apply_sdxl_low_vram_ui_overrides(config)
     apply_anima_ui_overrides(config)
     apply_flux_tlora_ui_overrides(config)
     apply_stable_tlora_ui_overrides(config)
-    return normalize_conflicting_network_target_flags(config)
+    warnings.extend(normalize_conflicting_network_target_flags(config))
+    return warnings
 
 
 def build_sdxl_clip_skip_warning(config: dict) -> Optional[str]:

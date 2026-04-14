@@ -83,6 +83,62 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
+def _move_cpu_offload_tree_to_device(value: Any, device: torch.device):
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, tuple):
+        return tuple(_move_cpu_offload_tree_to_device(item, device) for item in value)
+    if isinstance(value, list):
+        return [_move_cpu_offload_tree_to_device(item, device) for item in value]
+    if isinstance(value, dict):
+        return {key: _move_cpu_offload_tree_to_device(item, device) for key, item in value.items()}
+    return value
+
+
+def _move_cpu_offload_tree_to_cpu(value: Any):
+    if isinstance(value, torch.Tensor):
+        return value.to("cpu")
+    if isinstance(value, tuple):
+        return tuple(_move_cpu_offload_tree_to_cpu(item) for item in value)
+    if isinstance(value, list):
+        return [_move_cpu_offload_tree_to_cpu(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _move_cpu_offload_tree_to_cpu(item) for key, item in value.items()}
+    return value
+
+
+def _find_first_parameter(module: nn.Module) -> Optional[torch.nn.Parameter]:
+    try:
+        return next(module.parameters())
+    except StopIteration:
+        return None
+
+
+def _get_module_runtime_device(module: nn.Module) -> torch.device:
+    parameter = _find_first_parameter(module)
+    if parameter is not None:
+        return parameter.device
+    return torch.device("cpu")
+
+
+def _find_first_grad_tensor(value: Any) -> Optional[torch.Tensor]:
+    if isinstance(value, torch.Tensor):
+        return value if value.requires_grad else None
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            found = _find_first_grad_tensor(item)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, dict):
+        for item in value.values():
+            found = _find_first_grad_tensor(item)
+            if found is not None:
+                return found
+        return None
+    return None
+
+
 def _get_sageattention_runtime_name(tensor: torch.Tensor) -> str:
     device_type = tensor.device.type
     active_runtime = infer_attention_runtime_mode()
@@ -969,6 +1025,7 @@ class BasicTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         self.norm3 = nn.LayerNorm(dim)
+        self.cpu_offload_checkpointing = False
 
     def set_use_memory_efficient_attention(self, xformers: bool, mem_eff: bool):
         self.attn1.set_use_memory_efficient_attention(xformers, mem_eff)
@@ -1010,7 +1067,13 @@ class BasicTransformerBlock(nn.Module):
 
             def create_custom_forward(func):
                 def custom_forward(*inputs):
-                    return func(*inputs)
+                    if not self.cpu_offload_checkpointing:
+                        return func(*inputs)
+
+                    target_device = self.norm1.weight.device
+                    device_inputs = _move_cpu_offload_tree_to_device(inputs, target_device)
+                    outputs = func(*device_inputs)
+                    return _move_cpu_offload_tree_to_cpu(outputs)
 
                 return custom_forward
 
@@ -1069,6 +1132,7 @@ class Transformer2DModel(nn.Module):
             self.proj_out = nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
 
         self.gradient_checkpointing = False
+        self.cpu_offload_checkpointing = False
 
     def set_use_memory_efficient_attention(self, xformers, mem_eff):
         for transformer in self.transformer_blocks:
@@ -1090,7 +1154,7 @@ class Transformer2DModel(nn.Module):
         for transformer in self.transformer_blocks:
             transformer.set_use_cross_attn_fused_kv(enabled)
 
-    def forward(self, hidden_states, encoder_hidden_states=None, timestep=None):
+    def forward_body(self, hidden_states, encoder_hidden_states=None, timestep=None, use_inner_checkpointing: bool = True):
         # 1. Input
         batch, _, height, weight = hidden_states.shape
         residual = hidden_states
@@ -1107,7 +1171,15 @@ class Transformer2DModel(nn.Module):
 
         # 2. Blocks
         for block in self.transformer_blocks:
-            hidden_states = block(hidden_states, context=encoder_hidden_states, timestep=timestep)
+            if use_inner_checkpointing:
+                hidden_states = block(hidden_states, context=encoder_hidden_states, timestep=timestep)
+            else:
+                hidden_states = block.forward_body(hidden_states, context=encoder_hidden_states, timestep=timestep)
+
+        if self.training and self.cpu_offload_checkpointing and isinstance(hidden_states, torch.Tensor):
+            target_device = residual.device
+            if hidden_states.device != target_device:
+                hidden_states = hidden_states.to(target_device)
 
         # 3. Output
         if not self.use_linear_projection:
@@ -1121,6 +1193,9 @@ class Transformer2DModel(nn.Module):
 
         return output
 
+    def forward(self, hidden_states, encoder_hidden_states=None, timestep=None):
+        return self.forward_body(hidden_states, encoder_hidden_states=encoder_hidden_states, timestep=timestep)
+
 
 class Upsample2D(nn.Module):
     def __init__(self, channels, out_channels):
@@ -1130,6 +1205,7 @@ class Upsample2D(nn.Module):
         self.conv = nn.Conv2d(self.channels, self.out_channels, 3, padding=1)
 
         self.gradient_checkpointing = False
+        self.cpu_offload_checkpointing = False
 
     def forward_body(self, hidden_states, output_size=None):
         assert hidden_states.shape[1] == self.channels
@@ -1194,6 +1270,9 @@ class SdxlUNet2DConditionModel(nn.Module):
         self.adm_in_channels = ADM_IN_CHANNELS
 
         self.gradient_checkpointing = False
+        self.cpu_offload_checkpointing = False
+        self.fixed_block_swap_enabled = False
+        self.fixed_block_swap_device: Optional[torch.device] = None
         # self.sample_size = sample_size
 
         # time embedding
@@ -1390,7 +1469,83 @@ class SdxlUNet2DConditionModel(nn.Module):
     @property
     def device(self) -> torch.device:
         # `torch.device`: The device on which the module is (assuming that all the module parameters are on the same device).
+        if self.fixed_block_swap_enabled and self.fixed_block_swap_device is not None:
+            return self.fixed_block_swap_device
         return get_parameter_device(self)
+
+    def _iter_fixed_block_swap_modules(self):
+        for module in self.input_blocks:
+            yield module
+        yield self.middle_block
+        for module in self.output_blocks:
+            yield module
+
+    def _move_fixed_block_swap_module(self, module: nn.Module, device: torch.device) -> None:
+        current_device = _get_module_runtime_device(module)
+        if current_device == device:
+            return
+        module.to(device)
+
+    def _run_module_layers(self, module, h, emb, context, use_layer_checkpointing: bool = True):
+        x = h
+        for layer in module:
+            if isinstance(layer, ResnetBlock2D):
+                x = layer(x, emb) if use_layer_checkpointing else layer.forward_body(x, emb)
+            elif isinstance(layer, Transformer2DModel):
+                x = (
+                    layer(x, context)
+                    if use_layer_checkpointing
+                    else layer.forward_body(x, encoder_hidden_states=context, timestep=None, use_inner_checkpointing=False)
+                )
+            elif isinstance(layer, Upsample2D):
+                x = layer(x) if use_layer_checkpointing else layer.forward_body(x)
+            elif isinstance(layer, Downsample2D):
+                x = layer(x) if use_layer_checkpointing else layer.forward_body(x)
+            else:
+                x = layer(x)
+        return x
+
+    def _run_fixed_block_swap_module(self, module, h, emb, context):
+        def block_forward(local_h, local_emb, local_context):
+            target_device = local_h.device
+            self._move_fixed_block_swap_module(module, target_device)
+            output = self._run_module_layers(module, local_h, local_emb, local_context, use_layer_checkpointing=False)
+
+            if torch.is_grad_enabled() and self.training:
+                hook_tensor = _find_first_grad_tensor(local_h)
+                if hook_tensor is not None:
+                    def offload_after_backward(grad):
+                        self._move_fixed_block_swap_module(module, torch.device("cpu"))
+                        return grad
+
+                    hook_tensor.register_hook(offload_after_backward)
+                    return output
+
+            self._move_fixed_block_swap_module(module, torch.device("cpu"))
+            return output
+
+        if self.training:
+            return torch.utils.checkpoint.checkpoint(block_forward, h, emb, context, use_reentrant=USE_REENTRANT)
+        return block_forward(h, emb, context)
+
+    def _call_unet_block(self, module, h, emb, context):
+        if self.fixed_block_swap_enabled:
+            return self._run_fixed_block_swap_module(module, h, emb, context)
+        return self._run_module_layers(module, h, emb, context, use_layer_checkpointing=True)
+
+    def enable_fixed_block_swap(self, device: Optional[torch.device] = None):
+        target_device = torch.device(device) if device is not None else get_parameter_device(self)
+        self.fixed_block_swap_enabled = True
+        self.fixed_block_swap_device = target_device
+        for module in self._iter_fixed_block_swap_modules():
+            self._move_fixed_block_swap_module(module, torch.device("cpu"))
+
+    def disable_fixed_block_swap(self):
+        target_device = self.fixed_block_swap_device if self.fixed_block_swap_device is not None else get_parameter_device(self)
+        for module in self._iter_fixed_block_swap_modules():
+            self._move_fixed_block_swap_module(module, target_device)
+        self.fixed_block_swap_enabled = False
+        self.fixed_block_swap_device = None
 
     def set_attention_slice(self, slice_size):
         raise NotImplementedError("Attention slicing is not supported for this model.")
@@ -1398,13 +1553,15 @@ class SdxlUNet2DConditionModel(nn.Module):
     def is_gradient_checkpointing(self) -> bool:
         return any(hasattr(m, "gradient_checkpointing") and m.gradient_checkpointing for m in self.modules())
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, cpu_offload: bool = False):
         self.gradient_checkpointing = True
-        self.set_gradient_checkpointing(value=True)
+        self.cpu_offload_checkpointing = cpu_offload
+        self.set_gradient_checkpointing(value=True, cpu_offload=cpu_offload)
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
-        self.set_gradient_checkpointing(value=False)
+        self.cpu_offload_checkpointing = False
+        self.set_gradient_checkpointing(value=False, cpu_offload=False)
 
     def set_use_memory_efficient_attention(self, xformers: bool, mem_eff: bool) -> None:
         blocks = self.input_blocks + [self.middle_block] + self.output_blocks
@@ -1442,13 +1599,15 @@ class SdxlUNet2DConditionModel(nn.Module):
                 if hasattr(module, "set_use_cross_attn_fused_kv"):
                     module.set_use_cross_attn_fused_kv(enabled)
 
-    def set_gradient_checkpointing(self, value=False):
+    def set_gradient_checkpointing(self, value=False, cpu_offload: bool = False):
         blocks = self.input_blocks + [self.middle_block] + self.output_blocks
         for block in blocks:
             for module in block.modules():
                 if hasattr(module, "gradient_checkpointing"):
                     # logger.info(f{module.__class__.__name__} {module.gradient_checkpointing} -> {value}")
                     module.gradient_checkpointing = value
+                if hasattr(module, "cpu_offload_checkpointing"):
+                    module.cpu_offload_checkpointing = bool(value and cpu_offload)
 
     # endregion
 
@@ -1466,33 +1625,21 @@ class SdxlUNet2DConditionModel(nn.Module):
         # assert x.dtype == self.dtype
         emb = emb + self.label_emb(y)
 
-        def call_module(module, h, emb, context):
-            x = h
-            for layer in module:
-                # logger.info(layer.__class__.__name__, x.dtype, emb.dtype, context.dtype if context is not None else None)
-                if isinstance(layer, ResnetBlock2D):
-                    x = layer(x, emb)
-                elif isinstance(layer, Transformer2DModel):
-                    x = layer(x, context)
-                else:
-                    x = layer(x)
-            return x
-
         # h = x.type(self.dtype)
         h = x
 
         for module in self.input_blocks:
-            h = call_module(module, h, emb, context)
+            h = self._call_unet_block(module, h, emb, context)
             hs.append(h)
 
-        h = call_module(self.middle_block, h, emb, context)
+        h = self._call_unet_block(self.middle_block, h, emb, context)
 
         for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
-            h = call_module(module, h, emb, context)
+            h = self._call_unet_block(module, h, emb, context)
 
         h = h.type(x.dtype)
-        h = call_module(self.out, h, emb, context)
+        h = self._run_module_layers(self.out, h, emb, context, use_layer_checkpointing=not self.fixed_block_swap_enabled)
 
         return h
 
@@ -1556,18 +1703,6 @@ class InferSdxlUNet2DConditionModel:
         # assert x.dtype == _self.dtype
         emb = emb + _self.label_emb(y)
 
-        def call_module(module, h, emb, context):
-            x = h
-            for layer in module:
-                # print(layer.__class__.__name__, x.dtype, emb.dtype, context.dtype if context is not None else None)
-                if isinstance(layer, ResnetBlock2D):
-                    x = layer(x, emb)
-                elif isinstance(layer, Transformer2DModel):
-                    x = layer(x, context)
-                else:
-                    x = layer(x)
-            return x
-
         # h = x.type(self.dtype)
         h = x
 
@@ -1586,10 +1721,10 @@ class InferSdxlUNet2DConditionModel:
                         h = h.to(torch.float32)
                     h = F.interpolate(h, scale_factor=self.ds_ratio, mode="bicubic", align_corners=False).to(org_dtype)
 
-            h = call_module(module, h, emb, context)
+            h = _self._call_unet_block(module, h, emb, context)
             hs.append(h)
 
-        h = call_module(_self.middle_block, h, emb, context)
+        h = _self._call_unet_block(_self.middle_block, h, emb, context)
         if mid_add is not None:
             h = h + mid_add
 
@@ -1605,7 +1740,7 @@ class InferSdxlUNet2DConditionModel:
                 resi = resi + input_resi_add.pop()
 
             h = torch.cat([h, resi], dim=1)
-            h = call_module(module, h, emb, context)
+            h = _self._call_unet_block(module, h, emb, context)
 
         # Deep Shrink: in case of depth 0
         if self.ds_depth_1 == 0 and h.shape[-2:] != x.shape[-2:]:
@@ -1613,7 +1748,7 @@ class InferSdxlUNet2DConditionModel:
             h = resize_like(h, x)
 
         h = h.type(x.dtype)
-        h = call_module(_self.out, h, emb, context)
+        h = _self._run_module_layers(_self.out, h, emb, context, use_layer_checkpointing=not _self.fixed_block_swap_enabled)
 
         return h
 

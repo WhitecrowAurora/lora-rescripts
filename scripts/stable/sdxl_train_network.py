@@ -8,6 +8,7 @@ from library.device_utils import init_ipex, clean_memory_on_device
 init_ipex()
 
 from library import sdxl_model_util, sdxl_train_util, strategy_base, strategy_sd, strategy_sdxl, train_util
+from library.custom_train_functions import apply_masked_loss
 import train_network
 from library.utils import setup_logging
 
@@ -17,11 +18,103 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def parse_boolish(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "off", "none", "null"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
+
+
+def preview_requested(args) -> bool:
+    if parse_boolish(getattr(args, "enable_preview", False)):
+        return True
+    if parse_boolish(getattr(args, "sample_at_first", False)):
+        return True
+    for key in ("sample_every_n_steps", "sample_every_n_epochs"):
+        raw_value = getattr(args, key, None)
+        try:
+            if raw_value is not None and int(raw_value) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
 class SdxlNetworkTrainer(train_network.NetworkTrainer):
     def __init__(self):
         super().__init__()
         self.vae_scale_factor = sdxl_model_util.VAE_SCALE_FACTOR
         self.is_sdxl = True
+        self._preview_oom_downgrade_count = 0
+
+    def configure_dataset_runtime_policy(self, args):
+        mode = None
+        target_edge = None
+        if parse_boolish(getattr(args, "sdxl_low_vram_optimization", False)):
+            mode = str(getattr(args, "sdxl_bucket_resolution_mode", "") or "").strip().lower()
+            try:
+                target_edge = int(getattr(args, "sdxl_bucket_target_edge", 0) or 0)
+            except (TypeError, ValueError):
+                target_edge = 0
+
+        train_util.configure_bucket_runtime_policy(
+            mode=mode,
+            target_edge=target_edge if target_edge and target_edge > 0 else None,
+        )
+
+    def is_text_encoder_not_needed_for_training(self, args):
+        return bool(args.cache_text_encoder_outputs) and bool(args.network_train_unet_only) and not preview_requested(args)
+
+    def should_use_component_cpu_residency(self, args) -> bool:
+        return parse_boolish(getattr(args, "sdxl_component_cpu_residency", False))
+
+    def should_use_fixed_block_swap(self, args) -> bool:
+        return parse_boolish(getattr(args, "sdxl_fixed_block_swap", False))
+
+    def configure_model_runtime(self, args, accelerator, network, text_encoders, unet):
+        if not self.should_use_fixed_block_swap(args):
+            return
+        if accelerator.num_processes > 1 or parse_boolish(getattr(args, "deepspeed", False)):
+            accelerator.print(
+                "WARNING: SDXL fixed block swap currently supports only single-process non-Deepspeed runs. "
+                "The current run will continue without block swap. "
+                "/ 当前 SDXL 固定档 block swap 仅支持单进程且非 Deepspeed 训练，本次已自动跳过。"
+            )
+            args.sdxl_fixed_block_swap = False
+            return
+
+        target_unet = accelerator.unwrap_model(unet)
+        if not hasattr(target_unet, "enable_fixed_block_swap"):
+            accelerator.print(
+                "WARNING: the current SDXL U-Net route does not expose fixed block swap support. "
+                "The current run will continue without block swap. "
+                "/ 当前 SDXL U-Net 路由不支持固定档 block swap，本次已自动跳过。"
+            )
+            args.sdxl_fixed_block_swap = False
+            return
+
+        target_unet.enable_fixed_block_swap(accelerator.device)
+        clean_memory_on_device(accelerator.device)
+        accelerator.print(
+            "SDXL fixed block swap enabled. U-Net input/middle/output blocks will be staged onto GPU per block. "
+            "/ 已启用 SDXL 固定档 block swap，U-Net 的 input/middle/output blocks 将按块分段搬运到 GPU。"
+        )
+
+    def on_step_start(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train: bool = True):
+        if not is_train or not self.should_use_fixed_block_swap(args):
+            return
+        target_unet = accelerator.unwrap_model(unet)
+        if hasattr(target_unet, "enable_fixed_block_swap"):
+            target_unet.enable_fixed_block_swap(accelerator.device)
 
     def assert_extra_args(
         self,
@@ -129,9 +222,152 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
                 vae.to(org_vae_device)
                 unet.to(org_unet_device)
         else:
-            # Text Encoderから毎回出力を取得するので、GPUに乗せておく
-            text_encoders[0].to(accelerator.device, dtype=weight_dtype)
-            text_encoders[1].to(accelerator.device, dtype=weight_dtype)
+            if self.should_use_component_cpu_residency(args) and not self.is_train_text_encoder(args):
+                text_encoders[0].to("cpu", dtype=torch.float32)
+                text_encoders[1].to("cpu", dtype=torch.float32)
+            else:
+                # Text Encoderから毎回出力を取得するので、GPUに乗せておく
+                text_encoders[0].to(accelerator.device, dtype=weight_dtype)
+                text_encoders[1].to(accelerator.device, dtype=weight_dtype)
+
+    def process_batch(
+        self,
+        batch,
+        text_encoders,
+        unet,
+        network,
+        vae,
+        noise_scheduler,
+        vae_dtype,
+        weight_dtype,
+        accelerator,
+        args,
+        text_encoding_strategy,
+        tokenize_strategy,
+        is_train=True,
+        train_text_encoder=True,
+        train_unet=True,
+        return_per_sample_loss: bool = False,
+    ):
+        component_cpu_residency = self.should_use_component_cpu_residency(args)
+        use_cached_latents = "latents" in batch and batch["latents"] is not None
+
+        try:
+            with torch.no_grad():
+                if use_cached_latents:
+                    latents = batch["latents"].to(accelerator.device)
+                else:
+                    if component_cpu_residency and vae.device.type == "cpu":
+                        vae.to(accelerator.device, dtype=vae_dtype)
+
+                    if args.vae_batch_size is None or len(batch["images"]) <= args.vae_batch_size:
+                        latents = self.encode_images_to_latents(args, vae, batch["images"].to(accelerator.device, dtype=vae_dtype))
+                    else:
+                        chunks = [
+                            batch["images"][i : i + args.vae_batch_size] for i in range(0, len(batch["images"]), args.vae_batch_size)
+                        ]
+                        list_latents = []
+                        for chunk in chunks:
+                            with torch.no_grad():
+                                chunk = self.encode_images_to_latents(args, vae, chunk.to(accelerator.device, dtype=vae_dtype))
+                                list_latents.append(chunk)
+                        latents = torch.cat(list_latents, dim=0)
+
+                    if torch.any(torch.isnan(latents)):
+                        accelerator.print("NaN found in latents, replacing with zeros")
+                        latents = torch.nan_to_num(latents, 0, out=latents)
+
+                    if component_cpu_residency and vae.device.type != "cpu":
+                        vae.to("cpu")
+                        clean_memory_on_device(accelerator.device)
+
+                latents = self.shift_scale_latents(args, latents)
+
+            text_encoder_conds = []
+            text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
+            if text_encoder_outputs_list is not None:
+                text_encoder_conds = text_encoder_outputs_list
+
+            needs_text_encoding = len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder
+            moved_text_encoders_for_step = False
+            if needs_text_encoding and component_cpu_residency and not train_text_encoder:
+                if any(t_enc.device.type == "cpu" for t_enc in text_encoders):
+                    moved_text_encoders_for_step = True
+                    for t_enc in text_encoders:
+                        t_enc.to(accelerator.device, dtype=weight_dtype)
+
+            if needs_text_encoding:
+                with torch.set_grad_enabled(is_train and train_text_encoder), accelerator.autocast():
+                    if args.weighted_captions:
+                        input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
+                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens_with_weights(
+                            tokenize_strategy,
+                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                            input_ids_list,
+                            weights_list,
+                        )
+                    else:
+                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
+                            tokenize_strategy,
+                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                            input_ids,
+                        )
+                    if args.full_fp16:
+                        encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+
+                if len(text_encoder_conds) == 0:
+                    text_encoder_conds = encoded_text_encoder_conds
+                else:
+                    for i in range(len(encoded_text_encoder_conds)):
+                        if encoded_text_encoder_conds[i] is not None:
+                            text_encoder_conds[i] = encoded_text_encoder_conds[i]
+
+            if moved_text_encoders_for_step:
+                for t_enc in text_encoders:
+                    t_enc.to("cpu", dtype=torch.float32)
+                clean_memory_on_device(accelerator.device)
+
+            noise_pred, target, timesteps, weighting = self.get_noise_pred_and_target(
+                args,
+                accelerator,
+                noise_scheduler,
+                latents,
+                batch,
+                text_encoder_conds,
+                unet,
+                network,
+                weight_dtype,
+                train_unet,
+                is_train=is_train,
+            )
+
+            huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+            loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+            if weighting is not None:
+                loss = loss * weighting
+            if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                loss = apply_masked_loss(loss, batch)
+            loss = loss.mean(dim=list(range(1, loss.ndim)))
+
+            loss_weights = batch["loss_weights"]
+            loss = loss * loss_weights
+
+            loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+            mean_loss = loss.mean()
+            if return_per_sample_loss:
+                return mean_loss, loss
+            return mean_loss
+        except torch.OutOfMemoryError as exc:
+            clean_memory_on_device(accelerator.device)
+            if parse_boolish(getattr(args, "sdxl_low_vram_auto_protection", False)):
+                raise RuntimeError(
+                    "SDXL 训练步骤发生显存不足。当前自动保护已完成可热切换的低显存保护，但训练阶段 OOM 仍无法安全在线恢复。"
+                    "建议优先改为 long_edge、降低 batch_size、减小 rank，或直接关闭预览后重启训练。"
+                    " / SDXL training step ran out of memory. Auto protection already applied the safe hot-switch protections, "
+                    "but a training-step OOM still requires structural changes such as long_edge mode, smaller batch size, or lower rank."
+                ) from exc
+            raise
 
     def get_text_cond(self, args, accelerator, batch, tokenizers, text_encoders, weight_dtype):
         if "text_encoder_outputs1_list" not in batch or batch["text_encoder_outputs1_list"] is None:
@@ -222,7 +458,35 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         return noise_pred
 
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
-        sdxl_train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet)
+        try:
+            sdxl_train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet)
+        except torch.OutOfMemoryError:
+            if not parse_boolish(getattr(args, "sdxl_low_vram_auto_protection", False)):
+                raise
+
+            self._preview_oom_downgrade_count += 1
+            clean_memory_on_device(device)
+
+            if self._preview_oom_downgrade_count == 1:
+                args.sample_at_first = False
+                if getattr(args, "sample_every_n_epochs", None) is None or int(getattr(args, "sample_every_n_epochs", 0) or 0) < 4:
+                    args.enable_preview = True
+                    args.sample_every_n_steps = None
+                    args.sample_every_n_epochs = 4
+                    accelerator.print(
+                        "WARNING: SDXL low-VRAM preview OOM detected. Auto protection reduced preview frequency to every 4 epochs. "
+                        "/ 检测到 SDXL 预览 OOM，已自动把预览频率降为每 4 个 epoch 一次。"
+                    )
+                    return
+
+            args.enable_preview = False
+            args.sample_at_first = False
+            args.sample_every_n_steps = None
+            args.sample_every_n_epochs = None
+            accelerator.print(
+                "WARNING: SDXL low-VRAM preview OOM detected again. Preview has been disabled for the rest of this run. "
+                "/ 再次检测到 SDXL 预览 OOM，本次训练剩余阶段已自动关闭预览。"
+            )
 
 
 def setup_parser() -> argparse.ArgumentParser:

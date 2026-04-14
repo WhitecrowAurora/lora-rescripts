@@ -562,6 +562,12 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         + " / VAEのメモリ使用量を減らすために内部のキャッシュ機構を無効にします。エンコード/デコードも速くなりますが、公式の動作とは異なります。",
     )
     parser.add_argument(
+        "--anima_component_cpu_offload",
+        action="store_true",
+        help="Keep frozen Anima helper components on CPU between training subphases when latents or text outputs are not cached. This can reduce VRAM, but it will slow training noticeably."
+        + " / latents や text encoder outputs をキャッシュしていない場合、凍結済みの補助コンポーネント（Qwen3 / VAE）を学習の合間に CPU へ退避させます。VRAM は減りますが、学習速度はかなり低下します。",
+    )
+    parser.add_argument(
         "--sample_scheduler",
         type=str,
         default="simple",
@@ -686,6 +692,7 @@ def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "A
     cache_text_encoder_outputs = bool(getattr(args, "cache_text_encoder_outputs", False))
     cache_latents = bool(getattr(args, "cache_latents", False))
     enable_preview = bool(getattr(args, "enable_preview", False))
+    component_cpu_offload = bool(getattr(args, "anima_component_cpu_offload", False))
     profile_window = int(getattr(args, "anima_profile_window", 0) or 0)
     nan_check_interval = resolve_anima_nan_check_interval(args)
 
@@ -695,6 +702,7 @@ def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "A
         f"split_attn={split_attn} | "
         f"cache_text_encoder_outputs={cache_text_encoder_outputs} | "
         f"cache_latents={cache_latents} | "
+        f"anima_component_cpu_offload={component_cpu_offload} | "
         f"enable_preview={enable_preview} | "
         f"anima_profile_window={profile_window} | "
         f"anima_nan_check_interval={nan_check_interval}"
@@ -705,6 +713,7 @@ def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "A
         f"split_attn={split_attn}，"
         f"cache_text_encoder_outputs={cache_text_encoder_outputs}，"
         f"cache_latents={cache_latents}，"
+        f"anima_component_cpu_offload={component_cpu_offload}，"
         f"enable_preview={enable_preview}，"
         f"anima_profile_window={profile_window}，"
         f"anima_nan_check_interval={nan_check_interval}"
@@ -742,6 +751,34 @@ def should_use_anima_pinned_memory(accelerator: Optional[Accelerator]) -> bool:
 
 def should_use_anima_non_blocking(accelerator: Optional[Accelerator]) -> bool:
     return should_use_anima_pinned_memory(accelerator)
+
+
+def should_use_anima_component_cpu_offload(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "anima_component_cpu_offload", False))
+
+
+def move_anima_module(
+    module: Optional[torch.nn.Module],
+    device: Optional[torch.device | str],
+    *,
+    dtype: Optional[torch.dtype] = None,
+    non_blocking: bool = False,
+):
+    if module is None or device is None:
+        return module
+
+    target_device = torch.device(device)
+    try:
+        if dtype is None:
+            module.to(target_device, non_blocking=non_blocking)
+        else:
+            module.to(target_device, dtype=dtype, non_blocking=non_blocking)
+    except TypeError:
+        if dtype is None:
+            module.to(target_device)
+        else:
+            module.to(target_device, dtype=dtype)
+    return module
 
 
 def resolve_anima_dataloader_prefetch_factor(args: argparse.Namespace, n_workers: int) -> Optional[int]:

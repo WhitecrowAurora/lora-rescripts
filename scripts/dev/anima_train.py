@@ -54,6 +54,8 @@ def train(args):
         logger.warning("cache_text_encoder_outputs_to_disk is enabled, so cache_text_encoder_outputs is also enabled")
         args.cache_text_encoder_outputs = True
 
+    component_cpu_offload = anima_train_utils.should_use_anima_component_cpu_offload(args)
+
     if args.cpu_offload_checkpointing and not args.gradient_checkpointing:
         logger.warning("cpu_offload_checkpointing is enabled, so gradient_checkpointing is also enabled")
         args.gradient_checkpointing = True
@@ -342,7 +344,7 @@ def train(args):
     dit.to(dit_weight_dtype)  # convert dit to target weight dtype
 
     # move text encoder to GPU if not cached
-    if not args.cache_text_encoder_outputs and qwen3_text_encoder is not None:
+    if not args.cache_text_encoder_outputs and qwen3_text_encoder is not None and not component_cpu_offload:
         qwen3_text_encoder.to(accelerator.device)
 
     clean_memory_on_device(accelerator.device)
@@ -370,9 +372,17 @@ def train(args):
 
     # Move non-training models back to GPU
     if not args.cache_text_encoder_outputs and qwen3_text_encoder is not None:
-        qwen3_text_encoder.to(accelerator.device)
+        anima_train_utils.move_anima_module(
+            qwen3_text_encoder,
+            "cpu" if component_cpu_offload else accelerator.device,
+            dtype=weight_dtype,
+        )
     if not cache_latents and vae is not None:
-        vae.to(accelerator.device, dtype=weight_dtype)
+        anima_train_utils.move_anima_module(
+            vae,
+            "cpu" if component_cpu_offload else accelerator.device,
+            dtype=weight_dtype,
+        )
 
     if args.full_fp16:
         train_util.patch_accelerator_for_fp16_training(accelerator)
@@ -485,6 +495,7 @@ def train(args):
             current_step.value = global_step
 
             with accelerator.accumulate(*training_models):
+                released_component_vram = False
                 # Get latents
                 if "latents" in batch and batch["latents"] is not None:
                     latents = batch["latents"].to(accelerator.device, dtype=dit_weight_dtype)
@@ -492,9 +503,18 @@ def train(args):
                         latents = latents.squeeze(2)  # (B, C, 1, H, W) -> (B, C, H, W)
                 else:
                     with torch.no_grad():
+                        if component_cpu_offload and vae is not None:
+                            anima_train_utils.move_anima_module(
+                                vae,
+                                accelerator.device,
+                                dtype=weight_dtype,
+                            )
                         # images are already [-1, 1] from IMAGE_TRANSFORMS, add temporal dim
                         images = batch["images"].to(accelerator.device, dtype=weight_dtype)
                         latents = vae.encode_pixels_to_latents(images).to(accelerator.device, dtype=dit_weight_dtype)
+                        if component_cpu_offload and vae is not None:
+                            anima_train_utils.move_anima_module(vae, "cpu", dtype=weight_dtype)
+                            released_component_vram = True
 
                     if torch.any(torch.isnan(latents)):
                         accelerator.print("NaN found in latents, replacing with zeros")
@@ -515,16 +535,28 @@ def train(args):
                 else:
                     # Encode on-the-fly
                     input_ids_list = batch["input_ids_list"]
+                    if component_cpu_offload and qwen3_text_encoder is not None:
+                        anima_train_utils.move_anima_module(
+                            qwen3_text_encoder,
+                            accelerator.device,
+                            dtype=weight_dtype,
+                        )
                     with torch.no_grad():
                         prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = text_encoding_strategy.encode_tokens(
                             tokenize_strategy, [qwen3_text_encoder], input_ids_list
                         )
+                    if component_cpu_offload and qwen3_text_encoder is not None:
+                        anima_train_utils.move_anima_module(qwen3_text_encoder, "cpu", dtype=weight_dtype)
+                        released_component_vram = True
 
                 # Move to device
                 prompt_embeds = prompt_embeds.to(accelerator.device, dtype=dit_weight_dtype)
                 attn_mask = attn_mask.to(accelerator.device)
                 t5_input_ids = t5_input_ids.to(accelerator.device, dtype=torch.long)
                 t5_attn_mask = t5_attn_mask.to(accelerator.device)
+
+                if released_component_vram and accelerator.device.type == "cuda":
+                    clean_memory_on_device(accelerator.device)
 
                 # Noise and timesteps
                 noise = torch.randn_like(latents)

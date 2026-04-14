@@ -405,6 +405,8 @@ class AnimaNetworkTrainer:
         run_nan_check: bool = True,
         return_per_sample_loss: bool = False,
     ):
+        component_cpu_offload = anima_train_utils.should_use_anima_component_cpu_offload(args)
+        released_component_vram = False
         with (profiler.step_section("data/latents") if profiler is not None else nullcontext()):
             with torch.no_grad():
                 if "latents" in batch and batch["latents"] is not None:
@@ -415,6 +417,13 @@ class AnimaNetworkTrainer:
                         non_blocking=use_non_blocking,
                     )
                 else:
+                    if component_cpu_offload and vae is not None:
+                        anima_train_utils.move_anima_module(
+                            vae,
+                            accelerator.device,
+                            dtype=vae_dtype,
+                            non_blocking=use_non_blocking,
+                        )
                     images = anima_train_utils.move_anima_tensor(
                         batch["images"],
                         accelerator.device,
@@ -425,6 +434,9 @@ class AnimaNetworkTrainer:
                     latents = vae.encode_pixels_to_latents(images).to(
                         accelerator.device, dtype=weight_dtype, non_blocking=use_non_blocking
                     )
+                    if component_cpu_offload and vae is not None:
+                        anima_train_utils.move_anima_module(vae, "cpu", dtype=vae_dtype)
+                        released_component_vram = True
                     if run_nan_check and torch.any(torch.isnan(latents)):
                         accelerator.print("NaN found in latents, replacing with zeros")
                         latents = torch.nan_to_num(latents, 0, out=latents)
@@ -446,6 +458,14 @@ class AnimaNetworkTrainer:
                     raise RuntimeError(
                         "Text encoder outputs must be encoded on-the-fly, but no active Anima text encoder model is available."
                     )
+                if component_cpu_offload and not train_text_encoder:
+                    for encoder in text_encoders:
+                        anima_train_utils.move_anima_module(
+                            encoder,
+                            accelerator.device,
+                            dtype=weight_dtype,
+                            non_blocking=use_non_blocking,
+                        )
                 with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
                     input_ids = [
                         anima_train_utils.move_anima_tensor(
@@ -462,6 +482,10 @@ class AnimaNetworkTrainer:
                     )
                     if args.full_fp16:
                         encoded = [tensor.to(weight_dtype) if tensor is not None else None for tensor in encoded]
+                if component_cpu_offload and not train_text_encoder:
+                    for encoder in text_encoders:
+                        anima_train_utils.move_anima_module(encoder, "cpu", dtype=weight_dtype)
+                    released_component_vram = True
 
                 if len(text_encoder_conds) == 0:
                     text_encoder_conds = list(encoded)
@@ -495,6 +519,9 @@ class AnimaNetworkTrainer:
                     non_blocking=use_non_blocking,
                 ),
             ]
+
+        if released_component_vram and accelerator.device.type == "cuda":
+            clean_memory_on_device(accelerator.device)
 
         model_pred, target, timesteps, weighting = self.get_noise_pred_and_target(
             args,
@@ -988,8 +1015,9 @@ class AnimaNetworkTrainer:
             ]
         else:
             if not args.cache_text_encoder_outputs:
+                text_encoder_target_device = "cpu" if anima_train_utils.should_use_anima_component_cpu_offload(args) else accelerator.device
                 for encoder in text_encoders:
-                    encoder.to(accelerator.device, dtype=weight_dtype)
+                    anima_train_utils.move_anima_module(encoder, text_encoder_target_device, dtype=weight_dtype)
 
         qwen3_text_encoder = text_encoders[0]
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -1015,7 +1043,8 @@ class AnimaNetworkTrainer:
         if not cache_latents:
             vae.requires_grad_(False)
             vae.eval()
-            vae.to(accelerator.device, dtype=vae_dtype)
+            vae_target_device = "cpu" if anima_train_utils.should_use_anima_component_cpu_offload(args) else accelerator.device
+            anima_train_utils.move_anima_module(vae, vae_target_device, dtype=vae_dtype)
 
         if args.full_fp16:
             train_util.patch_accelerator_for_fp16_training(accelerator)
@@ -1033,10 +1062,35 @@ class AnimaNetworkTrainer:
                         weights.pop(index)
 
             train_state_file = os.path.join(output_dir, "train_state.json")
+            mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
+            effective_current_epoch = int(current_epoch.value) + mixed_resolution_phase_start_epoch
+            logger.info(
+                f"save train state to {train_state_file} at epoch {effective_current_epoch} step {current_step.value+1}"
+            )
             state_payload = {
-                "current_epoch": int(current_epoch.value),
+                "current_epoch": effective_current_epoch,
                 "current_step": current_step.value + 1,
             }
+            if mixed_resolution_phase_start_epoch > 0:
+                state_payload["mixed_resolution_local_epoch"] = int(current_epoch.value)
+            mixed_resolution_plan_id = str(getattr(args, "mixed_resolution_plan_id", "") or "").strip()
+            if mixed_resolution_plan_id:
+                state_payload["mixed_resolution_plan_id"] = mixed_resolution_plan_id
+            mixed_phase_index = getattr(args, "mixed_resolution_phase_index", None)
+            if mixed_phase_index is not None:
+                state_payload["mixed_resolution_phase_index"] = mixed_phase_index
+            mixed_phase_target_step = getattr(args, "mixed_resolution_phase_target_step", None)
+            if mixed_phase_target_step is not None:
+                state_payload["mixed_resolution_phase_target_step"] = mixed_phase_target_step
+            mixed_phase_target_epoch = getattr(args, "mixed_resolution_phase_target_epoch", None)
+            if mixed_phase_target_epoch is not None:
+                state_payload["mixed_resolution_phase_target_epoch"] = mixed_phase_target_epoch
+            logging_run_dir = str(getattr(args, "logging_run_dir", "") or "").strip()
+            if not logging_run_dir:
+                logging_run_dir = str(getattr(accelerator, "project_dir", "") or "").strip()
+            if logging_run_dir:
+                state_payload["logging_run_dir"] = logging_run_dir
+                state_payload["logging_dir"] = logging_run_dir
             with open(train_state_file, "w", encoding="utf-8") as handle:
                 json.dump(state_payload, handle)
 
@@ -1072,6 +1126,16 @@ class AnimaNetworkTrainer:
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
         if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
             args.save_every_n_epochs = math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
+
+        mixed_resolution_epoch_display_offset = int(getattr(args, "mixed_resolution_epoch_display_offset", 0) or 0)
+        mixed_resolution_phase_target_epoch = int(getattr(args, "mixed_resolution_phase_target_epoch", 0) or 0)
+        mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
+        displayed_num_train_epochs = (
+            mixed_resolution_phase_target_epoch if mixed_resolution_phase_target_epoch > 0 else num_train_epochs
+        )
+
+        def get_effective_epoch_no(epoch_index: int) -> int:
+            return max(1, epoch_index + 1 + mixed_resolution_epoch_display_offset)
 
         metadata, minimum_metadata = self.build_metadata(args, session_id, training_started_at, optimizer_name, optimizer_args)
         if lulynx_core is not None:
@@ -1144,7 +1208,12 @@ class AnimaNetworkTrainer:
         accelerator.print(f"  num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")
         accelerator.print(f"  num reg images / 正則化画像の数: {train_dataset_group.num_reg_images}")
         accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-        accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
+        accelerator.print(f"  num epochs / epoch数: {displayed_num_train_epochs}")
+        if mixed_resolution_phase_target_epoch > 0:
+            accelerator.print(
+                f"  mixed-resolution epoch window / 阶段分辨率连续 epoch 区间: "
+                f"{mixed_resolution_phase_start_epoch + 1} -> {mixed_resolution_phase_target_epoch}"
+            )
         accelerator.print(
             f"  batch size per device / バッチサイズ: {', '.join([str(dataset.batch_size) for dataset in train_dataset_group.datasets])}"
         )
@@ -1186,8 +1255,9 @@ class AnimaNetworkTrainer:
             global_step = progress_start_step
 
         for epoch in range(epoch_to_start, num_train_epochs):
-            accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}\n")
-            current_epoch.value = epoch + 1
+            effective_epoch_no = get_effective_epoch_no(epoch)
+            accelerator.print(f"\nepoch {effective_epoch_no}/{displayed_num_train_epochs}\n")
+            current_epoch.value = max(1, effective_epoch_no - mixed_resolution_phase_start_epoch)
             accelerator.unwrap_model(network).on_epoch_start(text_encoder, dit)
 
             skipped_dataloader = None
@@ -1300,7 +1370,12 @@ class AnimaNetworkTrainer:
                         if accelerator.is_main_process:
                             with anima_step_profiler.step_section("save", wall_only=True):
                                 ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                                save_model(
+                                    ckpt_name,
+                                    accelerator.unwrap_model(network),
+                                    global_step,
+                                    max(0, effective_epoch_no - 1),
+                                )
                                 if args.save_state:
                                     train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
                                 remove_step_no = train_util.get_remove_step_no(args, global_step)
@@ -1327,7 +1402,7 @@ class AnimaNetworkTrainer:
                     safeguard.record_loss(current_loss)
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 logs = {"avr_loss": loss_recorder.moving_average}
-                progress_bar.set_postfix(**logs)
+                progress_bar.set_postfix(**logs, refresh=False)
 
                 if len(accelerator.trackers) > 0:
                     step_logs = {"loss": current_loss}
@@ -1350,23 +1425,26 @@ class AnimaNetworkTrainer:
             accelerator.wait_for_everyone()
             optimizer_eval_fn()
             if args.save_every_n_epochs is not None and args.save_every_n_epochs > 0:
-                saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                saving = (
+                    effective_epoch_no % args.save_every_n_epochs == 0
+                    and effective_epoch_no < displayed_num_train_epochs
+                )
                 if is_main_process and saving:
                     with anima_step_profiler.window_section("save", wall_only=True):
-                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
-                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, effective_epoch_no)
+                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, effective_epoch_no)
+                        remove_epoch_no = train_util.get_remove_epoch_no(args, effective_epoch_no)
                         if remove_epoch_no is not None:
                             remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
                             remove_model(remove_ckpt_name)
                         if args.save_state:
-                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, effective_epoch_no)
 
             with anima_step_profiler.window_section("preview", wall_only=True):
                 self.sample_images(
                     accelerator,
                     args,
-                    epoch + 1,
+                    effective_epoch_no,
                     global_step,
                     vae,
                     qwen3_text_encoder,
@@ -1379,8 +1457,8 @@ class AnimaNetworkTrainer:
             train_util.maybe_run_epoch_cooldown(
                 args,
                 accelerator,
-                epoch + 1,
-                num_train_epochs,
+                effective_epoch_no,
+                displayed_num_train_epochs,
                 context_label="anima network training",
             )
 
@@ -1399,7 +1477,7 @@ class AnimaNetworkTrainer:
             network = accelerator.unwrap_model(network)
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
             with anima_step_profiler.window_section("save", wall_only=True):
-                save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+                save_model(ckpt_name, network, global_step, displayed_num_train_epochs, force_sync_upload=True)
             anima_step_profiler.flush_remaining(global_step)
             logger.info("model saved.")
 

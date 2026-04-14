@@ -19,6 +19,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _call_from_pretrained_low_cpu_mem_usage(factory, *args, **kwargs):
+    try:
+        return factory(*args, low_cpu_mem_usage=True, **kwargs)
+    except TypeError:
+        return factory(*args, **kwargs)
+
+
 # Original Anima high-precision keys. Kept for reference, but not used currently.
 # # Keys that should stay in high precision (float32/bfloat16, not quantized)
 # KEEP_IN_HIGH_PRECISION = ["x_embedder", "t_embedder", "t_embedding_norm", "final_layer"]
@@ -203,7 +210,7 @@ def load_qwen3_text_encoder(
     if os.path.isdir(qwen3_path):
         # Directory with full model
         tokenizer = AutoTokenizer.from_pretrained(qwen3_path, local_files_only=True)
-        model = transformers.AutoModelForCausalLM.from_pretrained(qwen3_path, torch_dtype=dtype, local_files_only=True).model
+        model = _call_from_pretrained_low_cpu_mem_usage(transformers.AutoModelForCausalLM.from_pretrained, qwen3_path, torch_dtype=dtype, local_files_only=True).model
     else:
         # Single safetensors file - use configs/qwen3_06b/ for config
         config_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "qwen3_06b")

@@ -1,5 +1,6 @@
 import math
 import os
+import weakref
 from functools import partial
 from typing import Dict, List, Optional, Union
 
@@ -77,7 +78,7 @@ class TLoRAModule(lora_network.LoRAModule):
             rank_dropout=rank_dropout,
             module_dropout=module_dropout,
         )
-        self.network = None
+        self._tlora_network_ref = None
         self.tlora_min_rank = max(1, min(self.lora_dim, int(tlora_min_rank if tlora_min_rank is not None else 1)))
         self.tlora_rank_schedule = _normalize_schedule(tlora_rank_schedule)
         self.tlora_orthogonal_init = _parse_bool_arg(tlora_orthogonal_init, default=False)
@@ -86,15 +87,21 @@ class TLoRAModule(lora_network.LoRAModule):
             torch.nn.init.orthogonal_(self.lora_down.weight)
 
     def set_network(self, network):
-        self.network = network
+        self._tlora_network_ref = weakref.ref(network) if network is not None else None
+
+    def _get_network(self):
+        if self._tlora_network_ref is None:
+            return None
+        return self._tlora_network_ref()
 
     def _get_current_timesteps(self):
-        if self.network is None:
+        network = self._get_network()
+        if network is None:
             return None
         if not self.lora_name.startswith(lora_network.LoRANetwork.LORA_PREFIX_UNET):
             return None
 
-        timesteps = getattr(self.network, "current_timestep", None)
+        timesteps = getattr(network, "current_timestep", None)
         if timesteps is None or not torch.is_tensor(timesteps) or timesteps.numel() == 0:
             return None
         return timesteps

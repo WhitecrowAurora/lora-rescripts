@@ -46,6 +46,30 @@ TIME_EMBED_DIM = 320 * 4
 
 USE_REENTRANT = True
 
+
+def _move_cpu_offload_tree_to_device(value, device: torch.device):
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, tuple):
+        return tuple(_move_cpu_offload_tree_to_device(item, device) for item in value)
+    if isinstance(value, list):
+        return [_move_cpu_offload_tree_to_device(item, device) for item in value]
+    if isinstance(value, dict):
+        return {key: _move_cpu_offload_tree_to_device(item, device) for key, item in value.items()}
+    return value
+
+
+def _move_cpu_offload_tree_to_cpu(value):
+    if isinstance(value, torch.Tensor):
+        return value.to("cpu")
+    if isinstance(value, tuple):
+        return tuple(_move_cpu_offload_tree_to_cpu(item) for item in value)
+    if isinstance(value, list):
+        return [_move_cpu_offload_tree_to_cpu(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _move_cpu_offload_tree_to_cpu(item) for key, item in value.items()}
+    return value
+
 # region memory efficient attention
 
 # FlashAttentionを使うCrossAttention
@@ -607,6 +631,7 @@ class BasicTransformerBlock(nn.Module):
         super().__init__()
 
         self.gradient_checkpointing = False
+        self.cpu_offload_checkpointing = False
 
         # 1. Self-Attn
         self.attn1 = CrossAttention(
@@ -662,7 +687,13 @@ class BasicTransformerBlock(nn.Module):
 
             def create_custom_forward(func):
                 def custom_forward(*inputs):
-                    return func(*inputs)
+                    if not self.cpu_offload_checkpointing:
+                        return func(*inputs)
+
+                    target_device = self.norm1.weight.device
+                    device_inputs = _move_cpu_offload_tree_to_device(inputs, target_device)
+                    outputs = func(*device_inputs)
+                    return _move_cpu_offload_tree_to_cpu(outputs)
 
                 return custom_forward
 
@@ -749,6 +780,11 @@ class Transformer2DModel(nn.Module):
         for block in self.transformer_blocks:
             hidden_states = block(hidden_states, context=encoder_hidden_states, timestep=timestep)
 
+        if self.training and self.cpu_offload_checkpointing and isinstance(hidden_states, torch.Tensor):
+            target_device = residual.device
+            if hidden_states.device != target_device:
+                hidden_states = hidden_states.to(target_device)
+
         # 3. Output
         if not self.use_linear_projection:
             hidden_states = hidden_states.reshape(batch, height, weight, inner_dim).permute(0, 3, 1, 2).contiguous()
@@ -834,6 +870,7 @@ class SdxlUNet2DConditionModel(nn.Module):
         self.adm_in_channels = ADM_IN_CHANNELS
 
         self.gradient_checkpointing = False
+        self.cpu_offload_checkpointing = False
         # self.sample_size = sample_size
 
         # time embedding
@@ -1038,13 +1075,15 @@ class SdxlUNet2DConditionModel(nn.Module):
     def is_gradient_checkpointing(self) -> bool:
         return any(hasattr(m, "gradient_checkpointing") and m.gradient_checkpointing for m in self.modules())
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, cpu_offload: bool = False):
         self.gradient_checkpointing = True
-        self.set_gradient_checkpointing(value=True)
+        self.cpu_offload_checkpointing = cpu_offload
+        self.set_gradient_checkpointing(value=True, cpu_offload=cpu_offload)
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
-        self.set_gradient_checkpointing(value=False)
+        self.cpu_offload_checkpointing = False
+        self.set_gradient_checkpointing(value=False, cpu_offload=False)
 
     def set_use_memory_efficient_attention(self, xformers: bool, mem_eff: bool) -> None:
         blocks = self.input_blocks + [self.middle_block] + self.output_blocks
@@ -1061,15 +1100,15 @@ class SdxlUNet2DConditionModel(nn.Module):
                 if hasattr(module, "set_use_sdpa"):
                     module.set_use_sdpa(sdpa)
 
-    def set_gradient_checkpointing(self, value=False):
+    def set_gradient_checkpointing(self, value=False, cpu_offload: bool = False):
         blocks = self.input_blocks + [self.middle_block] + self.output_blocks
         for block in blocks:
             for module in block.modules():
                 if hasattr(module, "gradient_checkpointing"):
-                    # logger.info(f{module.__class__.__name__} {module.gradient_checkpointing} -> {value}")
+                    # logger.info(f{module.__class__.__name__} {module.gradient_checkpointing} -> {value})
                     module.gradient_checkpointing = value
-
-    # endregion
+                if hasattr(module, "cpu_offload_checkpointing"):
+                    module.cpu_offload_checkpointing = bool(value and cpu_offload)
 
     def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
         # broadcast timesteps to batch dimension

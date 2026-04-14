@@ -259,6 +259,27 @@ function Enable-MikazukiChinaMirrorMode {
     return Initialize-MikazukiChinaMirrorMode -RepoRoot $RepoRoot -Silent:$Silent
 }
 
+function Test-MikazukiChinaMirrorShouldSkipTorchProbe {
+    param(
+        [string[]]$FallbackArgs
+    )
+
+    if (-not (Test-MikazukiChinaMirrorMode)) {
+        return $false
+    }
+
+    $joinedArgs = (($FallbackArgs | ForEach-Object { [string]$_ }) -join " ").ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($joinedArgs)) {
+        return $false
+    }
+
+    return (
+        $joinedArgs.Contains("download.pytorch.org/whl/cu124") -or
+        $joinedArgs.Contains("download.pytorch.org/whl/cu128") -or
+        $joinedArgs.Contains("download.pytorch.org/whl/nightly/")
+    )
+}
+
 function Invoke-MirrorAwarePipInstall {
     param(
         [string]$PythonExe,
@@ -270,6 +291,15 @@ function Invoke-MirrorAwarePipInstall {
     )
 
     if (-not (Test-MikazukiChinaMirrorMode)) {
+        & $PythonExe -m pip install @FallbackArgs
+        return $LASTEXITCODE
+    }
+
+    if (Test-MikazukiChinaMirrorShouldSkipTorchProbe -FallbackArgs $FallbackArgs) {
+        Write-Host -ForegroundColor Yellow (
+            "$MirrorLabel does not currently mirror the requested PyTorch CUDA/nightly wheel channel. " +
+            "Skipping the mirror probe and using $FallbackLabel directly while keeping the selected PyPI mirror for other packages."
+        )
         & $PythonExe -m pip install @FallbackArgs
         return $LASTEXITCODE
     }

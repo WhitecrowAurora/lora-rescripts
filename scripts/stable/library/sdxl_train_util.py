@@ -343,6 +343,11 @@ def add_sdxl_training_arguments(parser: argparse.ArgumentParser, support_text_en
         action="store_true",
         help="disable mmap load for safetensors. Speed up model loading in WSL environment / safetensorsのmmapロードを無効にする。WSL環境等でモデル読み込みを高速化できる",
     )
+    parser.add_argument(
+        "--sdxl_fixed_block_swap",
+        action="store_true",
+        help="enable fixed-profile SDXL U-Net block swap for low-VRAM training / 低显存训练时启用固定档 SDXL U-Net block swap",
+    )
 
 
 def verify_sdxl_training_args(args: argparse.Namespace, support_text_encoder_caching: bool = True):

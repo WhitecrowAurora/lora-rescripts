@@ -171,6 +171,87 @@ print(json.dumps(result))
     return Invoke-PythonJsonProbe -PythonExe $PythonExe -ScriptContent $probeScript
 }
 
+function Invoke-NewbieDynamicRepoPrefetch {
+    param(
+        [string]$PythonExe,
+        [string]$RepoRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PythonExe) -or -not (Test-Path $PythonExe)) {
+        return $false
+    }
+
+    $resolvedRepoRoot = [System.IO.Path]::GetFullPath($RepoRoot)
+    $prefetchScript = @'
+import json
+import os
+
+from huggingface_hub import snapshot_download
+
+repo_root = r"__REPO_ROOT__"
+hf_home = os.path.join(repo_root, "huggingface")
+os.environ.setdefault("HF_HOME", hf_home)
+os.environ.setdefault("HF_MODULES_CACHE", os.path.join(hf_home, "modules"))
+
+repos = [
+    {
+        "repo_id": "jinaai/jina-clip-implementation",
+        "allow_patterns": ["*.py", "*.json", "*.txt", "*.md"],
+    },
+    {
+        "repo_id": "jinaai/xlm-roberta-flash-implementation",
+        "allow_patterns": ["*.py", "*.json", "*.txt", "*.md"],
+    },
+    {
+        "repo_id": "jinaai/jina-embeddings-v3",
+        "allow_patterns": ["*.py", "*.json", "*.txt", "*.md", "tokenizer*", "*.model"],
+    },
+    {
+        "repo_id": "jinaai/jina-clip-v2",
+        "allow_patterns": ["*.py", "*.json", "*.txt", "*.md", "tokenizer*", "special_tokens_map.json", "vocab.json", "merges.txt", "*.model"],
+    },
+]
+ignore_patterns = ["*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt", "*.onnx"]
+result = {"ok": True, "repos": []}
+for entry in repos:
+    repo_result = {"repo_id": entry["repo_id"], "ok": False}
+    for mode, local_only in (("network", False), ("local", True)):
+        try:
+            path = snapshot_download(
+                repo_id=entry["repo_id"],
+                allow_patterns=entry["allow_patterns"],
+                ignore_patterns=ignore_patterns,
+                local_files_only=local_only,
+            )
+            repo_result.update({"ok": True, "mode": mode, "path": path})
+            break
+        except Exception as exc:
+            repo_result[f"{mode}_error"] = str(exc)
+    if not repo_result["ok"]:
+        result["ok"] = False
+    result["repos"].append(repo_result)
+print(json.dumps(result, ensure_ascii=False))
+'@
+
+    $prefetchScript = $prefetchScript.Replace('__REPO_ROOT__', $resolvedRepoRoot.Replace('\', '\\'))
+    $prefetchResult = Invoke-PythonJsonProbe -PythonExe $PythonExe -ScriptContent $prefetchScript
+    if (-not $prefetchResult) {
+        Write-Host -ForegroundColor Yellow "Could not verify Jina dynamic code prefetch."
+        return $false
+    }
+
+    foreach ($repoResult in $prefetchResult.repos) {
+        if ([bool]$repoResult.ok) {
+            Write-Host -ForegroundColor Green ("Prefetched {0} via {1}." -f $repoResult.repo_id, $repoResult.mode)
+        }
+        else {
+            Write-Host -ForegroundColor Yellow ("Could not prefetch {0}. network={1} local={2}" -f $repoResult.repo_id, $repoResult.network_error, $repoResult.local_error)
+        }
+    }
+
+    return [bool]$prefetchResult.ok
+}
+
 function Get-InstalledRuntimeTargets {
     $targets = New-Object System.Collections.Generic.List[object]
 
@@ -295,32 +376,33 @@ Write-Host ("Selected runtime: {0}" -f $selectedTarget.Label) -ForegroundColor G
 Write-Host ("Runtime path: {0}" -f $selectedTarget.DirectoryPath) -ForegroundColor DarkGray
 Write-Host
 
-$alreadyReady = $selectedTarget.HasPeft -and $selectedTarget.HasTorchdiffeq -and $selectedTarget.HasTimm -and $selectedTarget.HasLycoris
-if ($alreadyReady -and -not $Force) {
+$packagesAlreadyReady = $selectedTarget.HasPeft -and $selectedTarget.HasTorchdiffeq -and $selectedTarget.HasTimm -and $selectedTarget.HasLycoris
+if ($packagesAlreadyReady -and -not $Force) {
     Write-Host -ForegroundColor Green "Newbie support packages already look complete in this runtime."
-    if ($selectedTarget.HasFlashAttention) {
-        Write-Host -ForegroundColor Green "flash_attn is also available in this runtime."
+    Write-Host -ForegroundColor Green "Skipping package reinstall and continuing with Jina dynamic code prefetch."
+}
+else {
+    $installArgs = @(
+        "--upgrade",
+        "--no-warn-script-location",
+        "--prefer-binary"
+    ) + $newbieSupportPackages
+
+    Invoke-Step "Installing Newbie support packages..." {
+        Invoke-MirrorAwarePipInstall `
+            -PythonExe $selectedTarget.PythonExe `
+            -MirrorArgs $installArgs `
+            -FallbackArgs $installArgs `
+            -MirrorLabel "China PyPI mirror" `
+            -FallbackLabel "official PyPI" | Out-Null
     }
-    else {
-        Write-Host -ForegroundColor Yellow "flash_attn is not available in this runtime."
-        Write-Host -ForegroundColor Yellow "Current upstream Newbie model still hard-depends on flash_attn, so training is not directly usable here yet."
-    }
-    exit 0
 }
 
-$installArgs = @(
-    "--upgrade",
-    "--no-warn-script-location",
-    "--prefer-binary"
-) + $newbieSupportPackages
-
-Invoke-Step "Installing Newbie support packages..." {
-    Invoke-MirrorAwarePipInstall `
-        -PythonExe $selectedTarget.PythonExe `
-        -MirrorArgs $installArgs `
-        -FallbackArgs $installArgs `
-        -MirrorLabel "China PyPI mirror" `
-        -FallbackLabel "official PyPI" | Out-Null
+Write-Host -ForegroundColor Green "Prefetching Jina dynamic code for Newbie runtime..."
+$jinaPrefetchOk = Invoke-NewbieDynamicRepoPrefetch -PythonExe $selectedTarget.PythonExe -RepoRoot $repoRoot
+if (-not $jinaPrefetchOk) {
+    Write-Host -ForegroundColor Yellow "Jina dynamic code prefetch did not fully complete."
+    Write-Host -ForegroundColor Yellow "If first Newbie launch still hits a missing transformers_modules file, rerun this script with network access."
 }
 
 $postProbe = Get-NewbieRuntimeProbe -PythonExe $selectedTarget.PythonExe
@@ -348,6 +430,7 @@ $markerPayload = [ordered]@{
         lycoris_wrapper = [bool]$postProbe.'lycoris.wrapper'
         flash_attn = [bool]$postProbe.flash_attn
     }
+    jina_dynamic_code_prefetch_ok = [bool]$jinaPrefetchOk
 }
 
 $markerPayload | ConvertTo-Json | Set-Content -Path $selectedTarget.NewbieMarkerPath -Encoding UTF8

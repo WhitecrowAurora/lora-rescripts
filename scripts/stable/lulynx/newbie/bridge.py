@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
+import shutil
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
@@ -10,6 +12,8 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -65,6 +69,69 @@ def resolve_dtype(mixed_precision: str) -> torch.dtype:
     return torch.float32
 
 
+def _call_hf_from_pretrained(factory, *args, low_cpu_mem_usage: bool = False, **kwargs):
+    if low_cpu_mem_usage:
+        try:
+            return factory(*args, low_cpu_mem_usage=True, **kwargs)
+        except TypeError:
+            pass
+    return factory(*args, **kwargs)
+
+
+def _iter_exception_chain(exc: Exception):
+    seen: set[int] = set()
+    current: Exception | None = exc
+    while current is not None and id(current) not in seen:
+        yield current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+
+
+def _extract_missing_dynamic_module_path(exc: Exception) -> Path | None:
+    for item in _iter_exception_chain(exc):
+        if not isinstance(item, FileNotFoundError):
+            continue
+        filename = getattr(item, 'filename', None)
+        if not filename:
+            continue
+        candidate = Path(filename)
+        if 'transformers_modules' in str(candidate).replace('/', '\\').lower():
+            return candidate
+    return None
+
+
+def _select_dynamic_module_cache_root(missing_path: Path) -> Path:
+    target = missing_path.parent
+    if target.name == '__pycache__':
+        target = target.parent
+    if len(target.name) >= 16 and all(ch in '0123456789abcdef' for ch in target.name.lower()):
+        return target
+    return target
+
+
+def _call_with_dynamic_module_recovery(loader, *, context_label: str):
+    try:
+        return loader()
+    except Exception as exc:
+        missing_path = _extract_missing_dynamic_module_path(exc)
+        if missing_path is None:
+            raise
+
+        purge_root = _select_dynamic_module_cache_root(missing_path)
+        try:
+            shutil.rmtree(purge_root, ignore_errors=True)
+        except Exception:
+            pass
+
+        logger.warning(
+            'Detected incomplete Hugging Face dynamic module cache while loading %s. Missing file: %s. Cleared %s and retrying once.',
+            context_label,
+            missing_path,
+            purge_root,
+        )
+        return loader()
+
+
 def _resolve_component_weight_path(component_path: Path, preferred_names: list[str]) -> Path:
     for name in preferred_names:
         candidate = component_path / name
@@ -88,12 +155,25 @@ def _instantiate_auto_model_from_config_source(
     mixed_precision: str,
     trust_remote_code: bool,
 ):
-    dtype = resolve_dtype(mixed_precision)
-    config = AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code)
-    model = AutoModel.from_config(config, trust_remote_code=trust_remote_code)
-    if dtype != torch.float32:
-        model = model.to(dtype=dtype)
-    return model
+    def _load():
+        dtype = resolve_dtype(mixed_precision)
+        config = AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code, local_files_only=True)
+        model = AutoModel.from_config(config, trust_remote_code=trust_remote_code)
+        if dtype != torch.float32:
+            model = model.to(dtype=dtype)
+        return model
+
+    return _call_with_dynamic_module_recovery(
+        _load,
+        context_label=f'AutoModel.from_config({config_source})',
+    )
+
+
+def _load_auto_config_with_dynamic_module_recovery(config_source: str | Path, *, trust_remote_code: bool):
+    return _call_with_dynamic_module_recovery(
+        lambda: AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code, local_files_only=True),
+        context_label=f'AutoConfig.from_pretrained({config_source})',
+    )
 
 
 def _load_auto_model_from_local_component(
@@ -159,7 +239,10 @@ def build_newbie_model_blueprint(
     with transformer_config_path.open('r', encoding='utf-8') as handle:
         transformer_config = json.load(handle)
 
-    text_encoder_config = AutoConfig.from_pretrained(text_encoder_path, trust_remote_code=trust_remote_code)
+    text_encoder_config = _load_auto_config_with_dynamic_module_recovery(
+        text_encoder_path,
+        trust_remote_code=trust_remote_code,
+    )
     cap_feat_dim = int(text_encoder_config.text_config.hidden_size)
 
     return NewbieModelBlueprint(
@@ -230,10 +313,16 @@ def load_newbie_text_encoder_and_tokenizer(base_model_path: str | Path, *, mixed
     text_encoder_path = base_path / 'text_encoder'
     dtype = resolve_dtype(mixed_precision)
     try:
-        text_encoder = AutoModel.from_pretrained(
-            text_encoder_path,
-            torch_dtype=dtype,
-            trust_remote_code=trust_remote_code,
+        text_encoder = _call_with_dynamic_module_recovery(
+            lambda: _call_hf_from_pretrained(
+                AutoModel.from_pretrained,
+                text_encoder_path,
+                torch_dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+            ),
+            context_label=f'AutoModel.from_pretrained({text_encoder_path})',
         )
     except OSError:
         text_encoder, _ = _load_auto_model_from_local_component(
@@ -242,7 +331,10 @@ def load_newbie_text_encoder_and_tokenizer(base_model_path: str | Path, *, mixed
             trust_remote_code=trust_remote_code,
             preferred_weight_names=['model.safetensors', 'pytorch_model.bin', 'gemma3-4b-it.safetensors'],
         )
-    tokenizer = AutoTokenizer.from_pretrained(text_encoder_path, trust_remote_code=trust_remote_code)
+    tokenizer = _call_with_dynamic_module_recovery(
+        lambda: AutoTokenizer.from_pretrained(text_encoder_path, trust_remote_code=trust_remote_code, local_files_only=True),
+        context_label=f'AutoTokenizer.from_pretrained({text_encoder_path})',
+    )
     tokenizer.padding_side = 'right'
     return text_encoder, tokenizer
 
@@ -251,7 +343,17 @@ def load_newbie_clip_model_and_tokenizer(base_model_path: str | Path, *, mixed_p
     base_path = Path(base_model_path).resolve()
     clip_model_path = base_path / 'clip_model'
     try:
-        clip_model = AutoModel.from_pretrained(clip_model_path, torch_dtype=resolve_dtype(mixed_precision), trust_remote_code=True)
+        clip_model = _call_with_dynamic_module_recovery(
+            lambda: _call_hf_from_pretrained(
+                AutoModel.from_pretrained,
+                clip_model_path,
+                torch_dtype=resolve_dtype(mixed_precision),
+                trust_remote_code=True,
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+            ),
+            context_label=f'AutoModel.from_pretrained({clip_model_path})',
+        )
     except Exception:
         clip_model, _ = _load_auto_model_from_local_component(
             clip_model_path,
@@ -261,9 +363,15 @@ def load_newbie_clip_model_and_tokenizer(base_model_path: str | Path, *, mixed_p
             fallback_remote_repo='jinaai/jina-clip-v2',
         )
     try:
-        clip_tokenizer = AutoTokenizer.from_pretrained(clip_model_path, trust_remote_code=True)
+        clip_tokenizer = _call_with_dynamic_module_recovery(
+            lambda: AutoTokenizer.from_pretrained(clip_model_path, trust_remote_code=True, local_files_only=True),
+            context_label=f'AutoTokenizer.from_pretrained({clip_model_path})',
+        )
     except Exception:
-        clip_tokenizer = AutoTokenizer.from_pretrained('jinaai/jina-clip-v2', trust_remote_code=True)
+        clip_tokenizer = _call_with_dynamic_module_recovery(
+            lambda: AutoTokenizer.from_pretrained('jinaai/jina-clip-v2', trust_remote_code=True, local_files_only=True),
+            context_label='AutoTokenizer.from_pretrained(jinaai/jina-clip-v2)',
+        )
     return clip_model, clip_tokenizer
 
 
@@ -272,4 +380,11 @@ def load_newbie_vae(base_model_path: str | Path, *, trust_remote_code: bool = Tr
 
     base_path = Path(base_model_path).resolve()
     vae_path = base_path / 'vae'
-    return AutoencoderKL.from_pretrained(vae_path, torch_dtype=torch.float32, trust_remote_code=trust_remote_code)
+    return _call_hf_from_pretrained(
+        AutoencoderKL.from_pretrained,
+        vae_path,
+        torch_dtype=torch.float32,
+        trust_remote_code=trust_remote_code,
+        local_files_only=True,
+        low_cpu_mem_usage=True,
+    )

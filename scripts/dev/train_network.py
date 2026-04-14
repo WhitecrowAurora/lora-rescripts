@@ -1,6 +1,7 @@
+import argparse
 import gc
 import importlib
-import argparse
+import inspect
 import math
 import os
 import typing
@@ -714,9 +715,23 @@ class NetworkTrainer:
             accelerator.print(f"load network weights from {args.network_weights}: {info}")
 
         if args.gradient_checkpointing:
-            if args.cpu_offload_checkpointing:
+            supports_cpu_offload_checkpointing = False
+            try:
+                supports_cpu_offload_checkpointing = "cpu_offload" in inspect.signature(
+                    unet.enable_gradient_checkpointing
+                ).parameters
+            except (TypeError, ValueError):
+                supports_cpu_offload_checkpointing = False
+
+            if args.cpu_offload_checkpointing and supports_cpu_offload_checkpointing:
                 unet.enable_gradient_checkpointing(cpu_offload=True)
             else:
+                if args.cpu_offload_checkpointing and not supports_cpu_offload_checkpointing:
+                    accelerator.print(
+                        "WARNING: cpu_offload_checkpointing is not supported by the current U-Net/DiT route. "
+                        "Falling back to standard gradient checkpointing. "
+                        "/ 当前训练路由不支持 cpu_offload_checkpointing，已自动回退为普通梯度检查点。"
+                    )
                 unet.enable_gradient_checkpointing()
 
             for t_enc, flag in zip(text_encoders, self.get_text_encoders_train_flags(args, text_encoders)):

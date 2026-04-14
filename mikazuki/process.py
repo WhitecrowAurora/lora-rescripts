@@ -23,6 +23,7 @@ from mikazuki.utils.training_process_runtime import (
     resolve_training_process_runtime,
 )
 from mikazuki.utils.resume_guard import validate_resume_launch_guard
+from mikazuki.utils.sdxl_low_vram_probe import maybe_run_sdxl_low_vram_auto_resolution_probe
 from mikazuki.utils.tensorboard_runs import (
     apply_tensorboard_runtime_config,
     cleanup_tensorboard_records_without_checkpoint,
@@ -357,40 +358,62 @@ def run_train(
 
     apply_training_device_visibility(customize_env, gpu_ids)
 
-    if direct_python_trainer:
+    def build_launch_args_for_toml(active_toml_path: str) -> list[str]:
+        if direct_python_trainer:
+            script_runner = get_script_runner_path()
+            resolved_args = [
+                sys.executable,
+                str(script_runner),
+                str(trainer_path),
+                "--config_file",
+                active_toml_path,
+            ]
+            if trainer_definition and trainer_definition.direct_cli_args:
+                resolved_args.extend(list(trainer_definition.direct_cli_args))
+            return resolved_args
+
+        if bool(config_data.get("enable_mixed_resolution_training")):
+            runner_path = base_dir_path() / "mikazuki" / "staged_resolution_runner.py"
+            return build_staged_resolution_runner_args(
+                runner_path,
+                trainer_path,
+                active_toml_path,
+                int(cpu_threads),
+                quiet=True,
+                num_processes=int(distributed_runtime.get("total_num_processes", 1) or 1),
+                distributed_runtime=distributed_runtime,
+            )
+
         script_runner = get_script_runner_path()
-        args = [
-            sys.executable,
-            str(script_runner),
-            str(trainer_path),
-            "--config_file",
-            toml_path,
-        ]
-        if trainer_definition and trainer_definition.direct_cli_args:
-            args.extend(list(trainer_definition.direct_cli_args))
-    elif bool(config_data.get("enable_mixed_resolution_training")):
-        runner_path = base_dir_path() / "mikazuki" / "staged_resolution_runner.py"
-        args = build_staged_resolution_runner_args(
-            runner_path,
-            trainer_path,
-            toml_path,
-            int(cpu_threads),
-            quiet=True,
-            num_processes=int(distributed_runtime.get("total_num_processes", 1) or 1),
-            distributed_runtime=distributed_runtime,
-        )
-    else:
-        script_runner = get_script_runner_path()
-        args = build_accelerate_launch_args(
+        return build_accelerate_launch_args(
             script_runner,
             trainer_path,
-            toml_path,
+            active_toml_path,
             int(cpu_threads),
             quiet=True,
             num_processes=int(distributed_runtime.get("total_num_processes", 1) or 1),
             distributed_runtime=distributed_runtime,
             trainer_cli_args=["--train_batch_size", str(int(launch_train_batch_override))],
         )
+
+    low_vram_probe_result = maybe_run_sdxl_low_vram_auto_resolution_probe(
+        config_data=config_data,
+        customize_env=customize_env,
+        cwd=base_dir_path(),
+        gpu_ids=gpu_ids,
+        distributed_runtime=distributed_runtime,
+        launch_args_builder=build_launch_args_for_toml,
+    )
+    if low_vram_probe_result.get("status") == "failed":
+        return APIResponse(
+            status="error",
+            message=str(low_vram_probe_result.get("message") or "SDXL low-VRAM auto probe failed"),
+        )
+    if low_vram_probe_result.get("changed"):
+        with open(toml_path, "w", encoding="utf-8") as f:
+            toml.dump(config_data, f)
+
+    args = build_launch_args_for_toml(toml_path)
 
     resolve_mesh_network_interface(customize_env, distributed_runtime)
 
@@ -467,5 +490,6 @@ def run_train(
             "distributed_summary": str(distributed_runtime.get("summary", "") or ""),
             "distributed_active": bool(int(distributed_runtime.get("total_num_processes", 1) or 1) > 1),
             "distributed_is_multi_machine": bool(distributed_runtime.get("is_multi_machine")),
+            "sdxl_low_vram_probe": low_vram_probe_result,
         },
     )

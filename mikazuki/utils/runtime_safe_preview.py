@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
 import logging
 from typing import Any, Iterator
 
@@ -136,6 +137,20 @@ def clamp_safe_preview_request(
         return result
 
     limits = get_safe_preview_limits(state)
+    scale = min(
+        1.0,
+        limits["max_width"] / max(1, int(result["width"])),
+        limits["max_height"] / max(1, int(result["height"])),
+    )
+    if scale < 1.0:
+        scaled_width = max(64, int(math.floor(result["width"] * scale / 8.0) * 8))
+        scaled_height = max(64, int(math.floor(result["height"] * scale / 8.0) * 8))
+        if scaled_width != result["width"] or scaled_height != result["height"]:
+            result["width"] = scaled_width
+            result["height"] = scaled_height
+            result["changed"] = True
+            result["changes"].append(f"size->{scaled_width}x{scaled_height}")
+
     if result["width"] > limits["max_width"]:
         result["width"] = limits["max_width"]
         result["changed"] = True

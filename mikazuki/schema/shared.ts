@@ -153,7 +153,7 @@
             }),
             Schema.object({}),
         ]),
-    ]).description("Lulynx 实验核心")
+    ])
 
     const LULYNX_EXPERIMENTAL_CORE_ANIMA = Schema.intersect([
         LULYNX_EXPERIMENTAL_CORE_COMMON,
@@ -168,7 +168,7 @@
             }),
             Schema.object({}),
         ]),
-    ]).description("Lulynx 实验核心")
+    ])
 
     let data = {
         RAW: {

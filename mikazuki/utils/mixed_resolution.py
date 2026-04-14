@@ -130,9 +130,9 @@ def build_mixed_resolution_plan(config: dict, *, training_type: str) -> MixedRes
         )
 
     training_type = str(training_type or "").strip().lower()
-    if training_type not in {"sdxl-lora", "sdxl-finetune"}:
+    if training_type not in {"sdxl-lora", "sdxl-finetune", "anima-lora", "anima-finetune"}:
         raise ValueError(
-            "阶段分辨率训练当前仅对 SDXL LoRA / SDXL FineTune 开放。"
+            "阶段分辨率训练当前仅对 SDXL / Anima 的 LoRA / FineTune 路线开放。"
         )
 
     base_resolution = parse_resolution(config.get("resolution"))

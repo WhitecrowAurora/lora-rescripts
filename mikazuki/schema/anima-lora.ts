@@ -47,6 +47,23 @@ Schema.intersect([
         network_train_text_encoder_only: Schema.boolean().default(false).description("仅训练文本编码器"),
     }).description("训练相关参数"),
 
+    Schema.intersect([
+        Schema.object({
+            enable_mixed_resolution_training: Schema.boolean().default(false).description("启用阶段分辨率训练（实验性，支持 Anima）。1024 基准使用 512/768/1024；2048 基准使用 1024/1536/2048"),
+        }).description("阶段分辨率训练"),
+        Schema.union([
+            Schema.object({
+                enable_mixed_resolution_training: Schema.const(true).required(),
+                staged_resolution_ratio_512: Schema.number().min(0).max(100).step(1).default(20).description("512 阶段占比（百分比）。当最终分辨率最大边小于 512 时会忽略"),
+                staged_resolution_ratio_768: Schema.number().min(0).max(100).step(1).default(30).description("768 阶段占比（百分比）。当最终分辨率最大边小于 768 时会忽略"),
+                staged_resolution_ratio_1024: Schema.number().min(0).max(100).step(1).default(50).description("1024 阶段占比（百分比）。1024 基准和 2048 基准都会用到"),
+                staged_resolution_ratio_1536: Schema.number().min(0).max(100).step(1).default(30).description("1536 阶段占比（百分比）。仅 2048 基准会用到"),
+                staged_resolution_ratio_2048: Schema.number().min(0).max(100).step(1).default(50).description("2048 阶段占比（百分比）。仅 2048 基准会用到"),
+            }),
+            Schema.object({}),
+        ]),
+    ]),
+
     SHARED_SCHEMAS.LR_OPTIMIZER,
 
     Schema.intersect([
@@ -93,7 +110,6 @@ Schema.intersect([
                 dropout: Schema.number().step(0.01).default(0).description("LoKr dropout 概率（当前为线性层注入实现）"),
                 network_dropout: Schema.number().hidden(),
             }),
-            Schema.object({}),
         ]),
         Schema.union([
             Schema.object({
@@ -110,7 +126,9 @@ Schema.intersect([
         SHARED_SCHEMAS.NETWORK_OPTION_BASEWEIGHT,
     ]),
 
-    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_ANIMA,
+    Schema.intersect([
+        SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_ANIMA,
+    ]).description("Lulynx 实验核心"),
     Schema.intersect([
         Schema.object({
             enable_preview: Schema.boolean().default(false).description("启用训练预览图"),
