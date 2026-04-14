@@ -3,6 +3,7 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$mirrorHelperPath = Join-Path $repoRoot "tools\runtime\mirror_env.ps1"
 $launchLogsDir = Join-Path $repoRoot "logs\launcher"
 $launchTimestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $script:LaunchTranscriptPath = Join-Path $launchLogsDir ("run_gui-" + $launchTimestamp + ".log")
@@ -56,6 +57,11 @@ trap {
 }
 
 . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+if (($Env:MIKAZUKI_CN_MIRROR -eq "1") -and (Test-Path $mirrorHelperPath)) {
+    . $mirrorHelperPath
+    Initialize-MikazukiChinaMirrorMode -RepoRoot $repoRoot -PromptOnFirstUse | Out-Null
+}
 
 $flashAttentionRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "flashattention"
 $flashAttentionRuntimeDirName = $flashAttentionRuntimeInfo.DirectoryName

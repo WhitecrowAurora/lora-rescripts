@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -9,6 +11,9 @@ from mikazuki.utils import train_utils
 
 AESTHETIC_TARGETS = {"aesthetic", "composition", "color", "sexual"}
 YOLO_LOCAL_REPO = (launch_utils.base_dir_path() / "scripts" / "stable" / "ultralytics" / "ultralytics").resolve()
+NEWBIE_UPSTREAM_REPO = (launch_utils.base_dir_path() / "scripts" / "dev" / "NewbieLoraTrainer").resolve()
+NEWBIE_REQUIRED_RUNTIME_MODULES = ("peft", "torchdiffeq", "timm", "flash_attn")
+NEWBIE_LOKR_RUNTIME_MODULE = "lycoris.wrapper"
 
 
 def parse_boolish(value) -> bool:
@@ -59,6 +64,13 @@ def _resolve_project_path(raw_path: str) -> Path:
     else:
         resolved = resolved.resolve()
     return resolved
+
+
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
 
 
 def validate_yolo_runtime_config(config: dict) -> Optional[str]:
@@ -178,6 +190,104 @@ def validate_aesthetic_scorer_runtime_config(config: dict) -> Optional[str]:
 
 def build_aesthetic_scorer_start_warnings(_config: dict) -> list[str]:
     return []
+
+
+def validate_newbie_runtime_config(config: dict) -> Optional[str]:
+    if parse_boolish(config.get("enable_distributed_training")):
+        return "当前 Newbie 训练暂不走 Mikazuki 分布式启动。"
+
+    if not NEWBIE_UPSTREAM_REPO.exists() or not NEWBIE_UPSTREAM_REPO.is_dir():
+        return f"未找到 Newbie 上游训练核心目录: {NEWBIE_UPSTREAM_REPO}"
+
+    model_path = str(config.get("pretrained_model_name_or_path", "") or "").strip()
+    if not model_path:
+        return "Newbie 底模目录不能为空。"
+    resolved_model_path = _resolve_project_path(model_path)
+    if not resolved_model_path.exists():
+        return f"Newbie 底模目录不存在: {resolved_model_path}"
+    if not resolved_model_path.is_dir():
+        return f"Newbie 当前要求使用完整本地模型目录: {resolved_model_path}"
+
+    train_data_dir = str(config.get("train_data_dir", "") or "").strip()
+    if not train_data_dir:
+        return "Newbie 训练图像目录不能为空。"
+    if not train_utils.validate_data_dir(train_data_dir):
+        return "Newbie 训练图像目录不存在或没有图片，请检查目录。"
+
+    resume_path = str(config.get("resume", "") or "").strip()
+    if resume_path:
+        resolved_resume = _resolve_project_path(resume_path)
+        if not resolved_resume.exists():
+            return f"Newbie resume 路径不存在: {resolved_resume}"
+
+    adapter_type = str(config.get("adapter_type", config.get("lora_type", "lora")) or "lora").strip().lower()
+    missing_modules = [module_name for module_name in NEWBIE_REQUIRED_RUNTIME_MODULES if not _module_available(module_name)]
+    if adapter_type in {"lokr", "lyco_lokr", "lycoris_lokr", "lyco-lokr"} and not _module_available(NEWBIE_LOKR_RUNTIME_MODULE):
+        missing_modules.append(NEWBIE_LOKR_RUNTIME_MODULE)
+
+    if missing_modules:
+        missing_text = ", ".join(missing_modules)
+        return (
+            "当前运行时缺少 Newbie 训练所需依赖: "
+            f"{missing_text}。"
+            "请运行 install_newbie_support.bat 后重启客户端再试。"
+            "Newbie 现在会直接复用你当前启动 GUI 的 Python，不会再切到独立 Newbie 运行时。"
+            "另外，上游 Newbie 模型当前会硬依赖 flash_attn；如果当前运行时没有 flash_attn，就算公共依赖补齐也还不能直接训练。"
+        )
+
+    return None
+
+
+def build_newbie_start_warnings(config: dict) -> list[str]:
+    warnings: list[str] = [
+        "Newbie 训练会直接复用当前 GUI 所在运行时，不会切换到独立 Newbie Python 环境。"
+    ]
+    if parse_boolish(config.get("enable_preview")):
+        warnings.append("Newbie 新分支当前仍建议关闭训练中预览，以避免额外显存峰值。")
+    if not parse_boolish(config.get("use_cache", True)):
+        warnings.append("当前 Newbie 分支建议保持 use_cache 开启；关闭后正式训练阶段显存峰值会明显更高。")
+    return warnings
+
+
+def build_newbie_runtime_payload() -> dict:
+    modules = {
+        "peft": _module_available("peft"),
+        "torchdiffeq": _module_available("torchdiffeq"),
+        "timm": _module_available("timm"),
+        "lycoris_wrapper": _module_available(NEWBIE_LOKR_RUNTIME_MODULE),
+        "flash_attn": _module_available("flash_attn"),
+    }
+    shared_support_ready = bool(modules["peft"] and modules["torchdiffeq"] and modules["timm"])
+    train_ready = bool(shared_support_ready and modules["flash_attn"])
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    notes: list[str] = []
+
+    if not shared_support_ready:
+        missing = [name for name in ("peft", "torchdiffeq", "timm") if not modules[name]]
+        errors.append(
+            "当前运行时缺少 Newbie 公共依赖: "
+            f"{', '.join(missing)}。请运行 install_newbie_support.bat 后重启客户端再试。"
+        )
+    if shared_support_ready and not modules["flash_attn"]:
+        warnings.append(
+            "当前运行时没有 flash_attn。上游 Newbie 模型目前仍硬依赖 flash_attn，"
+            "因此即使公共依赖已补齐，这个运行时也还不能直接开始 Newbie 训练。"
+        )
+    if not modules["lycoris_wrapper"]:
+        notes.append("lycoris.wrapper 当前不可用；Newbie LoKr 模式会不可用，但普通 LoRA 模式不受影响。")
+
+    return {
+        "python_executable": sys.executable,
+        "upstream_repo_found": bool(NEWBIE_UPSTREAM_REPO.exists() and NEWBIE_UPSTREAM_REPO.is_dir()),
+        "shared_support_ready": shared_support_ready,
+        "train_ready": train_ready,
+        "modules": modules,
+        "warnings": warnings,
+        "errors": errors,
+        "notes": notes,
+    }
 
 
 def build_yolo_preflight_summary(

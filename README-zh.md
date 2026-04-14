@@ -159,6 +159,9 @@ git clone --recurse-submodules https://github.com/WhitecrowAurora/lora-rescripts
 - 如果基础依赖缺失，它会自动调用 `install.bash`
 - 如果标签编辑器依赖缺失且当前 Python 版本兼容，它会自动调用 `install_tageditor.sh`
 - 中国大陆镜像环境可使用 `bash run_gui_cn.sh`
+- Windows 用户可使用 `run_gui_cn.bat`、`run_auto_cn.bat`、`run_manual_cn.bat`
+- 各实验路线也已提供对应的 `_cn.bat` 启动入口，可在原脚本名后追加 `_cn`
+- 首次使用 CN 启动脚本时会让你选择 PyPI 镜像源，直接回车默认清华，选择会保存到 `config/china_mirror.json`
 
 #### TensorBoard
 

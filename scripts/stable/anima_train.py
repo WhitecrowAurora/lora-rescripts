@@ -49,6 +49,11 @@ def train(args):
     args.attn_mode = anima_train_utils.normalize_anima_attn_mode(
         getattr(args, "attn_mode", None),
     )
+    args.sample_sampler, args.sample_scheduler = anima_train_utils.normalize_anima_preview_sampling(
+        getattr(args, "sample_sampler", "euler"),
+        getattr(args, "sample_scheduler", "simple"),
+        warn=True,
+    )
 
     # backward compatibility
     if not args.skip_cache_check:

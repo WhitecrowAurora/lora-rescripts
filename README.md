@@ -159,6 +159,9 @@ Run `bash run_gui.sh`, then program will open [http://127.0.0.1:28000](http://12
 - if base dependencies are missing, it will run `install.bash` for you
 - if tag editor dependencies are missing and the current Python is compatible, it will run `install_tageditor.sh`
 - for mainland China mirror settings, use `bash run_gui_cn.sh`
+- on Windows, use `run_gui_cn.bat`, `run_auto_cn.bat`, or `run_manual_cn.bat`
+- dedicated experimental routes also provide matching `_cn.bat` launchers
+- the first CN startup will let you choose a PyPI mirror; pressing Enter keeps the default Tsinghua preset and saves it to `config/china_mirror.json`
 
 #### TensorBoard
 

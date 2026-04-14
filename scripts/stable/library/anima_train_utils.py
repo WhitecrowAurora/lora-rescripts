@@ -3,6 +3,7 @@
 import argparse
 import importlib
 from collections import defaultdict
+from functools import lru_cache
 import gc
 import math
 import os
@@ -34,6 +35,48 @@ logger = logging.getLogger(__name__)
 
 # Anima-specific training arguments
 ANIMA_SUPPORTED_ATTN_MODES = ("torch", "xformers", "sageattn", "flash")
+ANIMA_SUPPORTED_PREVIEW_SAMPLERS = ("euler", "k_euler")
+ANIMA_SUPPORTED_PREVIEW_SCHEDULERS = ("simple",)
+ANIMA_PREVIEW_SAMPLER_ALIASES = {
+    "euler_a": "euler",
+    "k_euler_a": "k_euler",
+}
+
+
+@lru_cache(maxsize=64)
+def _warn_once(message: str) -> None:
+    logger.warning(message)
+
+
+def normalize_anima_preview_sampling(
+    sample_sampler: Optional[str],
+    sample_scheduler: Optional[str],
+    *,
+    warn: bool = True,
+) -> tuple[str, str]:
+    scheduler = str(sample_scheduler or "simple").strip().lower() or "simple"
+    if scheduler not in ANIMA_SUPPORTED_PREVIEW_SCHEDULERS:
+        if warn:
+            _warn_once(
+                f"Anima preview scheduler '{scheduler}' is not implemented yet; falling back to 'simple'."
+            )
+        scheduler = "simple"
+
+    raw_sampler = str(sample_sampler or "euler").strip().lower() or "euler"
+    sampler = ANIMA_PREVIEW_SAMPLER_ALIASES.get(raw_sampler, raw_sampler)
+    if raw_sampler in ANIMA_PREVIEW_SAMPLER_ALIASES:
+        if warn:
+            _warn_once(
+                f"Anima preview sampler '{raw_sampler}' does not have a dedicated implementation yet; using '{sampler}' instead."
+            )
+    elif sampler not in ANIMA_SUPPORTED_PREVIEW_SAMPLERS:
+        if warn:
+            _warn_once(
+                f"Anima preview sampler '{raw_sampler}' is not implemented yet; falling back to 'euler'."
+            )
+        sampler = "euler"
+
+    return sampler, scheduler
 
 
 class _AnimaTimingSection:
@@ -1040,15 +1083,11 @@ def do_sample(
     Returns:
         Denoised latents
     """
-    sample_scheduler = str(sample_scheduler or "simple").strip().lower()
-    if sample_scheduler != "simple":
-        logger.warning(f"Anima preview scheduler '{sample_scheduler}' is not implemented yet, fallback to simple")
-        sample_scheduler = "simple"
-
-    sample_sampler = str(sample_sampler or "euler").strip().lower()
-    if sample_sampler not in {"euler", "k_euler"}:
-        logger.warning(f"Anima preview sampler '{sample_sampler}' is not implemented yet, fallback to euler")
-        sample_sampler = "euler"
+    sample_sampler, sample_scheduler = normalize_anima_preview_sampling(
+        sample_sampler,
+        sample_scheduler,
+        warn=False,
+    )
 
     # Latent shape: (1, 16, 1, H/8, W/8) for single image
     latent_h = height // 8
@@ -1393,6 +1432,7 @@ def _sample_image_inference(
     flow_shift = prompt_dict.get("flow_shift", getattr(args, "discrete_flow_shift", 3.0) or 3.0)
     sample_sampler = prompt_dict.get("sample_sampler", getattr(args, "sample_sampler", "euler"))
     sample_scheduler = getattr(args, "sample_scheduler", "simple")
+    sample_sampler, sample_scheduler = normalize_anima_preview_sampling(sample_sampler, sample_scheduler, warn=True)
 
     safe_preview_request = clamp_safe_preview_request(
         args,

@@ -15,6 +15,11 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $null = . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+. (Join-Path $repoRoot "tools\runtime\mirror_env.ps1")
+
+if (Test-MikazukiChinaMirrorMode) {
+    Enable-MikazukiChinaMirrorMode -RepoRoot $repoRoot
+}
 
 $runtimeKey = if ($RuntimeTarget -in @("sageattention2", "latest")) { "sageattention2" } else { "sageattention" }
 $isSageAttention2Runtime = $runtimeKey -eq "sageattention2"
@@ -25,7 +30,7 @@ $sageAttentionRuntimeDirName = $sageAttentionRuntimeInfo.DirectoryName
 $sageAttentionRuntimeDir = $sageAttentionRuntimeInfo.DirectoryPath
 $sageAttentionPython = Join-Path $sageAttentionRuntimeDir "python.exe"
 $sageAttentionMarker = Join-Path $sageAttentionRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
     param (
@@ -640,12 +645,26 @@ if ($torchPackagesReady) {
 }
 else {
     Invoke-Step "Installing PyTorch and torchvision for SageAttention environment ($Profile)..." {
+        $mirrorArgs = @(
+            "--upgrade",
+            "--force-reinstall",
+            "--no-warn-script-location",
+            "--prefer-binary"
+        )
         if ($Profile -eq "triton-v2") {
-            & $sageAttentionPython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary torch==2.6.0+cu124 torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+            $mirrorArgs = $mirrorArgs + @("torch==2.6.0+cu124", "torchvision==0.21.0+cu124")
+            $fallbackArgs = $mirrorArgs + @("--index-url", "https://download.pytorch.org/whl/cu124")
         }
         else {
-            & $sageAttentionPython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary torch==2.10.0+cu128 torchvision==0.25.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+            $mirrorArgs = $mirrorArgs + @("torch==2.10.0+cu128", "torchvision==0.25.0+cu128")
+            $fallbackArgs = $mirrorArgs + @("--extra-index-url", "https://download.pytorch.org/whl/cu128")
         }
+        Invoke-MirrorAwarePipInstall `
+            -PythonExe $sageAttentionPython `
+            -MirrorArgs $mirrorArgs `
+            -FallbackArgs $fallbackArgs `
+            -MirrorLabel "China mirror (PyPI + SJTU PyTorch wheel mirror)" `
+            -FallbackLabel "official PyTorch channel" | Out-Null
     }
 }
 

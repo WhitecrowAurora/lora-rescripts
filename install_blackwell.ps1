@@ -14,13 +14,18 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+. (Join-Path $repoRoot "tools\runtime\mirror_env.ps1")
+
+if (Test-MikazukiChinaMirrorMode) {
+    Enable-MikazukiChinaMirrorMode -RepoRoot $repoRoot
+}
 
 $blackwellRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "blackwell"
 $blackwellRuntimeDirName = $blackwellRuntimeInfo.DirectoryName
 $blackwellRuntimeDir = $blackwellRuntimeInfo.DirectoryPath
 $blackwellPython = Join-Path $blackwellRuntimeDir "python.exe"
 $blackwellMarker = Join-Path $blackwellRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
     param (
@@ -394,6 +399,12 @@ function Resolve-XformersWheel {
     }
 
     $czmahiDefaultWheelUrl = "https://huggingface.co/czmahi/xformers-windows-torch2.8-cu128-py312/resolve/main/latest-torch2.8-python3.12-xformers-comfyui-windows/xformers-0.0.31%2B8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl"
+    if ((Test-MikazukiChinaMirrorMode) -and $Env:HF_ENDPOINT) {
+        $hfEndpoint = $Env:HF_ENDPOINT.TrimEnd("/")
+        if ($czmahiDefaultWheelUrl.StartsWith("https://huggingface.co/")) {
+            $czmahiDefaultWheelUrl = $hfEndpoint + $czmahiDefaultWheelUrl.Substring("https://huggingface.co".Length)
+        }
+    }
     $czmahiDefaultWheelName = "xformers-0.0.31+8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl"
 
     $searchRoots = @(

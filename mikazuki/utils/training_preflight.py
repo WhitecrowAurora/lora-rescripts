@@ -138,6 +138,19 @@ def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list
     if sample_scheduler and sample_scheduler != "simple":
         warnings.append("Anima preview scheduler currently falls back to simple. / 当前 Anima 预览调度器仅支持 simple，其他值会自动回退。")
 
+    sample_sampler = str(payload.get("sample_sampler", "")).strip().lower()
+    normalized_sample_sampler = {"euler_a": "euler", "k_euler_a": "k_euler"}.get(sample_sampler, sample_sampler)
+    if sample_sampler and normalized_sample_sampler != sample_sampler:
+        warnings.append(
+            f"Anima preview sampler '{sample_sampler}' currently maps to '{normalized_sample_sampler}'. "
+            f"/ 当前 Anima 预览采样器 '{sample_sampler}' 会自动改用 '{normalized_sample_sampler}'。"
+        )
+    elif sample_sampler and normalized_sample_sampler not in {"euler", "k_euler"}:
+        warnings.append(
+            "Anima preview sampler currently only supports euler / k_euler; other values will fall back to euler. "
+            "/ 当前 Anima 预览采样器目前仅支持 euler / k_euler，其他值会自动回退到 euler。"
+        )
+
     if training_type == "anima-lora":
         adapter_type = get_anima_adapter_type(payload)
         if adapter_type == "lokr":

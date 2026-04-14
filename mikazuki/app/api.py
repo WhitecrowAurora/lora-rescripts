@@ -100,6 +100,7 @@ from mikazuki.utils.aesthetic_runtime import (
     start_aesthetic_dependency_install,
 )
 from mikazuki.utils.aesthetic_infer_runtime import aesthetic_infer_manager
+from mikazuki.utils.direct_trainers import build_newbie_runtime_payload
 from mikazuki.utils.frontend_profiles import (
     PLUGIN_ROOT,
     install_github_frontend_plugin,
@@ -481,6 +482,24 @@ def apply_anima_ui_overrides(config: dict) -> None:
     model_train_type = str(config.get("model_train_type", "")).strip().lower()
     if not model_train_type.startswith("anima"):
         return
+
+    sample_scheduler = str(config.get("sample_scheduler", "") or "").strip().lower()
+    if not sample_scheduler:
+        config["sample_scheduler"] = "simple"
+    elif sample_scheduler != "simple":
+        config["sample_scheduler"] = "simple"
+
+    raw_sample_sampler = str(config.get("sample_sampler", "") or "").strip().lower()
+    sample_sampler_aliases = {
+        "euler_a": "euler",
+        "k_euler_a": "k_euler",
+    }
+    normalized_sample_sampler = sample_sampler_aliases.get(raw_sample_sampler, raw_sample_sampler)
+    if not normalized_sample_sampler:
+        normalized_sample_sampler = "euler"
+    elif normalized_sample_sampler not in {"euler", "k_euler"}:
+        normalized_sample_sampler = "euler"
+    config["sample_sampler"] = normalized_sample_sampler
 
     lora_type = str(config.pop("lora_type", "")).strip().lower()
     network_args = pop_network_args(config)
@@ -1709,6 +1728,11 @@ async def restart_backend() -> APIResponse:
 @router.get("/yolo/runtime_status", response_model_exclude_none=True)
 async def get_yolo_runtime_status() -> APIResponse:
     return APIResponseSuccess(data=build_yolo_runtime_payload())
+
+
+@router.get("/newbie/runtime_status", response_model_exclude_none=True)
+async def get_newbie_runtime_status() -> APIResponse:
+    return APIResponseSuccess(data=build_newbie_runtime_payload())
 
 
 @router.post("/yolo/install_dependencies", response_model_exclude_none=True)

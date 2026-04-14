@@ -307,9 +307,15 @@ def prepare_environment(disable_auto_mirror: bool = True, prepare_onnxruntime: b
 
     if not disable_auto_mirror and not network_gfw_test():
         log.info("use pip & huggingface mirrors")
+        os.environ.setdefault("MIKAZUKI_CN_MIRROR", "1")
+        os.environ.setdefault("HF_HOME", "huggingface")
         os.environ.setdefault("PIP_FIND_LINKS", "https://mirror.sjtu.edu.cn/pytorch-wheels/torch_stable.html")
         os.environ.setdefault("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
         os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        os.environ.setdefault("GIT_TERMINAL_PROMPT", "false")
+        gitconfig_cn = base_dir_path() / "assets" / "gitconfig-cn"
+        if gitconfig_cn.exists():
+            os.environ.setdefault("GIT_CONFIG_GLOBAL", str(gitconfig_cn))
 
     if not os.environ.get("PATH"):
         os.environ["PATH"] = os.path.dirname(sys.executable)

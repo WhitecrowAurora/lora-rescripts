@@ -6,6 +6,11 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+. (Join-Path $repoRoot "tools\runtime\mirror_env.ps1")
+
+if (Test-MikazukiChinaMirrorMode) {
+    Enable-MikazukiChinaMirrorMode -RepoRoot $repoRoot
+}
 
 $portableRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "portable"
 $portableRuntimeDir = $portableRuntimeInfo.DirectoryPath
@@ -17,7 +22,7 @@ $venvRuntimeDir = $venvRuntimeInfo.DirectoryPath
 $venvPython = Join-Path $venvRuntimeDir "Scripts\python.exe"
 $venvMarker = Join-Path $venvRuntimeDir ".deps_installed"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
     param (
@@ -151,11 +156,37 @@ Invoke-Step "Upgrading pip tooling..." {
 }
 
 Invoke-Step "Installing PyTorch and torchvision (CUDA 12.8 channel)..." {
-    & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary torch==2.10.0+cu128 torchvision==0.25.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+    $mirrorArgs = @(
+        "--upgrade",
+        "--no-warn-script-location",
+        "--prefer-binary",
+        "torch==2.10.0+cu128",
+        "torchvision==0.25.0+cu128"
+    )
+    $fallbackArgs = $mirrorArgs + @("--extra-index-url", "https://download.pytorch.org/whl/cu128")
+    Invoke-MirrorAwarePipInstall `
+        -PythonExe $pythonExe `
+        -MirrorArgs $mirrorArgs `
+        -FallbackArgs $fallbackArgs `
+        -MirrorLabel "China mirror (PyPI + SJTU PyTorch wheel mirror)" `
+        -FallbackLabel "official PyTorch CUDA 12.8 channel" | Out-Null
 }
 
 Invoke-OptionalStep "Installing xformers (optional)..." {
-    & $pythonExe -m pip install --upgrade --no-warn-script-location --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
+    $mirrorArgs = @(
+        "--upgrade",
+        "--no-warn-script-location",
+        "--only-binary",
+        "xformers",
+        "xformers>=0.0.34"
+    )
+    $fallbackArgs = $mirrorArgs + @("--index-url", "https://download.pytorch.org/whl/cu128")
+    Invoke-MirrorAwarePipInstall `
+        -PythonExe $pythonExe `
+        -MirrorArgs $mirrorArgs `
+        -FallbackArgs $fallbackArgs `
+        -MirrorLabel "China mirror (PyPI + SJTU PyTorch wheel mirror)" `
+        -FallbackLabel "official PyTorch CUDA 12.8 xformers channel" | Out-Null
 } "Optional xformers installation failed. The GUI will still work and training can fall back to SDPA."
 
 Invoke-Step "Installing project dependencies..." {

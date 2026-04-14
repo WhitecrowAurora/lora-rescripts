@@ -125,7 +125,7 @@ Schema.intersect([
                 sample_cfg: Schema.number().min(1).max(30).default(4).description("CFG Scale"),
                 sample_seed: Schema.number().default(0).description("预览图种子。0 表示每次随机"),
                 sample_steps: Schema.number().min(1).max(300).default(25).description("推理步数"),
-                sample_sampler: Schema.union(["ddim", "pndm", "lms", "euler", "euler_a", "heun", "dpm_2", "dpm_2_a", "dpmsolver", "dpmsolver++", "dpmsingle", "k_lms", "k_euler", "k_euler_a", "k_dpm_2", "k_dpm_2_a"]).default("euler").description("预览采样器。当前 Anima 训练预览以内置 flow / euler 路径为主，不兼容选项会自动回退"),
+                sample_sampler: Schema.union(["euler", "k_euler"]).default("euler").description("预览采样器。当前 Anima 训练预览只支持 euler / k_euler；导入旧配置时会自动把不兼容值规范化"),
                 sample_scheduler: Schema.union(["simple"]).default("simple").description("Anima 预览调度器。当前训练预览支持 simple"),
                 sample_every_n_steps: Schema.number().min(1).description("每 N 步生成一次预览图"),
                 sample_every_n_epochs: Schema.number().default(2).description("每 N 个 epoch 生成一次预览图"),

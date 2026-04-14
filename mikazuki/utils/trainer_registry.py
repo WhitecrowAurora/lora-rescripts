@@ -8,9 +8,11 @@ from typing import Callable, Optional
 from mikazuki.utils.direct_trainers import (
     build_aesthetic_scorer_preflight_summary,
     build_aesthetic_scorer_start_warnings,
+    build_newbie_start_warnings,
     build_yolo_preflight_summary,
     build_yolo_start_warnings,
     validate_aesthetic_scorer_runtime_config,
+    validate_newbie_runtime_config,
     validate_yolo_runtime_config,
 )
 
@@ -29,6 +31,7 @@ class TrainerDefinition:
     train_type: str
     trainer_file: str
     direct_python: bool = False
+    direct_cli_args: tuple[str, ...] = ()
     direct_launch_summary: str | None = None
     skip_model_validation: bool = False
     config_validator: TrainerConfigValidator | None = None
@@ -59,6 +62,19 @@ TRAINER_REGISTRY = {
         config_validator=validate_aesthetic_scorer_runtime_config,
         start_warning_builder=build_aesthetic_scorer_start_warnings,
         preflight_builder=build_aesthetic_scorer_preflight_summary,
+        preflight_handles_resume=True,
+    ),
+    "newbie-lora": TrainerDefinition(
+        "newbie-lora",
+        "./scripts/stable/newbie_lora_train.py",
+        direct_python=True,
+        direct_cli_args=("--execute", "--phase", "full"),
+        direct_launch_summary=(
+            "Newbie 训练当前由独立 Python 训练器直接启动，默认执行 full phase："
+            "缺缓存时会先补 cache，再进入正式训练。"
+        ),
+        config_validator=validate_newbie_runtime_config,
+        start_warning_builder=build_newbie_start_warnings,
         preflight_handles_resume=True,
     ),
     "sd-dreambooth": TrainerDefinition("sd-dreambooth", "./scripts/stable/train_db.py"),

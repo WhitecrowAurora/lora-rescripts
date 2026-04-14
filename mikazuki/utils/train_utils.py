@@ -120,6 +120,7 @@ ALLOW_UNKNOWN_MODEL_TYPE_TRAINERS = {
     "hunyuan-image-lora",
     "anima-lora",
     "anima-finetune",
+    "newbie-lora",
 }
 
 YOLO_MODEL_EXTENSIONS = {".pt", ".pth", ".yaml", ".yml"}

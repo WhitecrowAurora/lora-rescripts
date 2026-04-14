@@ -366,6 +366,8 @@ def run_train(
             "--config_file",
             toml_path,
         ]
+        if trainer_definition and trainer_definition.direct_cli_args:
+            args.extend(list(trainer_definition.direct_cli_args))
     elif bool(config_data.get("enable_mixed_resolution_training")):
         runner_path = base_dir_path() / "mikazuki" / "staged_resolution_runner.py"
         args = build_staged_resolution_runner_args(

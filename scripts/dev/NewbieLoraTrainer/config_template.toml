@@ -1,0 +1,459 @@
+# =============================================================================
+# Newbie LoRA 训练器配置文件
+# =============================================================================
+# 本配置文件用于配置 Newbie (NextDiT_CLIP 3B) 架构的 LoRA 微调训练
+# 支持两种模型加载方式：
+#   1. Diffusers 格式（推荐）：自动检测并加载所有组件
+#   2. 分别指定：独立配置各个组件路径
+# =============================================================================
+
+[Model]
+# =============================================================================
+# 模型加载配置
+# =============================================================================
+
+# ---------- 方式1：Diffusers 格式（推荐）----------
+# 如果已使用 convert_newbie_to_diffusers.py 转换模型，直接指定输出目录
+# 脚本会自动检测 transformer/、text_encoder/、clip_model/、vae/ 组件
+base_model_path = "/path/to/newbie-diffusers"
+
+# ---------- 方式2：分别指定（备选）----------
+# 如果不使用 diffusers 格式，取消下面注释并填写正确路径
+# gemma_model_path = "google/gemma-3-4b-it"
+# clip_model_path = "jinaai/jina-clip-v2"
+# transformer_path = "/path/to/transformer.safetensors"
+# vae_path = "stabilityai/sdxl-vae"
+
+# ---------- 基础配置 ----------
+# 是否信任远程代码（Gemma 和 CLIP 模型需要）
+trust_remote_code = true
+
+# =============================================================================
+# 输出配置
+# =============================================================================
+# 训练输出目录
+output_dir = "./output"
+
+# 输出的 LoRA 模型名称（最终保存为 output_dir/output_name/）
+output_name = "newbie_lora"
+
+# =============================================================================
+# 数据配置
+# =============================================================================
+# 训练数据目录
+# 支持 kohya_ss 风格：目录名格式为 "重复次数_描述"
+# 例如：data/train/10_character/ 表示该目录下的图像重复10次
+# 每张图像需要有对应的 .txt 文件作为文本描述
+train_data_dir = "./data/train"
+
+# 训练图像分辨率
+# 建议值：512, 768, 1024, 1536
+# 注意：分辨率越高，显存占用越大，训练时间越长
+# 推荐：24GB GPU 使用 1024，16GB GPU 使用 768
+resolution = 1024
+
+# DataLoader 工作线程数
+# 用于多线程预加载数据，显著提升训练速度
+# 推荐值：4-8（根据CPU核心数）
+# 注意：设置为0会导致单线程加载，GPU会空等数据
+dataloader_num_workers = 4
+
+# 启用分辨率分桶（Resolution Bucketing）
+# true: 支持多种宽高比（1:1, 3:4, 4:3, 9:16, 16:9）
+# false: 所有图像都调整为正方形（resolution × resolution）
+enable_bucket = true
+
+# 启用数据缓存（推荐）
+# true: 预先缓存 VAE latents 和文本特征，大幅加速训练并节省显存
+# false: 每次实时编码（慢，但不占用磁盘空间）
+# 缓存文件保存在数据集同目录：图片.safetensors, 文本.txt.safetensors
+use_cache = true
+
+# Gemma3 系统提示词（仅用于 Gemma3，不影响 Jina CLIP）
+gemma3_prompt = "You are an assistant designed to generate high-quality anime images with the highest degree of image-text alignment based on textual prompts. <Prompt Start>"
+
+# =============================================================================
+# 训练超参数
+# =============================================================================
+# 批次大小（每次前向传播处理的图像数量）
+# 注意：batch_size = 1 适用于大多数 24GB GPU
+# 如果显存充足（40GB+），可以尝试 2 或 4
+train_batch_size = 1
+
+# 训练轮数（遍历整个数据集的次数）
+# 小数据集（<100 张）：100-200
+# 中等数据集（100-1000 张）：50-100
+# 大数据集（>1000 张）：20-50
+num_epochs = 50
+
+# Checkpoint 保存间隔（按 Epoch）
+# 每隔多少个 epoch 保存一次检查点
+# 设置为 0 表示每个 epoch 都保存（默认）
+# 例如：5 表示每 5 个 epoch 保存一次
+save_epochs_interval = 0
+
+# 学习率
+# 这是 LoRA 训练最重要的超参数之一
+# 推荐范围：5e-5 ~ 2e-4
+# 小数据集：5e-5
+# 中等数据集：1e-4（默认）
+# 大数据集：2e-4
+learning_rate = 1e-4
+
+# 学习率调度器（控制学习率在训练过程中的变化）
+# 可选值：
+#   - "constant": 恒定学习率，不变化
+#   - "cosine": 余弦退火，推荐，平滑下降
+#   - "linear": 线性衰减
+#   - "cosine_with_restarts": 带重启的余弦，用于长时间训练
+lr_scheduler = "cosine"
+
+# 学习率预热步数
+# 在训练初期，学习率从 0 线性增加到设定值
+# 有助于稳定训练初期
+# 推荐：100（小数据集可以用 50，大数据集可以用 200）
+lr_warmup_steps = 100
+
+# 梯度检查点（Gradient Checkpointing）
+# true: 启用（推荐），节省约 3GB 显存，略微降低速度
+# false: 禁用，速度快但显存占用大
+gradient_checkpointing = true
+
+# 混合精度训练
+# 可选值：
+#   - "no": 不使用混合精度（fp32），精度最高但显存占用最大
+#   - "fp16": Float16，兼容性好，适用于所有 GPU
+#   - "bf16": BFloat16，推荐，适用于 Ampere 及更新 GPU（RTX 30/40 系列，A100，H100）
+# 推荐：bf16（如果 GPU 支持）
+mixed_precision = "bf16"
+
+# =============================================================================
+# LoRA 配置
+# =============================================================================
+# LoRA rank（秩）
+# 控制 LoRA 适配器的大小和表达能力
+# 越大表达能力越强，但显存占用也越大
+# 推荐值：
+#   - 16: 适合小数据集或显存紧张（16GB GPU）
+#   - 32: 平衡选择，适合大多数场景（24GB GPU）
+#   - 64: 适合大数据集或高端 GPU（40GB+ GPU）
+lora_rank = 32
+
+# LoRA alpha（缩放因子）
+# 控制 LoRA 适配器的权重缩放
+# 建议设置为 rank 的 1-2 倍
+# 推荐：设置为与 rank 相同的值
+lora_alpha = 32
+
+# LoRA dropout
+# 在 LoRA 层中应用 dropout，防止过拟合
+# 范围：0.0 - 0.1
+# 推荐：0.05（如果数据集很小可以设为 0.0）
+lora_dropout = 0.05
+
+# =============================================================================
+# LoRA 目标模块配置
+# =============================================================================
+# 指定要注入 LoRA 的模块
+# 以下提供三种预设策略，根据显存和训练需求选择
+
+# ---------- 策略1：精简注入（16GB 显存）----------
+# 特点：
+#   - 最小显存占用（约 18-20 GB）
+#   - 训练速度最快
+#   - 适合快速测试或显存紧张的场景
+# 推荐配置：
+#   resolution = 768
+#   lora_rank = 16
+#   train_batch_size = 1
+#   num_epochs = 100
+#   learning_rate = 5e-5
+# lora_target_modules = [
+#     "attention.qkv",      # 注意力 Q/K/V 投影（核心）
+#     "attention.out",      # 注意力输出投影（核心）
+#     "time_text_embed.1",  # 时间和 CLIP 文本融合层
+# ]
+
+# ---------- 策略2：平衡注入（24GB 显存，默认推荐）----------
+# 特点：
+#   - 平衡效果和显存（约 20-23 GB）
+#   - 适合大多数训练场景
+#   - 训练效果好，性价比高
+# 推荐配置：
+#   resolution = 1024
+#   lora_rank = 32
+#   train_batch_size = 1
+#   num_epochs = 50
+#   learning_rate = 1e-4
+lora_target_modules = [
+    "attention.qkv",           # 注意力 Q/K/V 投影
+    "attention.out",           # 注意力输出投影
+    "feed_forward.w2",         # 前馈网络输出层
+    "time_text_embed.1",       # 时间和 CLIP 文本融合
+    "clip_text_pooled_proj.1", # CLIP 文本池化投影
+]
+
+# ---------- 策略3：全量注入（40GB+ 显存）----------
+# 特点：
+#   - 最佳训练效果（约 28-32 GB）
+#   - 最强表达能力
+#   - 适合高端 GPU 或专业项目
+# 推荐配置：
+#   resolution = 1024 (或 1536)
+#   lora_rank = 64
+#   train_batch_size = 2-4
+#   num_epochs = 30-50
+#   learning_rate = 2e-4
+# lora_target_modules = [
+#     "attention.qkv",           # 注意力 Q/K/V 投影
+#     "attention.out",           # 注意力输出投影
+#     "feed_forward.w1",         # 前馈网络 Gate 投影
+#     "feed_forward.w2",         # 前馈网络输出投影
+#     "feed_forward.w3",         # 前馈网络 Up 投影
+#     "time_text_embed.1",       # 时间和 CLIP 文本融合
+#     "clip_text_pooled_proj.1", # CLIP 文本池化投影
+#     "adaLN_modulation.1",      # 自适应层归一化调制
+#     "cap_embedder.1",          # Caption 特征嵌入
+# ]
+
+# =============================================================================
+# 优化器配置
+# =============================================================================
+[Optimization]
+
+# 优化器类型
+# 可选值：
+#   - "AdamW": 标准 AdamW 优化器
+#   - "AdamW8bit": 8-bit AdamW 优化器（推荐）
+# AdamW8bit 可以显著减少显存占用（约 1-2 GB），几乎不影响训练效果
+# 需要安装 bitsandbytes 库：pip install bitsandbytes>=0.42.0
+optimizer_type = "AdamW8bit"
+
+# 梯度裁剪范数（Gradient Clipping）
+# 防止梯度爆炸，提高训练稳定性
+# 推荐值：0.5 - 2.0
+# 如果训练过程中出现 loss 突然暴涨，可以尝试降低此值
+gradient_clip_norm = 1.0
+
+# FlashAttention-2 优化
+# 加速注意力计算，减少显存占用
+# 要求：PyTorch 2.0+ 和支持的 GPU
+# true: 启用（推荐，如果支持）
+# false: 使用 PyTorch 默认注意力实现
+use_flash_attention_2 = true
+
+# =============================================================================
+# 显存配置参考
+# =============================================================================
+# 根据你的 GPU 显存大小，选择合适的配置
+
+# ---------- 16GB GPU 配置（RTX 4060 Ti）----------
+# train_batch_size = 1
+# resolution = 768                 # 降低分辨率
+# gradient_checkpointing = true
+# mixed_precision = "bf16"
+# optimizer_type = "AdamW8bit"
+# lora_target_modules = 策略1（精简注入）
+# lora_rank = 16
+# num_epochs = 100
+# learning_rate = 5e-5
+# 预计显存占用：18-20 GB
+
+# ---------- 24GB GPU 配置（RTX 3090/4090，默认推荐）----------
+# train_batch_size = 1
+# resolution = 1024
+# gradient_checkpointing = true
+# mixed_precision = "bf16"
+# optimizer_type = "AdamW8bit"
+# lora_target_modules = 策略2（平衡注入）
+# lora_rank = 32
+# num_epochs = 50
+# learning_rate = 1e-4
+# 预计显存占用：20-23 GB
+
+# ---------- 40GB GPU 配置（A100）----------
+# train_batch_size = 2-4
+# resolution = 1024
+# gradient_checkpointing = true
+# mixed_precision = "bf16"
+# optimizer_type = "AdamW"        # 可使用标准优化器
+# lora_target_modules = 策略3（全量注入）
+# lora_rank = 64
+# num_epochs = 30-50
+# learning_rate = 2e-4
+# 预计显存占用：28-35 GB
+
+# ---------- 80GB GPU 配置（A100 80GB / H100）----------
+# train_batch_size = 4-8
+# resolution = 1536               # 可使用更高分辨率
+# gradient_checkpointing = false   # 可禁用梯度检查点
+# mixed_precision = "bf16"
+# optimizer_type = "AdamW"
+# lora_target_modules = 策略3（全量注入）
+# lora_rank = 64
+# num_epochs = 20-30
+# learning_rate = 2e-4
+# 预计显存占用：40-60 GB
+
+# =============================================================================
+# 数据集规模配置参考
+# =============================================================================
+# 根据数据集大小调整训练参数
+
+# ---------- 小数据集（< 100 张图像）----------
+# num_epochs = 100-200             # 需要更多轮数
+# learning_rate = 5e-5             # 使用较低学习率
+# lora_rank = 16                   # 较小 rank 防止过拟合
+# lr_warmup_steps = 50
+# 建议：使用数据增强，仔细观察 loss 曲线防止过拟合
+
+# ---------- 中等数据集（100-1000 张，当前默认）----------
+# num_epochs = 50-100
+# learning_rate = 1e-4
+# lora_rank = 32
+# lr_warmup_steps = 100
+# 建议：这是最常见的场景，当前默认配置即可
+
+# ---------- 大数据集（1000-5000 张）----------
+# num_epochs = 20-50
+# learning_rate = 1e-4 或 2e-4
+# lora_rank = 32-64
+# lr_warmup_steps = 150-200
+# 建议：可以适当增加 batch_size（如果显存足够）
+
+# ---------- 超大数据集（> 5000 张）----------
+# num_epochs = 10-30
+# learning_rate = 2e-4
+# lora_rank = 64
+# lr_warmup_steps = 200
+# train_batch_size = 2-4           # 增加批次大小
+# 建议：使用多 GPU 训练加速
+
+# =============================================================================
+# 训练技巧与建议
+# =============================================================================
+
+# 1. 首次训练建议：
+#    - 先用小数据集（10-20 张）快速验证配置是否正确
+#    - 观察 loss 是否正常下降
+#    - 检查 GPU 显存占用是否在合理范围内
+
+# 2. 学习率调优：
+#    - 从 1e-4 开始
+#    - 如果 loss 下降太慢，增加到 2e-4
+#    - 如果 loss 震荡或不收敛，降低到 5e-5
+#    - 使用 TensorBoard 观察 loss 曲线
+
+# 3. 防止过拟合：
+#    - 减小 lora_rank
+#    - 增加 lora_dropout
+#    - 减少训练轮数
+#    - 使用数据增强
+
+# 4. 提升训练效果：
+#    - 增加 lora_rank（在显存允许的范围内）
+#    - 使用更多训练数据
+#    - 提高图像质量和文本描述质量
+#    - 使用更高分辨率（如果显存足够）
+
+# 5. 加速训练：
+#    - 启用 use_flash_attention_2 = true
+#    - 使用 mixed_precision = "bf16"
+#    - 增加 train_batch_size（如果显存足够）
+#    - 使用多 GPU 训练
+
+# 6. 节省显存：
+#    - 启用 gradient_checkpointing = true
+#    - 使用 optimizer_type = "AdamW8bit"
+#    - 降低 resolution
+#    - 减小 lora_rank
+#    - 使用精简注入策略（策略1）
+
+# =============================================================================
+# 使用流程
+# =============================================================================
+
+# 1. 模型转换（首次必须）：
+#    python convert_newbie_to_diffusers.py \
+#      --checkpoint /path/to/consolidated.00-of-01.pth \
+#      --gemma3 google/gemma-3-4b-it \
+#      --jina jinaai/jina-clip-v2 \
+#      --output ./newbie-diffusers \
+#      --dtype bf16
+
+# 2. 准备训练数据：
+#    data/train/
+#    ├── 10_character/
+#    │   ├── img1.jpg
+#    │   ├── img1.txt
+#    │   └── ...
+#    └── 5_style/
+#        ├── img3.jpg
+#        ├── img3.txt
+#        └── ...
+
+# 3. 编辑配置文件：
+#    - 设置 base_model_path = "./newbie-diffusers"
+#    - 设置 train_data_dir = "./data/train"
+#    - 根据 GPU 显存选择合适的策略
+
+# 4. 开始训练：
+#    python train_newbie_lora.py --config_file config_template.toml
+
+# 5. 监控训练（可选）：
+#    tensorboard --logdir ./output
+
+# 6. 合并 LoRA：
+#    python merge_lora.py \
+#      --base_model_path ./newbie-diffusers \
+#      --lora_path ./output/newbie_lora \
+#      --output_path ./output/merged_model
+
+# =============================================================================
+# 常见问题
+# =============================================================================
+
+# Q: 显存不足 (OOM) 怎么办？
+# A: 依次尝试：
+#    1. 降低 train_batch_size = 1
+#    2. 启用 gradient_checkpointing = true
+#    3. 使用 optimizer_type = "AdamW8bit"
+#    4. 使用精简策略（策略1）
+#    5. 降低 resolution = 768 或 512
+#    6. 减小 lora_rank = 16
+
+# Q: 训练速度太慢？
+# A: 尝试：
+#    1. 启用 use_flash_attention_2 = true
+#    2. 使用 mixed_precision = "bf16"
+#    3. 增加 train_batch_size（如果显存足够）
+#    4. 检查是否正确使用 GPU（nvidia-smi 查看）
+
+# Q: Loss 不下降？
+# A: 检查：
+#    1. 学习率是否合适（尝试 5e-5 或 2e-4）
+#    2. 数据质量（图像和文本是否匹配）
+#    3. 训练轮数是否足够
+#    4. 是否使用了正确的模型路径
+
+# Q: 如何断点续训？
+# A: 直接重新运行训练命令，脚本会自动加载最新检查点
+
+# =============================================================================
+# 技术说明
+# =============================================================================
+
+# 模型架构：NextDiT_CLIP 3B
+# - 双文本编码器：Gemma3-4B-IT + Jina CLIP v2
+# - 训练方法：Rectified Flow (Velocity Prediction)
+# - LoRA 实现：PEFT 库
+# - 优化：梯度检查点、混合精度、8-bit 优化器
+
+# 训练流程：
+# 1. VAE 编码图像 → latents
+# 2. Gemma3 编码文本 → cap_feats (max_len=512)
+# 3. Jina CLIP 编码文本 → clip_text_pooled (max_len=2048)
+# 4. Rectified Flow 损失计算（velocity prediction）
+# 5. 仅更新 LoRA 适配器权重（~0.5-2% 的模型参数）
+
+# =============================================================================
