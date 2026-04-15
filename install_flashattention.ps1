@@ -23,7 +23,7 @@ $flashAttentionRuntimeDirName = $flashAttentionRuntimeInfo.DirectoryName
 $flashAttentionRuntimeDir = $flashAttentionRuntimeInfo.DirectoryPath
 $flashAttentionPython = Join-Path $flashAttentionRuntimeDir "python.exe"
 $flashAttentionMarker = Join-Path $flashAttentionRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "flash_attn")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard", "flash_attn")
 
 function Test-PipReady {
     param (

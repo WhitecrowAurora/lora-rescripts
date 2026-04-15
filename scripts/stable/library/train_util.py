@@ -392,8 +392,54 @@ class ImageInfo:
         self.resize_interpolation: Optional[str] = None
 
 
+def parse_tag_text_list(raw_text: Optional[str]) -> List[str]:
+    if raw_text is None:
+        return []
+    text = str(raw_text).strip()
+    if not text:
+        return []
+    parts = re.split(r"[\r\n,;]+", text)
+    return [part.strip() for part in parts if part and part.strip()]
+
+
+def normalize_tag_token(token: str) -> str:
+    return re.sub(r"\s+", " ", str(token).strip()).lower()
+
+
+def parse_bucket_resolution_list(raw_text: Optional[str], reso_steps: int) -> List[Tuple[int, int]]:
+    resos: List[Tuple[int, int]] = []
+    seen = set()
+    if raw_text is None:
+        return resos
+    for match in re.finditer(r"(\d+)\s*(?:x|X|,)\s*(\d+)", str(raw_text)):
+        width = int(match.group(1))
+        height = int(match.group(2))
+        if width < reso_steps or height < reso_steps:
+            continue
+        width = width - width % reso_steps
+        height = height - height % reso_steps
+        if width < reso_steps or height < reso_steps:
+            continue
+        reso = (width, height)
+        if reso in seen:
+            continue
+        seen.add(reso)
+        resos.append(reso)
+    resos.sort()
+    return resos
+
+
 class BucketManager:
-    def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps) -> None:
+    def __init__(
+        self,
+        no_upscale,
+        max_reso,
+        min_size,
+        max_size,
+        reso_steps,
+        bucket_selection_mode: str = "legacy",
+        bucket_custom_resos: Optional[str] = None,
+    ) -> None:
         if max_size is not None:
             if max_reso is not None:
                 assert max_size >= max_reso[0], "the max_size should be larger than the width of max_reso"
@@ -411,6 +457,13 @@ class BucketManager:
         self.min_size = min_size
         self.max_size = max_size
         self.reso_steps = reso_steps
+        self.bucket_selection_mode = str(bucket_selection_mode or "legacy").strip().lower()
+        if self.bucket_selection_mode not in {"legacy", "nearest_only", "custom_only"}:
+            logger.warning(
+                f"unknown bucket_selection_mode: {bucket_selection_mode}, fallback to legacy / 未知 bucket_selection_mode，已回退到 legacy: {bucket_selection_mode}"
+            )
+            self.bucket_selection_mode = "legacy"
+        self.bucket_custom_resos_raw = bucket_custom_resos
         runtime_bucket_policy = get_bucket_runtime_policy()
         self.runtime_resolution_mode = runtime_bucket_policy["mode"]
         self.runtime_target_edge = runtime_bucket_policy["target_edge"]
@@ -444,8 +497,43 @@ class BucketManager:
         self.reso_to_id = sorted_reso_to_id
 
     def make_buckets(self):
-        resos = model_util.make_bucket_resolutions(self.max_reso, self.min_size, self.max_size, self.reso_steps)
+        if self.bucket_selection_mode == "custom_only":
+            resos = parse_bucket_resolution_list(self.bucket_custom_resos_raw, self.reso_steps)
+            if not resos:
+                raise ValueError(
+                    "custom_only bucket mode requires valid bucket_custom_resos / custom_only 需要提供合法的 bucket_custom_resos"
+                )
+        else:
+            resos = model_util.make_bucket_resolutions(self.max_reso, self.min_size, self.max_size, self.reso_steps)
         self.set_predefined_resos(resos)
+
+    def make_buckets_by_nearest_image_aspect(self, image_sizes: Sequence[Tuple[int, int]]):
+        assert self.max_area is not None, "max_area is required for nearest_only bucket mode"
+        min_edge = self.reso_steps if self.min_size is None else max(self.reso_steps, self.min_size)
+        resos = set()
+        for image_width, image_height in image_sizes:
+            if image_width is None or image_height is None or image_width <= 0 or image_height <= 0:
+                continue
+            aspect_ratio = image_width / image_height
+            target_width = math.sqrt(self.max_area * aspect_ratio)
+            target_height = self.max_area / target_width
+
+            b_width_rounded = max(min_edge, self.round_to_steps(target_width))
+            b_height_in_wr = max(min_edge, self.round_to_steps(b_width_rounded / aspect_ratio))
+            ar_width_rounded = b_width_rounded / b_height_in_wr
+
+            b_height_rounded = max(min_edge, self.round_to_steps(target_height))
+            b_width_in_hr = max(min_edge, self.round_to_steps(b_height_rounded * aspect_ratio))
+            ar_height_rounded = b_width_in_hr / b_height_rounded
+
+            if abs(ar_width_rounded - aspect_ratio) <= abs(ar_height_rounded - aspect_ratio):
+                resos.add((b_width_rounded, b_height_in_wr))
+            else:
+                resos.add((b_width_in_hr, b_height_rounded))
+
+        if not resos and self.max_reso is not None:
+            resos.add(self.max_reso)
+        self.set_predefined_resos(sorted(resos))
 
     def set_predefined_resos(self, resos):
         # 規定サイズから選ぶ場合の解像度、aspect ratioの情報を格納しておく
@@ -467,7 +555,8 @@ class BucketManager:
 
     def select_bucket(self, image_width, image_height):
         aspect_ratio = image_width / image_height
-        if not self.no_upscale:
+        use_predefined_buckets = not self.no_upscale or self.bucket_selection_mode != "legacy"
+        if use_predefined_buckets:
             # 拡大および縮小を行う
             # 同じaspect ratioがあるかもしれないので（fine tuningで、no_upscale=Trueで前処理した場合）、解像度が同じものを優先する
             reso = (image_width, image_height)
@@ -632,6 +721,9 @@ class BaseSubset:
         caption_dropout_rate: float,
         caption_dropout_every_n_epochs: int,
         caption_tag_dropout_rate: float,
+        caption_tag_dropout_targets: Optional[str],
+        caption_tag_dropout_target_mode: str,
+        caption_tag_dropout_target_count: int,
         caption_prefix: Optional[str],
         caption_suffix: Optional[str],
         token_warmup_min: int,
@@ -657,6 +749,11 @@ class BaseSubset:
         self.caption_dropout_rate = caption_dropout_rate
         self.caption_dropout_every_n_epochs = caption_dropout_every_n_epochs
         self.caption_tag_dropout_rate = caption_tag_dropout_rate
+        self.caption_tag_dropout_targets = caption_tag_dropout_targets
+        self.caption_tag_dropout_target_mode = str(caption_tag_dropout_target_mode or "drop_all").strip().lower()
+        if self.caption_tag_dropout_target_mode not in {"drop_all", "random_n"}:
+            self.caption_tag_dropout_target_mode = "drop_all"
+        self.caption_tag_dropout_target_count = max(1, int(caption_tag_dropout_target_count or 1))
         self.caption_prefix = caption_prefix
         self.caption_suffix = caption_suffix
 
@@ -696,6 +793,9 @@ class DreamBoothSubset(BaseSubset):
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
+        caption_tag_dropout_targets,
+        caption_tag_dropout_target_mode,
+        caption_tag_dropout_target_count,
         caption_prefix,
         caption_suffix,
         token_warmup_min,
@@ -724,6 +824,9 @@ class DreamBoothSubset(BaseSubset):
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
+            caption_tag_dropout_targets,
+            caption_tag_dropout_target_mode,
+            caption_tag_dropout_target_count,
             caption_prefix,
             caption_suffix,
             token_warmup_min,
@@ -767,6 +870,9 @@ class FineTuningSubset(BaseSubset):
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
+        caption_tag_dropout_targets,
+        caption_tag_dropout_target_mode,
+        caption_tag_dropout_target_count,
         caption_prefix,
         caption_suffix,
         token_warmup_min,
@@ -795,6 +901,9 @@ class FineTuningSubset(BaseSubset):
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
+            caption_tag_dropout_targets,
+            caption_tag_dropout_target_mode,
+            caption_tag_dropout_target_count,
             caption_prefix,
             caption_suffix,
             token_warmup_min,
@@ -834,6 +943,9 @@ class ControlNetSubset(BaseSubset):
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
+        caption_tag_dropout_targets,
+        caption_tag_dropout_target_mode,
+        caption_tag_dropout_target_count,
         caption_prefix,
         caption_suffix,
         token_warmup_min,
@@ -862,6 +974,9 @@ class ControlNetSubset(BaseSubset):
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
+            caption_tag_dropout_targets,
+            caption_tag_dropout_target_mode,
+            caption_tag_dropout_target_count,
             caption_prefix,
             caption_suffix,
             token_warmup_min,
@@ -912,6 +1027,8 @@ class BaseDataset(torch.utils.data.Dataset):
         self.max_bucket_reso = None
         self.bucket_reso_steps = None
         self.bucket_no_upscale = None
+        self.bucket_selection_mode = "legacy"
+        self.bucket_custom_resos = None
         self.bucket_info = None  # for metadata
 
         self.current_epoch: int = 0  # インスタンスがepochごとに新しく作られるようなので外側から渡さないとダメ
@@ -1033,6 +1150,33 @@ class BaseDataset(torch.utils.data.Dataset):
     def add_replacement(self, str_from, str_to):
         self.replacements[str_from] = str_to
 
+    def apply_targeted_tag_dropout(self, subset: BaseSubset, caption: str) -> str:
+        target_tokens = parse_tag_text_list(getattr(subset, "caption_tag_dropout_targets", None))
+        if not target_tokens:
+            return caption
+
+        caption_separator = getattr(subset, "caption_separator", ",") or ","
+        tokens = [token.strip() for token in caption.split(caption_separator)]
+        normalized_targets = {normalize_tag_token(token) for token in target_tokens if normalize_tag_token(token)}
+        if not normalized_targets:
+            return caption
+
+        matched_indices = [
+            index for index, token in enumerate(tokens) if token and normalize_tag_token(token) in normalized_targets
+        ]
+        if not matched_indices:
+            return caption
+
+        mode = getattr(subset, "caption_tag_dropout_target_mode", "drop_all")
+        if mode == "random_n":
+            drop_count = min(len(matched_indices), max(1, int(getattr(subset, "caption_tag_dropout_target_count", 1) or 1)))
+            drop_indices = set(random.sample(matched_indices, drop_count))
+        else:
+            drop_indices = set(matched_indices)
+
+        kept_tokens = [token for index, token in enumerate(tokens) if token and index not in drop_indices]
+        return f"{caption_separator} ".join(kept_tokens)
+
     def process_caption(self, subset: BaseSubset, caption):
         structured_caption_payload = anima_caption_util.decode_special_caption_payload(caption)
         structured_caption_rendered = structured_caption_payload is not None
@@ -1044,12 +1188,6 @@ class BaseDataset(torch.utils.data.Dataset):
                 shuffle_environment=subset.shuffle_caption,
                 tag_dropout=subset.caption_tag_dropout_rate,
             )
-
-        # caption に prefix/suffix を付ける
-        if subset.caption_prefix:
-            caption = subset.caption_prefix + " " + caption
-        if subset.caption_suffix:
-            caption = caption + " " + subset.caption_suffix
 
         # dropoutの決定：tag dropがこのメソッド内にあるのでここで行うのが良い
         is_drop_out = subset.caption_dropout_rate > 0 and random.random() < subset.caption_dropout_rate
@@ -1089,6 +1227,8 @@ class BaseDataset(torch.utils.data.Dataset):
             else:
                 # if caption is multiline, use the first line
                 caption = caption.split("\n")[0]
+
+            caption = self.apply_targeted_tag_dropout(subset, caption)
 
             if not structured_caption_rendered and (
                 subset.shuffle_caption or subset.token_warmup_step > 0 or subset.caption_tag_dropout_rate > 0
@@ -1141,6 +1281,11 @@ class BaseDataset(torch.utils.data.Dataset):
                 flex_tokens = dropout_tags(flex_tokens)
 
                 caption = ", ".join(fixed_tokens + flex_tokens + fixed_suffix_tokens)
+
+            if subset.caption_prefix:
+                caption = subset.caption_prefix + " " + caption
+            if subset.caption_suffix:
+                caption = caption + " " + subset.caption_suffix
 
             # process secondary separator
             if subset.secondary_separator:
@@ -1253,12 +1398,22 @@ class BaseDataset(torch.utils.data.Dataset):
                     self.min_bucket_reso,
                     self.max_bucket_reso,
                     self.bucket_reso_steps,
+                    self.bucket_selection_mode,
+                    self.bucket_custom_resos,
                 )
-                if not self.bucket_no_upscale:
+                if self.bucket_selection_mode == "nearest_only":
+                    self.bucket_manager.make_buckets_by_nearest_image_aspect(
+                        [info.image_size for info in self.image_data.values()]
+                    )
+                elif not self.bucket_no_upscale or self.bucket_selection_mode == "custom_only":
                     self.bucket_manager.make_buckets()
                 else:
                     logger.warning(
                         "min_bucket_reso and max_bucket_reso are ignored if bucket_no_upscale is set, because bucket reso is defined by image size automatically / bucket_no_upscaleが指定された場合は、bucketの解像度は画像サイズから自動計算されるため、min_bucket_resoとmax_bucket_resoは無視されます / 当启用 bucket_no_upscale 时，bucket 分辨率会根据图像尺寸自动计算，因此 min_bucket_reso 和 max_bucket_reso 会被忽略"
+                    )
+                if self.bucket_selection_mode != "legacy" and self.bucket_no_upscale:
+                    logger.warning(
+                        f"bucket_no_upscale is ignored when bucket_selection_mode={self.bucket_selection_mode} / 当 bucket_selection_mode={self.bucket_selection_mode} 时，bucket_no_upscale 将被忽略"
                     )
 
             img_ar_errors = []
@@ -1335,6 +1490,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     or subset.shuffle_caption
                     or subset.token_warmup_step > 0
                     or subset.caption_tag_dropout_rate > 0
+                    or bool(parse_tag_text_list(getattr(subset, "caption_tag_dropout_targets", None)))
                 )
                 for subset in self.subsets
             ]
@@ -2161,6 +2317,8 @@ class DreamBoothDataset(BaseDataset):
         max_bucket_reso: int,
         bucket_reso_steps: int,
         bucket_no_upscale: bool,
+        bucket_selection_mode: str,
+        bucket_custom_resos: Optional[str],
         prior_loss_weight: float,
         debug_dataset: bool,
         validation_split: float,
@@ -2188,11 +2346,15 @@ class DreamBoothDataset(BaseDataset):
             self.max_bucket_reso = max_bucket_reso
             self.bucket_reso_steps = bucket_reso_steps
             self.bucket_no_upscale = bucket_no_upscale
+            self.bucket_selection_mode = str(bucket_selection_mode or "legacy").strip().lower()
+            self.bucket_custom_resos = bucket_custom_resos
         else:
             self.min_bucket_reso = None
             self.max_bucket_reso = None
             self.bucket_reso_steps = None  # この情報は使われない
             self.bucket_no_upscale = False
+            self.bucket_selection_mode = "legacy"
+            self.bucket_custom_resos = None
 
         def read_caption(img_path, subset: DreamBoothSubset):
             # captionの候補ファイル名を作る
@@ -2468,6 +2630,8 @@ class FineTuningDataset(BaseDataset):
         max_bucket_reso: int,
         bucket_reso_steps: int,
         bucket_no_upscale: bool,
+        bucket_selection_mode: str,
+        bucket_custom_resos: Optional[str],
         debug_dataset: bool,
         validation_seed: int,
         validation_split: float,
@@ -2488,11 +2652,15 @@ class FineTuningDataset(BaseDataset):
             self.max_bucket_reso = max_bucket_reso
             self.bucket_reso_steps = bucket_reso_steps
             self.bucket_no_upscale = bucket_no_upscale
+            self.bucket_selection_mode = str(bucket_selection_mode or "legacy").strip().lower()
+            self.bucket_custom_resos = bucket_custom_resos
         else:
             self.min_bucket_reso = None
             self.max_bucket_reso = None
             self.bucket_reso_steps = None  # この情報は使われない
             self.bucket_no_upscale = False
+            self.bucket_selection_mode = "legacy"
+            self.bucket_custom_resos = None
 
         self.num_train_images = 0
         self.num_reg_images = 0
@@ -2655,6 +2823,8 @@ class ControlNetDataset(BaseDataset):
         max_bucket_reso: int,
         bucket_reso_steps: int,
         bucket_no_upscale: bool,
+        bucket_selection_mode: str,
+        bucket_custom_resos: Optional[str],
         debug_dataset: bool,
         validation_split: float,
         validation_seed: Optional[int],
@@ -2688,6 +2858,9 @@ class ControlNetDataset(BaseDataset):
                 subset.caption_dropout_rate,
                 subset.caption_dropout_every_n_epochs,
                 subset.caption_tag_dropout_rate,
+                subset.caption_tag_dropout_targets,
+                subset.caption_tag_dropout_target_mode,
+                subset.caption_tag_dropout_target_count,
                 subset.caption_prefix,
                 subset.caption_suffix,
                 subset.token_warmup_min,
@@ -2707,6 +2880,8 @@ class ControlNetDataset(BaseDataset):
             max_bucket_reso,
             bucket_reso_steps,
             bucket_no_upscale,
+            bucket_selection_mode,
+            bucket_custom_resos,
             1.0,
             debug_dataset,
             validation_split,
@@ -5392,6 +5567,19 @@ def add_dataset_arguments(
         help="make bucket for each image without upscaling / 画像を拡大せずbucketを作成します",
     )
     parser.add_argument(
+        "--bucket_selection_mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "nearest_only", "custom_only"],
+        help="bucket selection strategy: legacy exhaustive buckets, nearest_only buckets derived from dataset aspect ratios, or custom_only explicit bucket list / 分桶策略",
+    )
+    parser.add_argument(
+        "--bucket_custom_resos",
+        type=str,
+        default=None,
+        help="custom bucket resolutions, one per line like 1024x1024 or 1024,1536. Used by custom_only / 自定义桶列表，仅 custom_only 使用",
+    )
+    parser.add_argument(
         "--resize_interpolation",
         type=str,
         default=None,
@@ -5440,6 +5628,25 @@ def add_dataset_arguments(
             type=float,
             default=0.0,
             help="Rate out dropout comma separated tokens(0.0~1.0) / カンマ区切りのタグをdropoutする割合",
+        )
+        parser.add_argument(
+            "--caption_tag_dropout_targets",
+            type=str,
+            default=None,
+            help="target tag list for focused tag dropping, supports comma/newline separated values / 指定 tag 列表，支持逗号或换行分隔",
+        )
+        parser.add_argument(
+            "--caption_tag_dropout_target_mode",
+            type=str,
+            default="drop_all",
+            choices=["drop_all", "random_n"],
+            help="focused tag drop mode: drop_all removes all matched tags, random_n drops N matched tags per caption / 指定 tag 的处理方式",
+        )
+        parser.add_argument(
+            "--caption_tag_dropout_target_count",
+            type=int,
+            default=1,
+            help="when focused tag drop mode is random_n, drop N matched tags per caption / random_n 模式下每条 caption 随机丢弃多少个命中 tag",
         )
 
     if support_dreambooth:
@@ -6309,6 +6516,13 @@ def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
     if args.caption_extention is not None:
         args.caption_extension = args.caption_extention
         args.caption_extention = None
+
+    if hasattr(args, "bucket_selection_mode") and args.bucket_selection_mode is not None:
+        args.bucket_selection_mode = str(args.bucket_selection_mode).strip().lower()
+    if hasattr(args, "caption_tag_dropout_target_mode") and args.caption_tag_dropout_target_mode is not None:
+        args.caption_tag_dropout_target_mode = str(args.caption_tag_dropout_target_mode).strip().lower()
+    if hasattr(args, "caption_tag_dropout_target_count"):
+        args.caption_tag_dropout_target_count = max(1, int(args.caption_tag_dropout_target_count or 1))
 
     # assert args.resolution is not None, f"resolution is required / resolution（解像度）を指定してください"
     if args.resolution is not None:

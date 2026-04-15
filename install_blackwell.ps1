@@ -25,7 +25,7 @@ $blackwellRuntimeDirName = $blackwellRuntimeInfo.DirectoryName
 $blackwellRuntimeDir = $blackwellRuntimeInfo.DirectoryPath
 $blackwellPython = Join-Path $blackwellRuntimeDir "python.exe"
 $blackwellMarker = Join-Path $blackwellRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard")
 
 function Test-PipReady {
     param (

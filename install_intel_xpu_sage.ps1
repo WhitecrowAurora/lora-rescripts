@@ -25,6 +25,7 @@ $mainRequiredModules = @(
     "diffusers",
     "lion_pytorch",
     "cv2",
+    "tensorboard",
     "sageattention"
 )
 $incompatiblePackages = @(

@@ -23,7 +23,8 @@ $mainRequiredModules = @(
     "transformers",
     "diffusers",
     "lion_pytorch",
-    "cv2"
+    "cv2",
+    "tensorboard"
 )
 $incompatiblePackages = @(
     "bitsandbytes",

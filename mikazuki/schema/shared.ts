@@ -182,6 +182,8 @@
                 max_bucket_reso: Schema.number().default(1024).description("arb 桶最大分辨率"),
                 bucket_reso_steps: Schema.number().default(64).description("arb 桶分辨率划分单位，SDXL 可以使用 32 (SDXL低于32时失效)"),
                 bucket_no_upscale: Schema.boolean().default(true).description("arb 桶不放大图片"),
+                bucket_selection_mode: Schema.union(["legacy", "nearest_only", "custom_only"]).default("legacy").description("分桶策略：`legacy` 为原始穷举桶，`nearest_only` 会根据训练集实际宽高比生成就近桶，`custom_only` 只允许命中你指定的桶列表"),
+                bucket_custom_resos: Schema.string().role('textarea').description("自定义桶列表。一行一个，支持 `1024x1024`、`1024,1536`。仅在 `custom_only` 时生效"),
             },
             CAPTION_SETTINGS: {
                 caption_extension: Schema.string().default(".txt").description("Tag 文件扩展名"),
@@ -193,6 +195,9 @@
                 caption_dropout_rate: Schema.number().min(0).step(0.01).description("丢弃全部标签的概率，对一个图片概率不使用 caption 或 class token"),
                 caption_dropout_every_n_epochs: Schema.number().min(0).max(100).step(1).description("每 N 个 epoch 丢弃全部标签"),
                 caption_tag_dropout_rate: Schema.number().min(0).step(0.01).description("按逗号分隔的标签来随机丢弃 tag 的概率"),
+                caption_tag_dropout_targets: Schema.string().role('textarea').description("指定要处理的 tag 列表。一行一个，也支持逗号分隔"),
+                caption_tag_dropout_target_mode: Schema.union(["drop_all", "random_n"]).default("drop_all").description("指定 tag 的处理方式：`drop_all` 为全部移除，`random_n` 为仅在命中的 tag 中随机丢弃 N 个"),
+                caption_tag_dropout_target_count: Schema.number().min(1).step(1).default(1).description("当指定 tag 处理方式为 `random_n` 时，每张图随机丢弃多少个命中 tag"),
             },
             PRECISION_CACHE_BATCH: {
                 mixed_precision: Schema.union(["no", "fp16", "bf16"]).default("bf16").description("训练混合精度, RTX30系列以后也可以指定`bf16`"),

@@ -5,6 +5,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -86,15 +87,82 @@ def ensure_project_local_main_python():
 
 
 @catch_exception
+def iter_tensorboard_python_candidates():
+    seen = set()
+
+    def register(candidate):
+        if candidate is None:
+            return
+        path = Path(candidate)
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        if not resolved.exists():
+            return
+        key = str(resolved).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        yield str(resolved)
+
+    yield from register(sys.executable)
+
+    for runtime_root in PROJECT_LOCAL_MAIN_PYTHON_ROOTS:
+        for candidate in (
+            runtime_root / "python.exe",
+            runtime_root / "Scripts" / "python.exe",
+            runtime_root / "bin" / "python",
+        ):
+            yield from register(candidate)
+
+    for candidate in DEDICATED_TAGEDITOR_PYTHONS:
+        yield from register(candidate)
+
+
+def python_supports_tensorboard(python_exe: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                python_exe,
+                "-c",
+                "import tensorboard.main",
+            ],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def resolve_tensorboard_python():
+    for python_exe in iter_tensorboard_python_candidates():
+        if python_supports_tensorboard(python_exe):
+            source = "current runtime" if Path(python_exe).resolve() == Path(sys.executable).resolve() else "fallback runtime"
+            return python_exe, source
+    return None, ""
+
+
 def run_tensorboard():
-    if importlib.util.find_spec("pkg_resources") is None:
-        log.warning("pkg_resources is not available, skipping tensorboard startup. Reinstall with setuptools<81 if you need tensorboard.")
+    tensorboard_python, runtime_source = resolve_tensorboard_python()
+    if not tensorboard_python:
+        log.warning(
+            "TensorBoard is not installed in the current runtime or any project-local fallback runtime. "
+            "Run install.ps1 or the dedicated runtime installer again if you need the built-in TensorBoard page."
+        )
         return
 
-    log.info("Starting tensorboard...")
-    subprocess.Popen(
+    tensorboard_log_dir = LOG_DIR / "launcher"
+    tensorboard_log_dir.mkdir(parents=True, exist_ok=True)
+    tensorboard_log_path = tensorboard_log_dir / f"tensorboard-{int(time.time())}.log"
+    log.info(f"Starting tensorboard with {tensorboard_python} ({runtime_source}). Log: {tensorboard_log_path}")
+    tb_log = open(tensorboard_log_path, "a", encoding="utf-8")
+    process = subprocess.Popen(
         [
-            sys.executable,
+            tensorboard_python,
             "-m",
             "tensorboard.main",
             "--logdir",
@@ -105,7 +173,11 @@ def run_tensorboard():
             str(args.tensorboard_port),
         ],
         cwd=REPO_ROOT,
+        stdout=tb_log,
+        stderr=subprocess.STDOUT,
     )
+    tb_log.close()
+    return process
 
 
 def update_tageditor_status(status: str, detail: str = "") -> None:

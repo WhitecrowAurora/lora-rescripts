@@ -22,7 +22,8 @@ $mainRequiredModules = @(
     "toml",
     "transformers",
     "diffusers",
-    "cv2"
+    "cv2",
+    "tensorboard"
 )
 
 $expectedRuntime = @{

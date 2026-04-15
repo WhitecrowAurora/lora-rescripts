@@ -70,6 +70,9 @@ class BaseSubsetParams:
     caption_dropout_rate: float = 0.0
     caption_dropout_every_n_epochs: int = 0
     caption_tag_dropout_rate: float = 0.0
+    caption_tag_dropout_targets: Optional[str] = None
+    caption_tag_dropout_target_mode: str = "drop_all"
+    caption_tag_dropout_target_count: int = 1
     token_warmup_min: int = 1
     token_warmup_step: float = 0
     custom_attributes: Optional[Dict[str, Any]] = None
@@ -117,6 +120,8 @@ class DreamBoothDatasetParams(BaseDatasetParams):
     max_bucket_reso: int = 1024
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
+    bucket_selection_mode: str = "legacy"
+    bucket_custom_resos: Optional[str] = None
     prior_loss_weight: float = 1.0
     
 @dataclass
@@ -127,6 +132,8 @@ class FineTuningDatasetParams(BaseDatasetParams):
     max_bucket_reso: int = 1024
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
+    bucket_selection_mode: str = "legacy"
+    bucket_custom_resos: Optional[str] = None
 
 
 @dataclass
@@ -137,6 +144,8 @@ class ControlNetDatasetParams(BaseDatasetParams):
     max_bucket_reso: int = 1024
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
+    bucket_selection_mode: str = "legacy"
+    bucket_custom_resos: Optional[str] = None
 
 
 @dataclass
@@ -204,6 +213,9 @@ class ConfigSanitizer:
         "caption_dropout_every_n_epochs": int,
         "caption_dropout_rate": Any(float, int),
         "caption_tag_dropout_rate": Any(float, int),
+        "caption_tag_dropout_targets": Any(str, None),
+        "caption_tag_dropout_target_mode": str,
+        "caption_tag_dropout_target_count": int,
     }
     # DB means DreamBooth
     DB_SUBSET_ASCENDABLE_SCHEMA = {
@@ -235,6 +247,8 @@ class ConfigSanitizer:
     DATASET_ASCENDABLE_SCHEMA = {
         "batch_size": int,
         "bucket_no_upscale": bool,
+        "bucket_selection_mode": str,
+        "bucket_custom_resos": Any(str, None),
         "bucket_reso_steps": int,
         "enable_bucket": bool,
         "max_bucket_reso": int,
@@ -543,6 +557,8 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                   max_bucket_reso: {dataset.max_bucket_reso}
                   bucket_reso_steps: {dataset.bucket_reso_steps}
                   bucket_no_upscale: {dataset.bucket_no_upscale}
+                  bucket_selection_mode: {getattr(dataset, "bucket_selection_mode", "legacy")}
+                  bucket_custom_resos: {getattr(dataset, "bucket_custom_resos", None)}
                 \n"""), "  ")
             else:
                 info += "\n"
@@ -558,6 +574,9 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                     caption_dropout_rate: {subset.caption_dropout_rate}
                     caption_dropout_every_n_epochs: {subset.caption_dropout_every_n_epochs}
                     caption_tag_dropout_rate: {subset.caption_tag_dropout_rate}
+                    caption_tag_dropout_targets: {getattr(subset, "caption_tag_dropout_targets", None)}
+                    caption_tag_dropout_target_mode: {getattr(subset, "caption_tag_dropout_target_mode", "drop_all")}
+                    caption_tag_dropout_target_count: {getattr(subset, "caption_tag_dropout_target_count", 1)}
                     caption_prefix: {subset.caption_prefix}
                     caption_suffix: {subset.caption_suffix}
                     color_aug: {subset.color_aug}

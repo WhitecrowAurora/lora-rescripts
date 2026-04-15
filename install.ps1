@@ -22,7 +22,7 @@ $venvRuntimeDir = $venvRuntimeInfo.DirectoryPath
 $venvPython = Join-Path $venvRuntimeDir "Scripts\python.exe"
 $venvMarker = Join-Path $venvRuntimeDir ".deps_installed"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard")
 
 function Test-PipReady {
     param (
