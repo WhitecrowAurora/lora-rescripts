@@ -482,6 +482,30 @@ def _run_single_candidate_probe(
     }
 
 
+def _can_fallback_to_min_edge(probe_outcome: Optional[dict], dedicated_limit_ratio: float) -> bool:
+    if not isinstance(probe_outcome, dict):
+        return False
+    if probe_outcome.get("fatal_error"):
+        return False
+    if probe_outcome.get("memory_failure_in_log"):
+        return False
+
+    unsafe_reasons = [str(item) for item in (probe_outcome.get("unsafe_reasons") or []) if str(item).strip()]
+    if not unsafe_reasons:
+        return False
+    if any("预探测超时" in reason for reason in unsafe_reasons):
+        return False
+
+    try:
+        dedicated_ratio = float(probe_outcome.get("dedicated_ratio", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if dedicated_ratio > float(dedicated_limit_ratio):
+        return False
+
+    return all("共享显存峰值" in reason for reason in unsafe_reasons)
+
+
 def maybe_run_sdxl_low_vram_auto_resolution_probe(
     *,
     config_data: dict,
@@ -613,6 +637,29 @@ def maybe_run_sdxl_low_vram_auto_resolution_probe(
         break
 
     if selected_edge is None:
+        fallback_edge = int(candidate_edges[-1]) if candidate_edges else int(current_target_edge)
+        if _can_fallback_to_min_edge(last_probe_outcome, dedicated_limit_ratio):
+            config_data["sdxl_bucket_target_edge"] = fallback_edge
+            log.warning(
+                "[low-vram-probe] no fully safe edge was found, but the minimum edge %s stayed within the dedicated VRAM limit. "
+                "Windows shared memory telemetry still reached %s, so the run will continue with a best-effort fallback. "
+                "Expect slower training and consider disabling preview or lowering batch / rank further. probe_dir=%s",
+                int(fallback_edge),
+                _format_gib(int(last_probe_outcome.get("peak_shared_bytes", 0) or 0)),
+                probe_root,
+            )
+            return {
+                "status": "fallback",
+                "message": (
+                    f"no fully safe edge found; continuing with minimum edge {fallback_edge} "
+                    "because dedicated VRAM remained within threshold"
+                ),
+                "selected_edge": int(fallback_edge),
+                "changed": int(fallback_edge) != int(current_target_edge),
+                "probe_root": str(probe_root),
+                "log_path": str(last_probe_outcome.get("log_path") or ""),
+            }
+
         failure_message = (
             f"自动分辨率探测未能找到安全边长。即使降到 512 仍会触发共享显存或超过 {dedicated_limit_ratio * 100:.0f}% 专用显存阈值，"
             "建议手动降低原始训练分辨率、batch size 或 rank。"

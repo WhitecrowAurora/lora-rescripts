@@ -159,6 +159,11 @@ def main() -> None:
         )
         for failure in cache_summary.failure_messages[:20]:
             print(f'[newbie-cache][error] {failure}')
+        if cache_summary.failed_records > 0 and config.newbie_force_cache_only:
+            raise RuntimeError(
+                'Newbie cache phase did not complete successfully while force_cache_only is enabled. '
+                'Please resolve the cache errors above before entering the train phase.'
+            )
         if args.phase == 'cache':
             return
 
@@ -181,3 +186,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+

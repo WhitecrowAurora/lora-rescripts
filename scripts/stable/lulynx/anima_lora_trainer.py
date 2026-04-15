@@ -1340,9 +1340,14 @@ class AnimaNetworkTrainer:
                 finally:
                     anima_step_profiler.end_micro_step()
 
+                keys_scaled, mean_norm, maximum_norm = None, None, None
+                max_mean_logs = {}
                 if args.scale_weight_norms:
                     with anima_step_profiler.step_section("optimizer_step"):
-                        accelerator.unwrap_model(network).apply_max_norm_regularization(args.scale_weight_norms, accelerator.device)
+                        keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
+                            args.scale_weight_norms, accelerator.device
+                        )
+                    max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
 
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
@@ -1402,10 +1407,15 @@ class AnimaNetworkTrainer:
                     safeguard.record_loss(current_loss)
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 logs = {"avr_loss": loss_recorder.moving_average}
-                progress_bar.set_postfix(**logs, refresh=False)
+                progress_bar.set_postfix(**{**max_mean_logs, **logs}, refresh=False)
 
                 if len(accelerator.trackers) > 0:
                     step_logs = {"loss": current_loss}
+                    if keys_scaled is not None:
+                        step_logs["max_norm/keys_scaled"] = keys_scaled
+                        step_logs["max_norm/max_key_norm"] = maximum_norm
+                    if mean_norm is not None:
+                        step_logs["norm/avg_key_norm"] = mean_norm
                     train_util.append_lr_to_logs_with_names(step_logs, lr_scheduler, args.optimizer_type, lr_descriptions or [])
                     if lulynx_step_logs:
                         step_logs.update(lulynx_step_logs)

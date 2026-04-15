@@ -405,6 +405,7 @@ def run_train(
         launch_args_builder=build_launch_args_for_toml,
     )
     if low_vram_probe_result.get("status") == "failed":
+        log.error(f"[low-vram-probe] {str(low_vram_probe_result.get('message') or 'SDXL low-VRAM auto probe failed')}")
         return APIResponse(
             status="error",
             message=str(low_vram_probe_result.get("message") or "SDXL low-VRAM auto probe failed"),

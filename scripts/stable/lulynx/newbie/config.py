@@ -203,6 +203,7 @@ class NewbieRuntimeConfig:
     newbie_clip_max_token_length: int
     newbie_caption_length_bucket_size: int
     blocks_to_swap: int
+    newbie_auto_swap_release: bool
     cpu_offload_checkpointing: bool
     pytorch_cuda_expandable_segments: bool
     newbie_safe_fallback: bool
@@ -489,6 +490,7 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
             minimum=1,
         ),
         blocks_to_swap=_parse_int(_lookup_config_value(raw, "blocks_to_swap", default=0), 0, minimum=0),
+        newbie_auto_swap_release=_parse_bool(_lookup_config_value(raw, "newbie_auto_swap_release", default=False), False),
         cpu_offload_checkpointing=_parse_bool(_lookup_config_value(raw, "cpu_offload_checkpointing", default=False), False),
         pytorch_cuda_expandable_segments=_parse_bool(
             _lookup_config_value(raw, "pytorch_cuda_expandable_segments", default=True),

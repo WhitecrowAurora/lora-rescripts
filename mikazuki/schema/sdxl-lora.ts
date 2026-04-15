@@ -55,7 +55,12 @@ Schema.intersect([
                 sdxl_low_vram_bucket_reso_steps: Schema.number().default(32).description("低显存模式 bucket 步长。推荐 32，可改为 64"),
                 sdxl_low_vram_two_phase_cache: Schema.boolean().default(true).description("启用两阶段缓存流程。会优先把缓存阶段与正式训练阶段解耦"),
                 sdxl_low_vram_component_cpu_residency: Schema.boolean().default(true).description("启用非训练组件 CPU 驻留。VAE / 文本编码器会尽量只在需要时临时上 GPU"),
-                sdxl_low_vram_fixed_block_swap: Schema.boolean().default(true).description("启用固定档 U-Net block swap。会把 SDXL U-Net 的 input/middle/output blocks 分段搬运到 GPU 执行，以换取更低显存占用"),
+                sdxl_low_vram_fixed_block_swap: Schema.boolean().default(true).description("启用 SDXL U-Net block swap。下面的子项可决定具体交换哪些区域、是否在反向后卸载，以及显存水线目标"),
+                sdxl_low_vram_swap_input_blocks: Schema.boolean().default(false).description("交换 U-Net input blocks。显存收益较大，但通常会更慢"),
+                sdxl_low_vram_swap_middle_block: Schema.boolean().default(true).description("交换 U-Net middle block。通常是比较划算的一档"),
+                sdxl_low_vram_swap_output_blocks: Schema.boolean().default(true).description("交换 U-Net output blocks。通常建议优先尝试"),
+                sdxl_low_vram_swap_offload_after_backward: Schema.boolean().default(true).description("反向传播结束后把已交换 block 立即移回 CPU。更省显存，但通常更慢"),
+                sdxl_low_vram_swap_vram_threshold: Schema.number().min(0).max(99).step(1).default(0).description("block swap 的软显存水线（百分比）。`0` 表示始终尽快卸载；高于 0 时，低于该值会尽量少卸载，超过后会更积极地把已交换 block 移回 CPU"),
                 sdxl_low_vram_preview_policy: Schema.union(["every_2_epochs", "every_4_epochs", "disable"]).default("every_4_epochs").description("低显存模式预览策略。默认每 4 个 epoch 生成一次，也可改成每 2 个 epoch 或完全关闭"),
                 sdxl_low_vram_auto_protection: Schema.boolean().default(true).description("启用 OOM 自动保护。预览 OOM 时会先降频，再自动关闭预览；训练阶段会给出更明确的低显存建议"),
                 sdxl_low_vram_auto_resolution_probe: Schema.boolean().default(true).description("启动前自动分辨率探测。会先用 3 步预跑检查专用显存与共享显存占用，必要时按 64 为单位自动下调目标边长"),
@@ -148,3 +153,4 @@ Schema.intersect([
 
     SHARED_SCHEMAS.DISTRIBUTED_TRAINING
 ]);
+

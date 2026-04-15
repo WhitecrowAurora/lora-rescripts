@@ -8,6 +8,7 @@ from time import perf_counter
 import torch
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from library.device_utils import clean_memory_on_device
 
@@ -181,6 +182,7 @@ class NewbieCachedTrainer:
                 device=accelerator.device,
                 current_blocks=int(getattr(unwrapped_model, 'blocks_to_swap', 0) or 0),
                 max_blocks=get_newbie_max_swappable_blocks(unwrapped_model),
+                allow_auto_release=bool(getattr(self.config, 'newbie_auto_swap_release', False)),
             )
 
         global_step = start_step
@@ -198,6 +200,20 @@ class NewbieCachedTrainer:
                     f"[newbie-train] resume detected | start_step={start_step} | "
                     f"start_epoch={start_epoch + 1} | skip_micro_batches={resume_micro_step}"
                 )
+
+        progress_bar = None
+        if accelerator.is_main_process:
+            print(
+                f"[newbie-train] entering optimization loop | total_steps={max_train_steps} | "
+                f"steps_per_epoch={optimizer_steps_per_epoch} | epochs={max_train_epochs}"
+            )
+            progress_bar = tqdm(
+                total=max_train_steps,
+                initial=start_step,
+                desc='newbie-steps',
+                dynamic_ncols=True,
+                leave=True,
+            )
 
         for epoch in range(start_epoch, max_train_epochs):
             if hasattr(sampler, 'set_epoch'):
@@ -289,6 +305,14 @@ class NewbieCachedTrainer:
                         },
                         step=global_step,
                     )
+                    if progress_bar is not None:
+                        current_lr = scheduler.get_last_lr()[0]
+                        progress_bar.update(1)
+                        progress_bar.set_postfix(
+                            loss=f"{last_loss:.4f}",
+                            lr=f"{float(current_lr):.2e}",
+                            epoch=f"{epoch + 1}/{max_train_epochs}",
+                        )
                     if adaptive_controller is not None:
                         adaptive_note = adaptive_controller.on_optimizer_step(
                             step=global_step,
@@ -314,6 +338,9 @@ class NewbieCachedTrainer:
             if global_step >= max_train_steps:
                 break
 
+        if progress_bar is not None:
+            progress_bar.close()
+
         accelerator.wait_for_everyone()
         final_adapter_path = Path(self.config.output_dir) / self.config.output_name
         if accelerator.is_main_process:
@@ -335,5 +362,6 @@ class NewbieCachedTrainer:
             total_params=total_params,
             saved_adapter_path=str(final_adapter_path),
         )
+
 
 

@@ -77,10 +77,44 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
     def should_use_component_cpu_residency(self, args) -> bool:
         return parse_boolish(getattr(args, "sdxl_component_cpu_residency", False))
 
+    def _get_fixed_block_swap_config(self, args) -> dict:
+        swap_input_blocks = parse_boolish(getattr(args, "sdxl_fixed_block_swap_input_blocks", True))
+        swap_middle_block = parse_boolish(getattr(args, "sdxl_fixed_block_swap_middle_block", True))
+        swap_output_blocks = parse_boolish(getattr(args, "sdxl_fixed_block_swap_output_blocks", True))
+        offload_after_backward = parse_boolish(getattr(args, "sdxl_fixed_block_swap_offload_after_backward", True))
+        raw_threshold = getattr(args, "sdxl_fixed_block_swap_vram_threshold_ratio", 0.0)
+        try:
+            threshold_ratio = float(raw_threshold)
+        except (TypeError, ValueError):
+            threshold_ratio = 0.0
+        if threshold_ratio > 1.0:
+            threshold_ratio /= 100.0
+        threshold_ratio = min(0.99, max(0.0, threshold_ratio))
+        return {
+            "enabled": parse_boolish(getattr(args, "sdxl_fixed_block_swap", False)),
+            "swap_input_blocks": swap_input_blocks,
+            "swap_middle_block": swap_middle_block,
+            "swap_output_blocks": swap_output_blocks,
+            "offload_after_backward": offload_after_backward,
+            "vram_threshold_ratio": threshold_ratio,
+        }
+
     def should_use_fixed_block_swap(self, args) -> bool:
-        return parse_boolish(getattr(args, "sdxl_fixed_block_swap", False))
+        config = self._get_fixed_block_swap_config(args)
+        return bool(config["enabled"] and (config["swap_input_blocks"] or config["swap_middle_block"] or config["swap_output_blocks"]))
+
+    def _format_fixed_block_swap_scope(self, config: dict) -> str:
+        scopes = []
+        if config.get("swap_input_blocks"):
+            scopes.append("input")
+        if config.get("swap_middle_block"):
+            scopes.append("middle")
+        if config.get("swap_output_blocks"):
+            scopes.append("output")
+        return "/".join(scopes) if scopes else "none"
 
     def configure_model_runtime(self, args, accelerator, network, text_encoders, unet):
+        config = self._get_fixed_block_swap_config(args)
         if not self.should_use_fixed_block_swap(args):
             return
         if accelerator.num_processes > 1 or parse_boolish(getattr(args, "deepspeed", False)):
@@ -102,19 +136,37 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             args.sdxl_fixed_block_swap = False
             return
 
-        target_unet.enable_fixed_block_swap(accelerator.device)
+        target_unet.enable_fixed_block_swap(
+            accelerator.device,
+            swap_input_blocks=config["swap_input_blocks"],
+            swap_middle_block=config["swap_middle_block"],
+            swap_output_blocks=config["swap_output_blocks"],
+            offload_after_backward=config["offload_after_backward"],
+            vram_threshold_ratio=config["vram_threshold_ratio"],
+        )
         clean_memory_on_device(accelerator.device)
         accelerator.print(
-            "SDXL fixed block swap enabled. U-Net input/middle/output blocks will be staged onto GPU per block. "
-            "/ 已启用 SDXL 固定档 block swap，U-Net 的 input/middle/output blocks 将按块分段搬运到 GPU。"
+            "SDXL fixed block swap enabled. "
+            f"scope={self._format_fixed_block_swap_scope(config)} | "
+            f"offload_after_backward={'on' if config['offload_after_backward'] else 'off'} | "
+            f"vram_threshold={config['vram_threshold_ratio'] * 100:.0f}% "
+            "/ 已启用 SDXL 固定档 block swap，并按用户配置的 U-Net 范围执行分段搬运。"
         )
 
     def on_step_start(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train: bool = True):
+        config = self._get_fixed_block_swap_config(args)
         if not is_train or not self.should_use_fixed_block_swap(args):
             return
         target_unet = accelerator.unwrap_model(unet)
         if hasattr(target_unet, "enable_fixed_block_swap"):
-            target_unet.enable_fixed_block_swap(accelerator.device)
+            target_unet.enable_fixed_block_swap(
+                accelerator.device,
+                swap_input_blocks=config["swap_input_blocks"],
+                swap_middle_block=config["swap_middle_block"],
+                swap_output_blocks=config["swap_output_blocks"],
+                offload_after_backward=config["offload_after_backward"],
+                vram_threshold_ratio=config["vram_threshold_ratio"],
+            )
 
     def assert_extra_args(
         self,
@@ -504,3 +556,4 @@ if __name__ == "__main__":
 
     trainer = SdxlNetworkTrainer()
     trainer.train(args)
+

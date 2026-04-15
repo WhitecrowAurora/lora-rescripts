@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,6 +68,7 @@ def save_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, 
     checkpoint_dir = Path(output_dir) / 'checkpoints'
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f'checkpoint_{step}.pt'
+    temp_checkpoint_path = checkpoint_dir / f'checkpoint_{step}.pt.tmp'
     adapter_type = getattr(model, '_adapter_type', 'lora')
 
     if adapter_type == 'lyco_lokr':
@@ -84,7 +86,8 @@ def save_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, 
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
     }
-    torch.save(payload, checkpoint_path)
+    torch.save(payload, temp_checkpoint_path)
+    os.replace(temp_checkpoint_path, checkpoint_path)
     return checkpoint_path
 
 
@@ -126,23 +129,49 @@ def load_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, 
     if not checkpoints:
         return 0
 
-    checkpoint = torch.load(checkpoints[0], map_location='cpu')
-    adapter_type = checkpoint.get('adapter_type', getattr(model, '_adapter_type', 'lora'))
-    adapter_state = checkpoint.get('adapter_state_dict')
-    if adapter_state is None:
-        return 0
+    explicit_file_resume = False
+    if resume_path is not None:
+        explicit_file_resume = Path(resume_path).is_file()
 
-    if adapter_type == 'lyco_lokr':
-        lyco_net = getattr(model, '_lycoris_network', None)
-        if lyco_net is None:
-            raise RuntimeError('LyCORIS network not initialized')
-        lyco_net.load_state_dict(adapter_state)
-    else:
-        set_peft_model_state_dict(model, adapter_state)
+    load_errors: list[tuple[Path, Exception]] = []
+    for checkpoint_path in checkpoints:
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            adapter_type = checkpoint.get('adapter_type', getattr(model, '_adapter_type', 'lora'))
+            adapter_state = checkpoint.get('adapter_state_dict')
+            if adapter_state is None:
+                raise RuntimeError('missing adapter_state_dict')
 
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    return int(checkpoint.get('step', 0))
+            if adapter_type == 'lyco_lokr':
+                lyco_net = getattr(model, '_lycoris_network', None)
+                if lyco_net is None:
+                    raise RuntimeError('LyCORIS network not initialized')
+                lyco_net.load_state_dict(adapter_state)
+            else:
+                set_peft_model_state_dict(model, adapter_state)
+
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+            if load_errors:
+                skipped_paths = ', '.join(str(path) for path, _ in load_errors)
+                print(
+                    f'[newbie-train] skipped invalid checkpoint(s) before resume: {skipped_paths}. '
+                    f'Resuming from {checkpoint_path}.'
+                )
+            return int(checkpoint.get('step', 0))
+        except (RuntimeError, EOFError, OSError, KeyError, ValueError) as exc:
+            load_errors.append((checkpoint_path, exc))
+            continue
+
+    if explicit_file_resume and load_errors:
+        failed_path, failed_exc = load_errors[0]
+        raise RuntimeError(f'Newbie resume checkpoint is invalid or corrupted: {failed_path} ({failed_exc})') from failed_exc
+
+    if load_errors:
+        skipped_paths = ', '.join(str(path) for path, _ in load_errors)
+        print(f'[newbie-train] skipped invalid checkpoint(s) and started from scratch: {skipped_paths}.')
+    return 0
 
 
 def save_newbie_adapter(output_dir: str | Path, output_name: str, model, step: int | None = None) -> Path:

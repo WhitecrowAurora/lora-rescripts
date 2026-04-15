@@ -56,6 +56,8 @@ class NewbieTrainer:
             warnings.append("当前配置启用了训练中预览；Newbie 新分支第一阶段建议保持关闭。")
         if self.config.blocks_to_swap > 0:
             notes.append(f"blocks_to_swap={self.config.blocks_to_swap}，后续正式训练实现会优先按安全模式接入该省显存策略。")
+            if self.config.newbie_auto_swap_release:
+                notes.append("已启用自动 swap 释放：显存占用持续偏低时会逐步减少 blocks_to_swap。")
         if self.config.cpu_offload_checkpointing:
             notes.append("已启用 cpu_offload_checkpointing 规划标记。")
         if self.config.pytorch_cuda_expandable_segments:

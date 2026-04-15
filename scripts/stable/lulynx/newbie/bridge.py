@@ -78,6 +78,71 @@ def _call_hf_from_pretrained(factory, *args, low_cpu_mem_usage: bool = False, **
     return factory(*args, **kwargs)
 
 
+def _normalize_attn_implementation(value):
+    normalized = str(value or '').strip().lower()
+    if normalized in {'flash_attention_2', 'flash_attention', 'flash', 'fa2'}:
+        return 'eager'
+    return value
+
+
+def _disable_flash_attention_flags(target, _visited: set[int] | None = None) -> None:
+    if target is None:
+        return
+
+    if _visited is None:
+        _visited = set()
+
+    try:
+        target_id = id(target)
+    except Exception:
+        target_id = None
+    if target_id is not None:
+        if target_id in _visited:
+            return
+        _visited.add(target_id)
+
+    if isinstance(target, dict):
+        if 'use_flash_attn' in target:
+            target['use_flash_attn'] = False
+        if 'use_text_flash_attn' in target:
+            target['use_text_flash_attn'] = False
+        if 'attn_implementation' in target:
+            target['attn_implementation'] = _normalize_attn_implementation(target.get('attn_implementation'))
+        for value in list(target.values()):
+            _disable_flash_attention_flags(value, _visited)
+        return
+
+    if isinstance(target, (list, tuple)):
+        for value in target:
+            _disable_flash_attention_flags(value, _visited)
+        return
+
+    for attr_name in ('use_flash_attn', 'use_text_flash_attn'):
+        if hasattr(target, attr_name):
+            try:
+                setattr(target, attr_name, False)
+            except Exception:
+                pass
+
+    if hasattr(target, 'attn_implementation'):
+        try:
+            setattr(
+                target,
+                'attn_implementation',
+                _normalize_attn_implementation(getattr(target, 'attn_implementation')),
+            )
+        except Exception:
+            pass
+
+    for attr_name in ('text_config', 'vision_config', 'hf_model_config_kwargs'):
+        if hasattr(target, attr_name):
+            try:
+                value = getattr(target, attr_name)
+            except Exception:
+                continue
+            _disable_flash_attention_flags(value, _visited)
+
+
 def _iter_exception_chain(exc: Exception):
     seen: set[int] = set()
     current: Exception | None = exc
@@ -158,6 +223,7 @@ def _instantiate_auto_model_from_config_source(
     def _load():
         dtype = resolve_dtype(mixed_precision)
         config = AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code, local_files_only=True)
+        _disable_flash_attention_flags(config)
         model = AutoModel.from_config(config, trust_remote_code=trust_remote_code)
         if dtype != torch.float32:
             model = model.to(dtype=dtype)
@@ -170,10 +236,12 @@ def _instantiate_auto_model_from_config_source(
 
 
 def _load_auto_config_with_dynamic_module_recovery(config_source: str | Path, *, trust_remote_code: bool):
-    return _call_with_dynamic_module_recovery(
+    config = _call_with_dynamic_module_recovery(
         lambda: AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code, local_files_only=True),
         context_label=f'AutoConfig.from_pretrained({config_source})',
     )
+    _disable_flash_attention_flags(config)
+    return config
 
 
 def _load_auto_model_from_local_component(
@@ -312,11 +380,16 @@ def load_newbie_text_encoder_and_tokenizer(base_model_path: str | Path, *, mixed
     base_path = Path(base_model_path).resolve()
     text_encoder_path = base_path / 'text_encoder'
     dtype = resolve_dtype(mixed_precision)
+    text_encoder_config = _load_auto_config_with_dynamic_module_recovery(
+        text_encoder_path,
+        trust_remote_code=trust_remote_code,
+    )
     try:
         text_encoder = _call_with_dynamic_module_recovery(
             lambda: _call_hf_from_pretrained(
                 AutoModel.from_pretrained,
                 text_encoder_path,
+                config=text_encoder_config,
                 torch_dtype=dtype,
                 trust_remote_code=trust_remote_code,
                 local_files_only=True,
@@ -342,11 +415,16 @@ def load_newbie_text_encoder_and_tokenizer(base_model_path: str | Path, *, mixed
 def load_newbie_clip_model_and_tokenizer(base_model_path: str | Path, *, mixed_precision: str = 'bf16'):
     base_path = Path(base_model_path).resolve()
     clip_model_path = base_path / 'clip_model'
+    clip_config = _load_auto_config_with_dynamic_module_recovery(
+        clip_model_path,
+        trust_remote_code=True,
+    )
     try:
         clip_model = _call_with_dynamic_module_recovery(
             lambda: _call_hf_from_pretrained(
                 AutoModel.from_pretrained,
                 clip_model_path,
+                config=clip_config,
                 torch_dtype=resolve_dtype(mixed_precision),
                 trust_remote_code=True,
                 local_files_only=True,
@@ -388,3 +466,5 @@ def load_newbie_vae(base_model_path: str | Path, *, trust_remote_code: bool = Tr
         local_files_only=True,
         low_cpu_mem_usage=True,
     )
+
+

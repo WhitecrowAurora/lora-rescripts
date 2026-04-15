@@ -689,6 +689,26 @@ def _normalize_sdxl_low_vram_preview_policy(value) -> str:
     return "every_4_epochs"
 
 
+def _normalize_sdxl_low_vram_swap_threshold_ratio(value) -> float:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        percent = 0.0
+    percent = min(99.0, max(0.0, percent))
+    return percent / 100.0
+
+
+def _format_sdxl_fixed_block_swap_scope(swap_input_blocks: bool, swap_middle_block: bool, swap_output_blocks: bool) -> str:
+    scopes: list[str] = []
+    if swap_input_blocks:
+        scopes.append('input')
+    if swap_middle_block:
+        scopes.append('middle')
+    if swap_output_blocks:
+        scopes.append('output')
+    return '/'.join(scopes) if scopes else 'none'
+
+
 def apply_sdxl_low_vram_ui_overrides(config: dict) -> list[str]:
     model_train_type = str(config.get("model_train_type", "") or "").strip().lower()
     if model_train_type != "sdxl-lora":
@@ -704,6 +724,12 @@ def apply_sdxl_low_vram_ui_overrides(config: dict) -> list[str]:
     two_phase_cache = parse_boolish(config.get("sdxl_low_vram_two_phase_cache", True))
     component_cpu_residency = parse_boolish(config.get("sdxl_low_vram_component_cpu_residency", True))
     fixed_block_swap = parse_boolish(config.get("sdxl_low_vram_fixed_block_swap", True))
+    swap_input_blocks = parse_boolish(config.get("sdxl_low_vram_swap_input_blocks", False))
+    swap_middle_block = parse_boolish(config.get("sdxl_low_vram_swap_middle_block", True))
+    swap_output_blocks = parse_boolish(config.get("sdxl_low_vram_swap_output_blocks", True))
+    fixed_block_swap = bool(fixed_block_swap and (swap_input_blocks or swap_middle_block or swap_output_blocks))
+    swap_offload_after_backward = parse_boolish(config.get("sdxl_low_vram_swap_offload_after_backward", True))
+    swap_vram_threshold_ratio = _normalize_sdxl_low_vram_swap_threshold_ratio(config.get("sdxl_low_vram_swap_vram_threshold", 0))
     auto_protection = parse_boolish(config.get("sdxl_low_vram_auto_protection", True))
     auto_resolution_probe = parse_boolish(config.get("sdxl_low_vram_auto_resolution_probe", True))
 
@@ -734,6 +760,11 @@ def apply_sdxl_low_vram_ui_overrides(config: dict) -> list[str]:
     config["sdxl_bucket_target_edge"] = target_edge
     config["sdxl_component_cpu_residency"] = component_cpu_residency
     config["sdxl_fixed_block_swap"] = fixed_block_swap
+    config["sdxl_fixed_block_swap_input_blocks"] = swap_input_blocks
+    config["sdxl_fixed_block_swap_middle_block"] = swap_middle_block
+    config["sdxl_fixed_block_swap_output_blocks"] = swap_output_blocks
+    config["sdxl_fixed_block_swap_offload_after_backward"] = swap_offload_after_backward
+    config["sdxl_fixed_block_swap_vram_threshold_ratio"] = swap_vram_threshold_ratio
     config["sdxl_low_vram_two_phase_cache"] = two_phase_cache
     config["sdxl_low_vram_auto_protection"] = auto_protection
     config["sdxl_low_vram_auto_resolution_probe"] = auto_resolution_probe
@@ -780,7 +811,18 @@ def apply_sdxl_low_vram_ui_overrides(config: dict) -> list[str]:
         f"并切换为 `{'long_edge' if resolution_mode == 'long_edge' else 'short_edge'}` 边长规划、bucket_step={bucket_steps}。"
     )
     if fixed_block_swap:
-        warnings.append("低显存优化已启用固定档 U-Net block swap：训练和预览会按 input/middle/output blocks 分段搬运 U-Net，以换取更低显存占用。")
+        threshold_label = (
+            "始终尽快卸载"
+            if swap_vram_threshold_ratio <= 0.0
+            else f"{swap_vram_threshold_ratio * 100:.0f}%"
+        )
+        warnings.append(
+            "低显存优化已启用 U-Net block swap："
+            f"当前交换范围={_format_sdxl_fixed_block_swap_scope(swap_input_blocks, swap_middle_block, swap_output_blocks)}，"
+            f"反向后卸载={'开启' if swap_offload_after_backward else '关闭'}，目标显存水线={threshold_label}。"
+        )
+    elif parse_boolish(config.get("sdxl_low_vram_fixed_block_swap", True)):
+        warnings.append("低显存优化中的 U-Net block swap 总开关已开启，但当前未勾选任何交换范围，因此本次不会启用 block swap。")
     if auto_resolution_probe:
         warnings.append("低显存优化已启用启动前自动分辨率探测：会先做 3 步预跑；若检测到共享显存或专用显存峰值超过 95%，会按 64 为单位自动下调目标边长。")
     if preview_policy != "disable":
@@ -2314,6 +2356,8 @@ async def get_available_scripts() -> APIResponse:
             for script_name in avaliable_scripts
         ]
     })
+
+
 
 
 

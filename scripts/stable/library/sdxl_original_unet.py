@@ -1273,6 +1273,11 @@ class SdxlUNet2DConditionModel(nn.Module):
         self.cpu_offload_checkpointing = False
         self.fixed_block_swap_enabled = False
         self.fixed_block_swap_device: Optional[torch.device] = None
+        self.fixed_block_swap_input_blocks = True
+        self.fixed_block_swap_middle_block = True
+        self.fixed_block_swap_output_blocks = True
+        self.fixed_block_swap_offload_after_backward = True
+        self.fixed_block_swap_vram_threshold_ratio = 0.0
         # self.sample_size = sample_size
 
         # time embedding
@@ -1474,17 +1479,38 @@ class SdxlUNet2DConditionModel(nn.Module):
         return get_parameter_device(self)
 
     def _iter_fixed_block_swap_modules(self):
-        for module in self.input_blocks:
-            yield module
-        yield self.middle_block
-        for module in self.output_blocks:
-            yield module
+        if self.fixed_block_swap_input_blocks:
+            for module in self.input_blocks:
+                yield module
+        if self.fixed_block_swap_middle_block:
+            yield self.middle_block
+        if self.fixed_block_swap_output_blocks:
+            for module in self.output_blocks:
+                yield module
 
     def _move_fixed_block_swap_module(self, module: nn.Module, device: torch.device) -> None:
         current_device = _get_module_runtime_device(module)
         if current_device == device:
             return
         module.to(device)
+
+    def _should_swap_unet_block(self, module: nn.Module) -> bool:
+        return any(candidate is module for candidate in self._iter_fixed_block_swap_modules())
+
+    def _should_keep_fixed_block_swap_module_on_device(self, target_device: torch.device) -> bool:
+        if target_device.type != "cuda":
+            return False
+        threshold_ratio = float(getattr(self, "fixed_block_swap_vram_threshold_ratio", 0.0) or 0.0)
+        if threshold_ratio <= 0.0:
+            return False
+        try:
+            reserved = float(torch.cuda.memory_reserved(target_device))
+            total = float(torch.cuda.get_device_properties(target_device).total_memory)
+        except Exception:
+            return False
+        if total <= 0.0:
+            return False
+        return (reserved / total) < threshold_ratio
 
     def _run_module_layers(self, module, h, emb, context, use_layer_checkpointing: bool = True):
         x = h
@@ -1510,18 +1536,21 @@ class SdxlUNet2DConditionModel(nn.Module):
             target_device = local_h.device
             self._move_fixed_block_swap_module(module, target_device)
             output = self._run_module_layers(module, local_h, local_emb, local_context, use_layer_checkpointing=False)
+            keep_on_device = self._should_keep_fixed_block_swap_module_on_device(target_device)
 
-            if torch.is_grad_enabled() and self.training:
+            if torch.is_grad_enabled() and self.training and self.fixed_block_swap_offload_after_backward:
                 hook_tensor = _find_first_grad_tensor(local_h)
                 if hook_tensor is not None:
-                    def offload_after_backward(grad):
-                        self._move_fixed_block_swap_module(module, torch.device("cpu"))
-                        return grad
+                    if not keep_on_device:
+                        def offload_after_backward(grad):
+                            self._move_fixed_block_swap_module(module, torch.device("cpu"))
+                            return grad
 
-                    hook_tensor.register_hook(offload_after_backward)
+                        hook_tensor.register_hook(offload_after_backward)
                     return output
 
-            self._move_fixed_block_swap_module(module, torch.device("cpu"))
+            if not keep_on_device:
+                self._move_fixed_block_swap_module(module, torch.device("cpu"))
             return output
 
         if self.training:
@@ -1529,14 +1558,36 @@ class SdxlUNet2DConditionModel(nn.Module):
         return block_forward(h, emb, context)
 
     def _call_unet_block(self, module, h, emb, context):
-        if self.fixed_block_swap_enabled:
+        if self.fixed_block_swap_enabled and self._should_swap_unet_block(module):
             return self._run_fixed_block_swap_module(module, h, emb, context)
         return self._run_module_layers(module, h, emb, context, use_layer_checkpointing=True)
 
-    def enable_fixed_block_swap(self, device: Optional[torch.device] = None):
+    def enable_fixed_block_swap(
+        self,
+        device: Optional[torch.device] = None,
+        *,
+        swap_input_blocks: bool = True,
+        swap_middle_block: bool = True,
+        swap_output_blocks: bool = True,
+        offload_after_backward: bool = True,
+        vram_threshold_ratio: float = 0.0,
+    ):
         target_device = torch.device(device) if device is not None else get_parameter_device(self)
+        try:
+            normalized_threshold_ratio = float(vram_threshold_ratio)
+        except (TypeError, ValueError):
+            normalized_threshold_ratio = 0.0
+        if normalized_threshold_ratio > 1.0:
+            normalized_threshold_ratio /= 100.0
+        normalized_threshold_ratio = min(0.99, max(0.0, normalized_threshold_ratio))
+
         self.fixed_block_swap_enabled = True
         self.fixed_block_swap_device = target_device
+        self.fixed_block_swap_input_blocks = bool(swap_input_blocks)
+        self.fixed_block_swap_middle_block = bool(swap_middle_block)
+        self.fixed_block_swap_output_blocks = bool(swap_output_blocks)
+        self.fixed_block_swap_offload_after_backward = bool(offload_after_backward)
+        self.fixed_block_swap_vram_threshold_ratio = normalized_threshold_ratio
         for module in self._iter_fixed_block_swap_modules():
             self._move_fixed_block_swap_module(module, torch.device("cpu"))
 
@@ -1806,3 +1857,4 @@ if __name__ == "__main__":
 
     time_end = time.perf_counter()
     logger.info(f"elapsed time: {time_end - time_start} [sec] for last {steps - 1} steps")
+

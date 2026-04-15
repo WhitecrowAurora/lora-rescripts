@@ -64,6 +64,7 @@ Schema.intersect([
         newbie_clip_max_token_length: Schema.number().min(32).default(256).description("CLIP 最大 token 长度"),
         newbie_caption_length_bucket_size: Schema.number().min(1).default(32).description("caption 长度 bucket 大小"),
         blocks_to_swap: Schema.number().min(0).default(0).description("交换到 CPU 的 block 数量。0 表示关闭"),
+        newbie_auto_swap_release: Schema.boolean().default(false).description("自动 swap 释放。开启后会在显存占用持续偏低时逐步减少 blocks_to_swap，以回收一部分训练速度"),
         cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：checkpointing 时把部分张量卸载到 CPU"),
         pytorch_cuda_expandable_segments: Schema.boolean().default(true).description("启用 PyTorch CUDA expandable_segments 以降低碎片化 OOM"),
         newbie_safe_fallback: Schema.boolean().default(true).description("OOM 时自动尝试更保守的 Newbie 安全回退"),

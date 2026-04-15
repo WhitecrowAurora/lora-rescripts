@@ -17,6 +17,7 @@ class NewbieAdaptiveBlockSwapController:
     current_blocks: int
     max_blocks: int
     min_blocks: int = 0
+    allow_auto_release: bool = False
     high_watermark_ratio: float = 0.965
     low_watermark_ratio: float = 0.90
     cooldown_steps: int = 12
@@ -50,7 +51,11 @@ class NewbieAdaptiveBlockSwapController:
             if usage_ratio >= self.high_watermark_ratio and self.current_blocks < self.max_blocks:
                 next_blocks = min(self.max_blocks, self.current_blocks + 1)
                 self._stable_low_windows = 0
-            elif usage_ratio <= self.low_watermark_ratio and self.current_blocks > self.min_blocks:
+            elif (
+                self.allow_auto_release
+                and usage_ratio <= self.low_watermark_ratio
+                and self.current_blocks > self.min_blocks
+            ):
                 self._stable_low_windows += 1
                 if self._stable_low_windows >= self.stable_windows_before_reduce:
                     next_blocks = max(self.min_blocks, self.current_blocks - 1)
@@ -147,6 +152,7 @@ def apply_newbie_memory_runtime_patch(model):
     base_model.blocks_to_swap = 0
     base_model._newbie_block_offloader = None
     base_model._newbie_layer_forward_backups = {}
+    base_model._newbie_runtime_device = None
 
     def _enable_gradient_checkpointing(self, cpu_offload: bool = False):
         self.gradient_checkpointing = True
@@ -165,11 +171,24 @@ def apply_newbie_memory_runtime_patch(model):
                 pass
         self._newbie_layer_forward_backups = {}
 
+    def _move_layers_to_runtime_device(self):
+        runtime_device = getattr(self, '_newbie_runtime_device', None)
+        if runtime_device is None:
+            return
+        target_device = torch.device(runtime_device)
+        for layer in self.layers:
+            try:
+                layer.to(target_device)
+            except Exception:
+                pass
+        clean_memory_on_device(target_device)
+
     def _disable_block_swap(self):
         _restore_layer_forwards(self)
         _remove_offloader_hooks(getattr(self, '_newbie_block_offloader', None))
         self._newbie_block_offloader = None
         self.blocks_to_swap = 0
+        _move_layers_to_runtime_device(self)
 
     def _enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool = True):
         requested = max(0, int(blocks_to_swap or 0))
@@ -207,12 +226,14 @@ def apply_newbie_memory_runtime_patch(model):
 
     def _reconfigure_block_swap(self, blocks_to_swap: int, device: torch.device):
         requested = max(0, int(blocks_to_swap or 0))
+        self._newbie_runtime_device = torch.device(device)
         if requested == int(getattr(self, 'blocks_to_swap', 0) or 0):
             return
         _enable_block_swap(self, requested, device, supports_backward=True)
         _prepare_block_swap_before_forward(self)
 
     def _move_to_device_except_swap_blocks(self, device: torch.device):
+        self._newbie_runtime_device = torch.device(device)
         if getattr(self, 'blocks_to_swap', 0):
             saved_layers = self.layers
             self.layers = nn.ModuleList()
@@ -313,6 +334,7 @@ def maybe_apply_newbie_safe_fallback(config, model, device: torch.device) -> lis
             )
 
     return notes
+
 
 
 
