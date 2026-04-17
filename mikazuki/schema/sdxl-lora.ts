@@ -48,6 +48,23 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
+            sdxl_block_swap_enabled: Schema.boolean().default(false).description("启用独立的 SDXL U-Net block swap 开关。关闭时，下方子选项不会生效；若同时开启 ≤6GB 低显存优化，则仍会由低显存预设接管 block swap"),
+        }).description("SDXL Block Swap"),
+        Schema.union([
+            Schema.object({
+                sdxl_block_swap_enabled: Schema.const(true).required(),
+                sdxl_block_swap_output_blocks: Schema.boolean().default(true).description("推荐第一步尝试。交换 U-Net output blocks，通常速度影响最小"),
+                sdxl_block_swap_middle_block: Schema.boolean().default(true).description("推荐第二步尝试。交换 U-Net middle block，通常仍比较划算"),
+                sdxl_block_swap_offload_after_backward: Schema.boolean().default(true).description("推荐第三步尝试。反向传播结束后立即卸载已交换 block，更省显存，但通常更慢"),
+                sdxl_block_swap_input_blocks: Schema.boolean().default(false).description("推荐最后再尝试。交换 U-Net input blocks，显存收益较大，但通常速度损失最大"),
+                sdxl_block_swap_vram_threshold: Schema.number().min(0).max(99).step(1).default(70).description("高级参数：block swap 的软显存水线（百分比）。一般保持默认即可"),
+            }),
+            Schema.object({}),
+        ]),
+    ]),
+
+    Schema.intersect([
+        Schema.object({
             sdxl_low_vram_optimization: Schema.boolean().default(false).description("低显存优化（≤6GB）。开启后会按低显存预设自动调整缓存、预览和训练目标"),
         }).description("低显存优化（≤6GB）"),
         Schema.union([
@@ -92,7 +109,7 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
-            network_module: Schema.union(["networks.lora", "networks.tlora", "networks.dylora", "networks.oft", "lycoris.kohya"]).default("networks.lora").description("训练网络模块"),
+            network_module: Schema.union(["networks.lora", "networks.lora_fa", "networks.vera", "networks.tlora", "networks.dylora", "networks.oft", "lycoris.kohya"]).default("networks.lora").description("训练网络模块。`networks.lora_fa` 为 LoRA-FA 路线，会冻结 LoRA-A / lora_down，仅训练 LoRA-B / lora_up；`networks.vera` 为 VeRA 路线，训练时使用共享随机投影，导出时自动转换成兼容 LoRA"),
             network_weights: Schema.string().role('filepicker').description("从已有的 LoRA 模型上继续训练，填写路径"),
             network_dim: Schema.number().min(1).default(32).description("网络维度，常用 4~128，不是越大越好, 低 dim 可以降低显存占用"),
             network_alpha: Schema.number().min(1).default(32).description("常用值：等于 network_dim 或 network_dim*1/2 或 1。使用较小的 alpha 需要提升学习率"),
@@ -100,12 +117,12 @@ Schema.intersect([
             tlora_min_rank: Schema.number().min(1).default(1).description("T-LoRA 最小动态 rank。仅在 network_module=networks.tlora 时生效"),
             tlora_rank_schedule: Schema.union(["cosine", "linear"]).default("cosine").description("T-LoRA 动态 rank 调度。仅在 network_module=networks.tlora 时生效"),
             tlora_orthogonal_init: Schema.boolean().default(false).description("T-LoRA 对 lora_down 使用正交初始化（实验性，仅在 network_module=networks.tlora 时生效）"),
-            pissa_init: Schema.boolean().default(false).description("启用 PiSSA 初始化（实验性，仅在 network_module=networks.lora 时生效）"),
+            pissa_init: Schema.boolean().default(false).description("启用 PiSSA 初始化（实验性，仅在 network_module=networks.lora 时生效；LoRA-FA / VeRA 不支持）"),
             dim_from_weights: Schema.boolean().default(false).description("从已有 network_weights 自动推断 rank / dim"),
             scale_weight_norms: Schema.number().step(0.01).min(0).description("最大范数正则化。如果使用，推荐为 1"),
             dora_wd: Schema.boolean().default(false).description("启用 DoRA 训练"),
             network_args_custom: Schema.array(String).role('table').description("自定义 network_args，一行一个"),
-            enable_block_weights: Schema.boolean().default(false).description("启用分层学习率训练（只支持网络模块 networks.lora）"),
+            enable_block_weights: Schema.boolean().default(false).description("启用分层学习率训练（支持网络模块 networks.lora / networks.lora_fa / networks.vera）"),
             enable_base_weight: Schema.boolean().default(false).description("启用基础权重（差异炼丹）"),
         }).description("网络设置"),
 

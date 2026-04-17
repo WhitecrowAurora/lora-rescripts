@@ -3,7 +3,7 @@
     "runtime_label":  "FlashAttention Runtime / FlashAttention 运行时",
     "runtime_path":  "H:\\lora-rescripts\\env\\python-flashattention",
     "python_exe":  "H:\\lora-rescripts\\env\\python-flashattention\\python.exe",
-    "installed_at":  "2026-04-17 02:30:27",
+    "installed_at":  "2026-04-18 02:47:24",
     "packages":  [
                      "peft==0.18.1",
                      "torchdiffeq==0.2.5",

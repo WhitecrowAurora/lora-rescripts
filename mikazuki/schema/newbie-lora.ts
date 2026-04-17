@@ -46,10 +46,10 @@ Schema.intersect([
     SHARED_SCHEMAS.PEAK_VRAM_CONTROL,
 
     Schema.object({
-        adapter_type: Schema.union(["lora", "lokr"]).default("lora").description("适配器类型"),
-        network_dim: Schema.number().min(1).default(32).description("LoRA / LoKr rank"),
-        network_alpha: Schema.number().min(1).default(32).description("LoRA / LoKr alpha"),
-        network_dropout: Schema.number().min(0).step(0.01).default(0.05).description("LoRA dropout"),
+        adapter_type: Schema.union(["lora", "lora_fa", "vera", "lokr"]).default("lora").description("适配器类型。LoRA-FA 会冻结 LoRA-A / lora_down，仅训练 LoRA-B / lora_up；VeRA 使用共享随机投影，只训练每层缩放向量"),
+        network_dim: Schema.number().min(1).default(32).description("LoRA / LoKr rank。VeRA 下表示共享投影 rank"),
+        network_alpha: Schema.number().min(1).default(32).description("LoRA / LoKr alpha。VeRA 当前不使用该项"),
+        network_dropout: Schema.number().min(0).step(0.01).default(0.05).description("LoRA / VeRA dropout"),
         newbie_target_modules: Schema.string().role('textarea').default("attention.qkv\nattention.out\nfeed_forward.w2\ntime_text_embed.1\nclip_text_pooled_proj.1").description("目标模块列表，一行一个"),
         lokr_rank: Schema.number().min(1).default(32).description("LoKr rank"),
         lokr_alpha: Schema.number().min(1).default(32).description("LoKr alpha"),
@@ -59,6 +59,12 @@ Schema.intersect([
         lokr_module_dropout: Schema.number().min(0).step(0.01).default(0).description("LoKr module dropout"),
         lokr_train_norm: Schema.boolean().default(false).description("LoKr 额外训练 Norm 参数"),
     }).description("适配器设置"),
+
+    Schema.object({
+        lulynx_lisa_enabled: Schema.boolean().default(false).description("启用实验性 LISA。周期性只激活一部分 Newbie 适配器模块参与下一阶段训练"),
+        lulynx_lisa_active_ratio: Schema.number().min(0.05).max(1).step(0.01).default(0.2).description("每轮 LISA 激活的适配器模块比例"),
+        lulynx_lisa_interval: Schema.number().min(1).default(1).description("每 N 个优化 step 重排一次 LISA 激活模块"),
+    }).description("Lulynx LISA"),
 
     Schema.object({
         use_cache: Schema.boolean().default(true).description("启用缓存流程。当前强烈建议保持开启"),
@@ -80,3 +86,4 @@ Schema.intersect([
     SHARED_SCHEMAS.LOG_SETTINGS,
     SHARED_SCHEMAS.THERMAL_MANAGEMENT
 ]);
+

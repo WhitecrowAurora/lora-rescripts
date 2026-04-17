@@ -159,6 +159,15 @@ def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list
                 "Anima LoKr currently uses the built-in linear-layer injection path in lora_anima, not the kohya LyCORIS route. "
                 "/ 当前 Anima LoKr 走的是内置线性层注入实现，不是 kohya 的 LyCORIS 训练链。"
             )
+        elif adapter_type == "vera":
+            notes.append("Anima adapter mode: VeRA (shared random projections, LoRA-compatible export).")
+            warnings.append(
+                "Anima VeRA exports are saved as standard LoRA-compatible adapter weights. "
+                "To continue the exact VeRA training state later, please use save_state / checkpoint instead of the exported LoRA file. "
+                "/ Anima VeRA 导出时会保存为标准 LoRA 兼容权重；若要精确续训，请使用 save_state / checkpoint，而不是导出的 LoRA 文件。"
+            )
+        elif adapter_type == "lora_fa":
+            notes.append("Anima adapter mode: LoRA-FA (freeze lora_down / train lora_up).")
         else:
             notes.append("Anima adapter mode: LoRA.")
 

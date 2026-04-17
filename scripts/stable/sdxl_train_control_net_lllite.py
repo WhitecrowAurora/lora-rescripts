@@ -447,7 +447,7 @@ def train(args):
                     encoder_hidden_states2 = encoder_hidden_states2.to(accelerator.device, dtype=weight_dtype)
                     pool2 = pool2.to(accelerator.device, dtype=weight_dtype)
                 else:
-                    input_ids1, input_ids2 = batch["input_ids_list"]
+                    input_ids1, input_ids2 = strategy_sdxl.normalize_sdxl_token_pair(batch["input_ids_list"])
                     with torch.no_grad():
                         input_ids1 = input_ids1.to(accelerator.device)
                         input_ids2 = input_ids2.to(accelerator.device)

@@ -677,7 +677,7 @@ def train(args):
                     encoder_hidden_states2 = encoder_hidden_states2.to(accelerator.device, dtype=weight_dtype)
                     pool2 = pool2.to(accelerator.device, dtype=weight_dtype)
                 else:
-                    input_ids1, input_ids2 = batch["input_ids_list"]
+                    input_ids1, input_ids2 = strategy_sdxl.normalize_sdxl_token_pair(batch["input_ids_list"])
                     with torch.set_grad_enabled(args.train_text_encoder):
                         # Get the text embedding for conditioning
                         if args.weighted_captions:

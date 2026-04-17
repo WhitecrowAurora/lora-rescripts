@@ -19,6 +19,73 @@ TOKENIZER1_PATH = "openai/clip-vit-large-patch14"
 TOKENIZER2_PATH = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"
 
 
+def _describe_sdxl_token_container(tokens: Any) -> str:
+    if isinstance(tokens, torch.Tensor):
+        return f"Tensor(shape={tuple(tokens.shape)}, dtype={tokens.dtype})"
+    if isinstance(tokens, (list, tuple)):
+        parts = []
+        for item in tokens:
+            if isinstance(item, torch.Tensor):
+                parts.append(f"Tensor(shape={tuple(item.shape)}, dtype={item.dtype})")
+            else:
+                parts.append(type(item).__name__)
+        return f"{type(tokens).__name__}(len={len(tokens)}, items=[{', '.join(parts)}])"
+    return type(tokens).__name__
+
+
+def normalize_sdxl_token_pair(tokens: Any) -> List[torch.Tensor]:
+    if isinstance(tokens, (list, tuple)):
+        if len(tokens) == 2 and all(isinstance(item, torch.Tensor) for item in tokens):
+            return [tokens[0], tokens[1]]
+        if len(tokens) == 1:
+            return normalize_sdxl_token_pair(tokens[0])
+
+    if isinstance(tokens, torch.Tensor):
+        if tokens.ndim >= 2 and tokens.shape[0] == 2:
+            return [tokens[0], tokens[1]]
+        if tokens.ndim >= 3 and tokens.shape[1] == 2:
+            return [tokens[:, 0, ...], tokens[:, 1, ...]]
+
+    raise ValueError(
+        "SDXL expects a pair of token tensors, but received "
+        f"{_describe_sdxl_token_container(tokens)}."
+    )
+
+
+def normalize_sdxl_token_tensor(token_tensor: torch.Tensor, model_max_length: int) -> torch.Tensor:
+    if not isinstance(token_tensor, torch.Tensor):
+        raise TypeError(f"Expected a torch.Tensor for SDXL token ids, got {type(token_tensor).__name__}.")
+
+    if token_tensor.ndim == 1:
+        if int(token_tensor.shape[0]) != int(model_max_length):
+            raise ValueError(
+                "SDXL token tensor with ndim=1 must have shape "
+                f"({model_max_length},), but got {tuple(token_tensor.shape)}."
+            )
+        return token_tensor.unsqueeze(0).unsqueeze(0)
+
+    if token_tensor.ndim == 2:
+        if int(token_tensor.shape[-1]) != int(model_max_length):
+            raise ValueError(
+                "SDXL token tensor with ndim=2 must end with the tokenizer model_max_length "
+                f"{model_max_length}, but got {tuple(token_tensor.shape)}."
+            )
+        return token_tensor.unsqueeze(1)
+
+    if token_tensor.ndim == 3:
+        if int(token_tensor.shape[-1]) != int(model_max_length):
+            raise ValueError(
+                "SDXL token tensor with ndim=3 must end with the tokenizer model_max_length "
+                f"{model_max_length}, but got {tuple(token_tensor.shape)}."
+            )
+        return token_tensor
+
+    raise ValueError(
+        "SDXL token tensor must have ndim 1, 2, or 3, but received "
+        f"shape {tuple(token_tensor.shape)}."
+    )
+
+
 class SdxlTokenizeStrategy(TokenizeStrategy):
     def __init__(self, max_length: Optional[int], tokenizer_cache_dir: Optional[str] = None) -> None:
         self.tokenizer1 = self._load_tokenizer(CLIPTokenizer, TOKENIZER1_PATH, tokenizer_cache_dir=tokenizer_cache_dir)
@@ -120,6 +187,8 @@ class SdxlTextEncodingStrategy(TextEncodingStrategy):
         unwrapped_text_encoder2: Optional[CLIPTextModelWithProjection] = None,
     ):
         # input_ids: b,n,77 -> b*n, 77
+        input_ids1 = normalize_sdxl_token_tensor(input_ids1, tokenizer1.model_max_length)
+        input_ids2 = normalize_sdxl_token_tensor(input_ids2, tokenizer2.model_max_length)
         b_size = input_ids1.size()[0]
         if input_ids1.size()[1] == 1:
             max_token_length = None
@@ -190,7 +259,7 @@ class SdxlTextEncodingStrategy(TextEncodingStrategy):
             unwrapped_text_encoder2 = None
         else:
             text_encoder1, text_encoder2, unwrapped_text_encoder2 = models
-        tokens1, tokens2 = tokens
+        tokens1, tokens2 = normalize_sdxl_token_pair(tokens)
         sdxl_tokenize_strategy = tokenize_strategy  # type: SdxlTokenizeStrategy
         tokenizer1, tokenizer2 = sdxl_tokenize_strategy.tokenizer1, sdxl_tokenize_strategy.tokenizer2
 

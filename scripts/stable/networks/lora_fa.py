@@ -1093,10 +1093,20 @@ class LoRANetwork(torch.nn.Module):
     def get_trainable_params(self):
         return self.parameters()
 
+    def _prepare_compatible_export_metadata(self, metadata):
+        metadata = {} if metadata is None else dict(metadata)
+        original_network_module = str(metadata.get("ss_network_module", "") or "").strip() or "networks.lora_fa"
+        metadata.setdefault("ss_training_network_module", original_network_module)
+        metadata["ss_network_module"] = "networks.lora"
+        metadata["ss_adapter_variant"] = "lora_fa"
+        metadata["ss_lora_fa_compatible_export"] = "true"
+        return metadata
+
     def save_weights(self, file, dtype, metadata):
         if metadata is not None and len(metadata) == 0:
             metadata = None
 
+        metadata = self._prepare_compatible_export_metadata(metadata)
         state_dict = self.state_dict()
 
         if dtype is not None:

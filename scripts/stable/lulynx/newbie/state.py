@@ -210,4 +210,18 @@ def save_newbie_adapter(output_dir: str | Path, output_name: str, model, step: i
         return weights_path
 
     model.save_pretrained(str(save_dir), safe_serialization=True)
+    if adapter_type == 'lora_fa':
+        config_path = save_dir / 'adapter_config.json'
+        if config_path.exists():
+            config_payload = json.loads(config_path.read_text(encoding='utf-8'))
+            config_payload['lulynx_adapter_type'] = 'lora_fa'
+            config_payload['lulynx_lora_fa'] = True
+            config_path.write_text(json.dumps(config_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    elif adapter_type == 'vera':
+        config_path = save_dir / 'adapter_config.json'
+        if config_path.exists():
+            config_payload = json.loads(config_path.read_text(encoding='utf-8'))
+            config_payload['lulynx_adapter_type'] = 'vera'
+            config_payload['lulynx_vera'] = True
+            config_path.write_text(json.dumps(config_payload, ensure_ascii=False, indent=2), encoding='utf-8')
     return save_dir

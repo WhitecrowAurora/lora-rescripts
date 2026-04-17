@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import gc
 from contextlib import nullcontext
 import importlib
@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import signal
 import sys
 import time
 from multiprocessing import Value
@@ -989,7 +990,7 @@ class AnimaNetworkTrainer:
                 len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
             )
             accelerator.print(
-                f"override steps. steps for {args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}"
+                f"override steps. steps for {args.max_train_epochs} epochs is / 鎸囧畾銈ㄣ儩銉冦偗銇俱仹銇偣銉嗐儍銉楁暟: {args.max_train_steps}"
             )
 
         train_dataset_group.set_max_train_steps(args.max_train_steps)
@@ -1210,21 +1211,21 @@ class AnimaNetworkTrainer:
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
-        accelerator.print("running training / 学習開始")
-        accelerator.print(f"  num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")
-        accelerator.print(f"  num reg images / 正則化画像の数: {train_dataset_group.num_reg_images}")
-        accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-        accelerator.print(f"  num epochs / epoch数: {displayed_num_train_epochs}")
+        accelerator.print("running training / 瀛︾繏闁嬪")
+        accelerator.print(f"  num train images * repeats / 瀛︾繏鐢诲儚銇暟脳绻般倞杩斻仐鍥炴暟: {train_dataset_group.num_train_images}")
+        accelerator.print(f"  num reg images / 姝ｅ墖鍖栫敾鍍忋伄鏁? {train_dataset_group.num_reg_images}")
+        accelerator.print(f"  num batches per epoch / 1epoch銇儛銉冦儊鏁? {len(train_dataloader)}")
+        accelerator.print(f"  num epochs / epoch鏁? {displayed_num_train_epochs}")
         if mixed_resolution_phase_target_epoch > 0:
             accelerator.print(
-                f"  mixed-resolution epoch window / 阶段分辨率连续 epoch 区间: "
+                f"  mixed-resolution epoch window / 闃舵鍒嗚鲸鐜囪繛缁?epoch 鍖洪棿: "
                 f"{mixed_resolution_phase_start_epoch + 1} -> {mixed_resolution_phase_target_epoch}"
             )
         accelerator.print(
-            f"  batch size per device / バッチサイズ: {', '.join([str(dataset.batch_size) for dataset in train_dataset_group.datasets])}"
+            f"  batch size per device / 銉愩儍銉併偟銈ゃ偤: {', '.join([str(dataset.batch_size) for dataset in train_dataset_group.datasets])}"
         )
-        accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-        accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+        accelerator.print(f"  gradient accumulation steps / 鍕鹃厤銈掑悎瑷堛仚銈嬨偣銉嗐儍銉楁暟 = {args.gradient_accumulation_steps}")
+        accelerator.print(f"  total optimization steps / 瀛︾繏銈广儐銉冦儣鏁? {args.max_train_steps}")
 
         optimizer_eval_fn()
         self.sample_images(
@@ -1250,15 +1251,39 @@ class AnimaNetworkTrainer:
             desc="steps",
         )
         lulynx_stop_reason = None
+        graceful_interrupt = {"signal": None}
+        previous_signal_handlers = {}
+        def _format_interrupt_signal(signum) -> str:
+            try:
+                return signal.Signals(int(signum)).name
+            except Exception:
+                return f"signal-{signum}"
+        def _request_graceful_stop(signum, _frame):
+            signal_name = _format_interrupt_signal(signum)
+            if graceful_interrupt["signal"] is None:
+                graceful_interrupt["signal"] = int(signum)
+                logger.warning(
+                    f"Received {signal_name}. Requesting graceful shutdown after the current unit of work. "
+                    "If save_state is enabled, the trainer will write a resumable state before exit."
+                )
+            else:
+                logger.warning(f"Received {signal_name} again while graceful shutdown is already pending.")
+        def _graceful_stop_requested() -> bool:
+            return graceful_interrupt["signal"] is not None
+        def _graceful_stop_reason() -> str:
+            return f"Training interrupted by {_format_interrupt_signal(graceful_interrupt['signal'])}."
+        for candidate_signum in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
+            if candidate_signum is None:
+                continue
+            previous_signal_handlers[candidate_signum] = signal.getsignal(candidate_signum)
+            signal.signal(candidate_signum, _request_graceful_stop)
         peak_vram_diagnostics = PeakVramDiagnosticsRecorder(
             args,
             getattr(args, "lulynx_route_label", "Anima LoRA"),
             accelerator.device,
         )
-
         if self.is_swapping_blocks:
             accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
-
         peak_vram_startup_guard_release_blocks = getattr(args, "_peak_vram_startup_guard_release_blocks", None)
         peak_vram_startup_guard_release_step = max(0, int(getattr(args, "peak_vram_startup_guard_steps", 0) or 0))
         peak_vram_startup_guard_release_done = (
@@ -1266,14 +1291,15 @@ class AnimaNetworkTrainer:
             or peak_vram_startup_guard_release_step <= 0
             or int(peak_vram_startup_guard_release_blocks or 0) == int(getattr(args, "blocks_to_swap", 0) or 0)
         )
-
         if initial_step > 0:
             for skip_epoch in range(epoch_to_start):
                 logger.info(f"skipping epoch {skip_epoch + 1} because initial_step (multiplied) is {initial_step}")
                 initial_step -= len(train_dataloader)
             global_step = progress_start_step
-
         for epoch in range(epoch_to_start, num_train_epochs):
+            if _graceful_stop_requested():
+                lulynx_stop_reason = _graceful_stop_reason()
+                break
             effective_epoch_no = get_effective_epoch_no(epoch)
             accelerator.print(f"\nepoch {effective_epoch_no}/{displayed_num_train_epochs}\n")
             current_epoch.value = max(1, effective_epoch_no - mixed_resolution_phase_start_epoch)
@@ -1286,9 +1312,9 @@ class AnimaNetworkTrainer:
 
             for step, batch in enumerate(skipped_dataloader or train_dataloader):
                 current_step.value = global_step
-                if initial_step > 0:
-                    initial_step -= 1
-                    continue
+                if _graceful_stop_requested():
+                    lulynx_stop_reason = _graceful_stop_reason()
+                    break
 
                 nan_check_step = epoch * len(train_dataloader) + step + 1
                 run_nan_check = anima_train_utils.should_run_anima_nan_check(args, nan_check_step)
@@ -1500,7 +1526,8 @@ class AnimaNetworkTrainer:
                     if lulynx_step_logs:
                         step_logs.update(lulynx_step_logs)
                     accelerator.log(step_logs, step=global_step)
-
+                if lulynx_stop_reason is None and _graceful_stop_requested():
+                    lulynx_stop_reason = _graceful_stop_reason()
                 if lulynx_stop_reason is not None:
                     break
                 if global_step >= args.max_train_steps:
@@ -1569,7 +1596,9 @@ class AnimaNetworkTrainer:
             with anima_step_profiler.window_section("save", wall_only=True):
                 save_model(ckpt_name, network, global_step, displayed_num_train_epochs, force_sync_upload=True)
             anima_step_profiler.flush_remaining(global_step)
-            logger.info("model saved.")
+
+        for signum, previous_handler in previous_signal_handlers.items():
+            signal.signal(signum, previous_handler)
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -1590,6 +1619,9 @@ def setup_parser() -> argparse.ArgumentParser:
         help="[Deprecated] use 'skip_cache_check' instead",
     )
     return parser
+
+
+
 
 
 

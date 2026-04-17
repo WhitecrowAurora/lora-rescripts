@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from typing import Any, List, Union, Optional
 import sys
 import random
+import signal
 import time
 import json
 from multiprocessing import Value
@@ -1728,6 +1729,38 @@ class NetworkTrainer:
             desc="steps",
         )
         lulynx_stop_reason = None
+        graceful_interrupt = {"signal": None}
+        previous_signal_handlers = {}
+
+        def _format_interrupt_signal(signum) -> str:
+            try:
+                return signal.Signals(int(signum)).name
+            except Exception:
+                return f"signal-{signum}"
+
+        def _request_graceful_stop(signum, _frame):
+            signal_name = _format_interrupt_signal(signum)
+            if graceful_interrupt["signal"] is None:
+                graceful_interrupt["signal"] = int(signum)
+                logger.warning(
+                    f"Received {signal_name}. Requesting graceful shutdown after the current unit of work. "
+                    "If save_state is enabled, the trainer will write a resumable state before exit."
+                )
+            else:
+                logger.warning(f"Received {signal_name} again while graceful shutdown is already pending.")
+
+        def _graceful_stop_requested() -> bool:
+            return graceful_interrupt["signal"] is not None
+
+        def _graceful_stop_reason() -> str:
+            return f"Training interrupted by {_format_interrupt_signal(graceful_interrupt['signal'])}."
+
+        for candidate_signum in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
+            if candidate_signum is None:
+                continue
+            previous_signal_handlers[candidate_signum] = signal.getsignal(candidate_signum)
+            signal.signal(candidate_signum, _request_graceful_stop)
+
         peak_vram_diagnostics = PeakVramDiagnosticsRecorder(
             args,
             getattr(args, "lulynx_route_label", "Network training"),
@@ -1775,6 +1808,9 @@ class NetworkTrainer:
             random.setstate(python_rng_state)
 
         for epoch in range(epoch_to_start, num_train_epochs):
+            if _graceful_stop_requested():
+                lulynx_stop_reason = _graceful_stop_reason()
+                break
             effective_epoch_no = get_effective_epoch_no(epoch)
             accelerator.print(f"\nepoch {effective_epoch_no}/{displayed_num_train_epochs}\n")
             current_epoch.value = max(1, effective_epoch_no - mixed_resolution_phase_start_epoch)
@@ -1794,6 +1830,9 @@ class NetworkTrainer:
                 if initial_step > 0:
                     initial_step -= 1
                     continue
+                if _graceful_stop_requested():
+                    lulynx_stop_reason = _graceful_stop_reason()
+                    break
 
                 lulynx_step_logs = {}
                 attention_step_profiler.begin_micro_step()
@@ -2033,10 +2072,16 @@ class NetworkTrainer:
                     )
                     val_timesteps_step = 0
                     for val_step, batch in enumerate(val_dataloader):
+                        if _graceful_stop_requested():
+                            lulynx_stop_reason = _graceful_stop_reason()
+                            break
                         if val_step >= validation_steps:
                             break
 
                         for timestep in validation_timesteps:
+                            if _graceful_stop_requested():
+                                lulynx_stop_reason = _graceful_stop_reason()
+                                break
                             self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=False)
 
                             args.min_timestep = args.max_timestep = timestep  # dirty hack to change timestep
@@ -2073,6 +2118,8 @@ class NetworkTrainer:
 
                             self.on_validation_step_end(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
                             val_timesteps_step += 1
+                        if lulynx_stop_reason is not None:
+                            break
 
                     if is_tracking:
                         loss_validation_divergence = val_step_loss_recorder.moving_average - loss_recorder.moving_average
@@ -2089,6 +2136,8 @@ class NetworkTrainer:
                     accelerator.unwrap_model(network).train()
                     progress_bar.unpause()
 
+                if lulynx_stop_reason is None and _graceful_stop_requested():
+                    lulynx_stop_reason = _graceful_stop_reason()
                 if lulynx_stop_reason is not None:
                     break
 
@@ -2117,10 +2166,16 @@ class NetworkTrainer:
 
                 val_timesteps_step = 0
                 for val_step, batch in enumerate(val_dataloader):
+                    if _graceful_stop_requested():
+                        lulynx_stop_reason = _graceful_stop_reason()
+                        break
                     if val_step >= validation_steps:
                         break
 
                     for timestep in validation_timesteps:
+                        if _graceful_stop_requested():
+                            lulynx_stop_reason = _graceful_stop_reason()
+                            break
                         args.min_timestep = args.max_timestep = timestep
 
                         # temporary, for batch processing
@@ -2158,6 +2213,8 @@ class NetworkTrainer:
 
                         self.on_validation_step_end(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
                         val_timesteps_step += 1
+                    if lulynx_stop_reason is not None:
+                        break
 
                 if is_tracking:
                     avr_loss: float = val_epoch_loss_recorder.moving_average
@@ -2229,6 +2286,9 @@ class NetworkTrainer:
             save_model(ckpt_name, network, global_step, displayed_num_train_epochs, force_sync_upload=True)
 
             logger.info("model saved.")
+
+        for signum, previous_handler in previous_signal_handlers.items():
+            signal.signal(signum, previous_handler)
 
 
 def setup_parser() -> argparse.ArgumentParser:

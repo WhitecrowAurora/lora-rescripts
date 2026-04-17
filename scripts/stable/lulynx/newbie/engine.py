@@ -1,6 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import argparse
 import math
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -14,7 +16,9 @@ from library.device_utils import clean_memory_on_device
 from lulynx.experimental_core import (
     PeakVramDiagnosticsRecorder,
     build_peak_vram_micro_batch_plan,
+    create_lulynx_core,
     iter_training_micro_batches,
+    normalize_lulynx_args,
 )
 
 from .adapter import attach_newbie_adapter, count_trainable_parameters
@@ -89,9 +93,9 @@ class NewbieCachedTrainer:
         )
         ready_records = filter_cache_ready_records(dataset_report.records)
         if not ready_records:
-            raise NewbieTrainRuntimeError('当前没有可用的缓存样本；请先运行 cache phase。')
+            raise NewbieTrainRuntimeError('No cache-ready samples are available. Please run the cache phase first.')
         if self.config.newbie_force_cache_only and len(ready_records) != len(dataset_report.records):
-            raise NewbieTrainRuntimeError('force_cache_only 已开启，但仍有样本缺少缓存；请先完成 cache phase。')
+            raise NewbieTrainRuntimeError('No cache-ready samples are available. Please run the cache phase first.')
 
         dataset = NewbieCachedDataset(ready_records)
         sampler = CaptionLengthBucketBatchSampler(
@@ -118,6 +122,12 @@ class NewbieCachedTrainer:
         return 'out of memory' in message or 'cuda error: out of memory' in message
 
     def train(self) -> NewbieTrainResult:
+        lulynx_args = argparse.Namespace(
+            **{field_name: getattr(self.config, field_name) for field_name in self.config.__dataclass_fields__}
+        )
+        normalize_lulynx_args(lulynx_args, route_label='Newbie LoRA', route_kind='newbie')
+        lulynx_core = create_lulynx_core(lulynx_args, route_kind='newbie', route_label='Newbie LoRA')
+
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         accelerator = Accelerator(
             mixed_precision=self.config.mixed_precision,
@@ -156,7 +166,7 @@ class NewbieCachedTrainer:
             print('[newbie-train] using official-compatible runtime path (custom memory patch disabled).')
 
         if getattr(self.config, 'blocks_to_swap', 0) and getattr(self.config, 'cpu_offload_checkpointing', False):
-            raise NewbieTrainRuntimeError('blocks_to_swap 不能与 cpu_offload_checkpointing 同时启用。')
+            raise NewbieTrainRuntimeError('blocks_to_swap cannot be enabled together with cpu_offload_checkpointing.')
 
         if self.config.gradient_checkpointing:
             if hasattr(model, 'enable_gradient_checkpointing'):
@@ -204,6 +214,9 @@ class NewbieCachedTrainer:
             resume_path=self.config.resume,
         )
         trainable_params, total_params = count_trainable_parameters(unwrapped_model)
+        if lulynx_core is not None:
+            lulynx_core.attach_runtime(train_text_encoder=False, network=unwrapped_model)
+
 
         adaptive_controller = None
         if accelerator.device.type == 'cuda' and int(getattr(unwrapped_model, 'blocks_to_swap', 0) or 0) > 0:
@@ -228,6 +241,8 @@ class NewbieCachedTrainer:
         global_step = start_step
         last_loss = 0.0
         completed_epochs = 0
+        stop_training_requested = False
+        stop_training_reason = None
         max_train_steps = scheduler_bundle.total_training_steps
         max_train_epochs = self.config.max_train_epochs if self.config.max_train_epochs > 0 else 1
         save_every_steps = max(0, int(getattr(self.config, 'save_every_n_steps', 0) or 0))
@@ -282,17 +297,50 @@ class NewbieCachedTrainer:
                 dynamic_ncols=True,
                 leave=True,
             )
-
+        graceful_interrupt = {"signal": None}
+        previous_signal_handlers = {}
+        def _format_interrupt_signal(signum) -> str:
+            try:
+                return signal.Signals(int(signum)).name
+            except Exception:
+                return f"signal-{signum}"
+        def _request_graceful_stop(signum, _frame):
+            signal_name = _format_interrupt_signal(signum)
+            if graceful_interrupt["signal"] is None:
+                graceful_interrupt["signal"] = int(signum)
+                if accelerator.is_main_process:
+                    print(
+                        f"[newbie-train] received {signal_name}; requesting graceful shutdown after the current unit of work. "
+                        "A resumable checkpoint will be written before exit."
+                    )
+            elif accelerator.is_main_process:
+                print(f"[newbie-train] received {signal_name} again while graceful shutdown is already pending.")
+        def _graceful_stop_requested() -> bool:
+            return graceful_interrupt["signal"] is not None
+        def _graceful_stop_reason() -> str:
+            return f"Training interrupted by {_format_interrupt_signal(graceful_interrupt['signal'])}."
+        for candidate_signum in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
+            if candidate_signum is None:
+                continue
+            previous_signal_handlers[candidate_signum] = signal.getsignal(candidate_signum)
+            signal.signal(candidate_signum, _request_graceful_stop)
         for epoch in range(start_epoch, max_train_epochs):
+            if _graceful_stop_requested():
+                stop_training_reason = _graceful_stop_reason()
+                stop_training_requested = True
+                break
             if hasattr(sampler, 'set_epoch'):
                 sampler.set_epoch(epoch)
             epoch_start = perf_counter()
             for batch_index, batch in enumerate(dataloader):
                 if epoch == start_epoch and resume_micro_step > 0 and batch_index < resume_micro_step:
                     continue
+                if _graceful_stop_requested():
+                    stop_training_reason = _graceful_stop_reason()
+                    stop_training_requested = True
+                    break
                 if global_step >= max_train_steps:
                     break
-
                 batch_retry = 0
                 current_loss = last_loss
                 while True:
@@ -330,7 +378,17 @@ class NewbieCachedTrainer:
                                 loss = loss_dict['loss'].mean()
                                 peak_vram_diagnostics.capture('forward')
                                 weighted_loss += float(loss.detach().item()) * loss_scale
-                                accelerator.backward(loss * loss_scale)
+                                scaled_loss = loss * loss_scale
+                                if lulynx_core is not None:
+                                    lulynx_core.backward(
+                                        loss=scaled_loss,
+                                        accelerator=accelerator,
+                                        optimizer=optimizer,
+                                        network=unwrapped_model,
+                                        per_sample_losses=None,
+                                    )
+                                else:
+                                    accelerator.backward(scaled_loss)
                                 peak_vram_diagnostics.capture('backward')
                                 if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
                                     move_newbie_trainable_params_to_device(unwrapped_model, accelerator.device)
@@ -365,10 +423,10 @@ class NewbieCachedTrainer:
                             except Exception as reconfigure_exc:
                                 clean_memory_on_device(accelerator.device)
                                 raise NewbieTrainRuntimeError(
-                                    'Newbie 在 OOM 后尝试在线增强 block swap 失败。'
-                                    f'当前 blocks_to_swap={current_blocks}，目标={next_blocks}。'
-                                    '请重启训练后直接使用更高的 blocks_to_swap，或降低 batch size / 分辨率。'
-                                    f' 原始重配置错误: {reconfigure_exc}'
+                                    'Newbie failed to strengthen block swap after an OOM. '
+                                    f'Current blocks_to_swap={current_blocks}, target={next_blocks}. '
+                                    'Please restart training with a higher blocks_to_swap, or reduce batch size / resolution. '
+                                    f'Original reconfigure error: {reconfigure_exc}'
                                 ) from reconfigure_exc
                             self.config.blocks_to_swap = next_blocks
                             if adaptive_controller is not None:
@@ -411,7 +469,6 @@ class NewbieCachedTrainer:
                     }
                     if peak_vram_logs:
                         step_logs.update(peak_vram_logs)
-                    accelerator.log(step_logs, step=global_step)
                     if progress_bar is not None:
                         current_lr = scheduler.get_last_lr()[0]
                         progress_bar.update(1)
@@ -449,8 +506,29 @@ class NewbieCachedTrainer:
                         self.config.blocks_to_swap = adaptive_controller.current_blocks
                         if adaptive_note and accelerator.is_main_process:
                             print(adaptive_note)
+                    if lulynx_core is not None:
+                        lulynx_decision = lulynx_core.on_optimizer_step(
+                            global_step=global_step,
+                            current_loss=last_loss,
+                            average_loss=None,
+                            optimizer=optimizer,
+                            lr_scheduler=scheduler,
+                            accelerator=accelerator,
+                            network=unwrapped_model,
+                        )
+                        if lulynx_decision.logs:
+                            step_logs.update(lulynx_decision.logs)
+                        if lulynx_decision.stop_training and not stop_training_requested:
+                            stop_training_reason = lulynx_decision.reason or 'Lulynx experimental core requested stop.'
+                            stop_training_requested = True
+                    accelerator.log(step_logs, step=global_step)
+                    if not stop_training_requested and _graceful_stop_requested():
+                        stop_training_reason = _graceful_stop_reason()
+                        stop_training_requested = True
                     if save_every_steps > 0 and global_step % save_every_steps == 0:
                         _save_periodic_artifacts(global_step, f"every_{save_every_steps}_steps", epoch)
+                    if stop_training_requested:
+                        break
 
             resume_micro_step = 0
             completed_epochs = epoch + 1
@@ -466,9 +544,12 @@ class NewbieCachedTrainer:
                 _save_periodic_artifacts(global_step, "every_epoch", epoch)
             elif completed_epochs % save_every_epochs == 0:
                 _save_periodic_artifacts(global_step, f"every_{save_every_epochs}_epochs", epoch)
+            if stop_training_requested:
+                if accelerator.is_main_process:
+                    print(f"[newbie-train] stopped early by Lulynx experimental core: {stop_training_reason}")
+                break
             if global_step >= max_train_steps:
                 break
-
         if progress_bar is not None:
             progress_bar.close()
 
@@ -484,6 +565,8 @@ class NewbieCachedTrainer:
                 )
             )
             save_newbie_checkpoint(self.config.output_dir, accelerator.unwrap_model(model), optimizer, scheduler, global_step)
+        for signum, previous_handler in previous_signal_handlers.items():
+            signal.signal(signum, previous_handler)
         accelerator.end_training()
         return NewbieTrainResult(
             global_step=global_step,
@@ -493,6 +576,9 @@ class NewbieCachedTrainer:
             total_params=total_params,
             saved_adapter_path=str(final_adapter_path),
         )
+
+
+
 
 
 

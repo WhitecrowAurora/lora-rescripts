@@ -6832,8 +6832,16 @@ def get_hidden_states_sdxl(
     weight_dtype: Optional[str] = None,
     accelerator: Optional[Accelerator] = None,
 ):
+    from library import strategy_sdxl
+
     # input_ids: b,n,77 -> b*n, 77
+    input_ids1 = strategy_sdxl.normalize_sdxl_token_tensor(input_ids1, tokenizer1.model_max_length)
+    input_ids2 = strategy_sdxl.normalize_sdxl_token_tensor(input_ids2, tokenizer2.model_max_length)
     b_size = input_ids1.size()[0]
+    if input_ids1.size()[1] == 1:
+        max_token_length = None
+    else:
+        max_token_length = input_ids1.size()[1] * input_ids1.size()[2]
     input_ids1 = input_ids1.reshape((-1, tokenizer1.model_max_length))  # batch_size*n, 77
     input_ids2 = input_ids2.reshape((-1, tokenizer2.model_max_length))  # batch_size*n, 77
 

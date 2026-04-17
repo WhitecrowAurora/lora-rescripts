@@ -367,6 +367,9 @@ class NewbieRuntimeConfig:
     newbie_safe_fallback: bool
     enable_preview: bool
     lulynx_experimental_core_enabled: bool
+    lulynx_lisa_enabled: bool = False
+    lulynx_lisa_active_ratio: float = 0.2
+    lulynx_lisa_interval: int = 1
     peak_vram_control_enabled: bool = False
     peak_vram_target_effective_batch: int = 0
     peak_vram_effective_batch_realized: int = 0
@@ -450,6 +453,11 @@ class NewbieRuntimeConfig:
                 ),
             ]
         )
+        if self.lulynx_lisa_enabled:
+            lines.append(
+                "lulynx_lisa="
+                f"on, active_ratio={self.lulynx_lisa_active_ratio}, interval={self.lulynx_lisa_interval}"
+            )
         return lines
 
 
@@ -703,6 +711,20 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
         lulynx_experimental_core_enabled=_parse_bool(
             _lookup_config_value(raw, "lulynx_experimental_core_enabled", default=False),
             False,
+        ),
+        lulynx_lisa_enabled=_parse_bool(
+            _lookup_config_value(raw, "lulynx_lisa_enabled", default=False),
+            False,
+        ),
+        lulynx_lisa_active_ratio=_parse_float(
+            _lookup_config_value(raw, "lulynx_lisa_active_ratio", default=0.2),
+            0.2,
+            minimum=0.05,
+        ),
+        lulynx_lisa_interval=_parse_int(
+            _lookup_config_value(raw, "lulynx_lisa_interval", default=1),
+            1,
+            minimum=1,
         ),
     )
     _apply_peak_vram_control_to_newbie_config(config, raw, warnings)

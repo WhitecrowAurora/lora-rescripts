@@ -512,8 +512,11 @@ def apply_anima_ui_overrides(config: dict) -> None:
 
     if model_train_type == "anima-lora" and not lora_type:
         legacy_network_module = str(config.get("network_module", "")).strip().lower()
+        legacy_adapter_type = str(get_network_arg_value(network_args, "anima_adapter_type") or "").strip().lower()
         if legacy_network_module == "networks.tlora_anima":
             lora_type = "tlora"
+        elif legacy_adapter_type in {"lora", "lora_fa", "vera", "tlora", "lokr"}:
+            lora_type = legacy_adapter_type
         elif legacy_network_module == "lycoris.kohya":
             lora_type = "lokr"
         elif str(get_network_arg_value(network_args, "algo") or "").strip().lower() == "lokr":
@@ -578,6 +581,46 @@ def apply_anima_ui_overrides(config: dict) -> None:
             network_args = apply_tlora_rank_overrides(config, network_args)
             config["pissa_init"] = False
 
+            for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
+                config.pop(key, None)
+        elif lora_type == "lora_fa":
+            config["network_module"] = "networks.lora_anima"
+            config["anima_adapter_type"] = "lora_fa"
+            network_args = upsert_network_arg(network_args, "anima_adapter_type", "lora_fa")
+            network_args = [
+                item
+                for item in network_args
+                if not str(item).startswith(
+                    (
+                        "lokr_factor=",
+                        "tlora_min_rank=",
+                        "tlora_rank_schedule=",
+                        "tlora_orthogonal_init=",
+                    )
+                )
+            ]
+            network_args = filter_network_args(network_args, PISSA_STALE_NETWORK_ARG_PREFIXES)
+            config["pissa_init"] = False
+            for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
+                config.pop(key, None)
+        elif lora_type == "vera":
+            config["network_module"] = "networks.lora_anima"
+            config["anima_adapter_type"] = "vera"
+            network_args = upsert_network_arg(network_args, "anima_adapter_type", "vera")
+            network_args = [
+                item
+                for item in network_args
+                if not str(item).startswith(
+                    (
+                        "lokr_factor=",
+                        "tlora_min_rank=",
+                        "tlora_rank_schedule=",
+                        "tlora_orthogonal_init=",
+                    )
+                )
+            ]
+            network_args = filter_network_args(network_args, PISSA_STALE_NETWORK_ARG_PREFIXES)
+            config["pissa_init"] = False
             for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
                 config.pop(key, None)
         else:
@@ -709,6 +752,71 @@ def _format_sdxl_fixed_block_swap_scope(swap_input_blocks: bool, swap_middle_blo
     return '/'.join(scopes) if scopes else 'none'
 
 
+def apply_sdxl_block_swap_ui_overrides(config: dict) -> list[str]:
+    model_train_type = str(config.get("model_train_type", "") or "").strip().lower()
+    if model_train_type != "sdxl-lora":
+        return []
+
+    warnings: list[str] = []
+    block_swap_enabled = parse_boolish(config.get("sdxl_block_swap_enabled", False))
+    low_vram_enabled = parse_boolish(config.get("sdxl_low_vram_optimization", False))
+
+    child_requests = (
+        parse_boolish(config.get("sdxl_block_swap_output_blocks", False))
+        or parse_boolish(config.get("sdxl_block_swap_middle_block", False))
+        or parse_boolish(config.get("sdxl_block_swap_offload_after_backward", False))
+        or parse_boolish(config.get("sdxl_block_swap_input_blocks", False))
+        or config.get("sdxl_block_swap_vram_threshold", None) not in (None, "")
+    )
+
+    if not block_swap_enabled:
+        if child_requests:
+            warnings.append("SDXL Block Swap 总开关已关闭，已忽略其子选项。")
+        if low_vram_enabled:
+            return warnings
+
+        config["sdxl_fixed_block_swap"] = False
+        config["sdxl_fixed_block_swap_input_blocks"] = False
+        config["sdxl_fixed_block_swap_middle_block"] = False
+        config["sdxl_fixed_block_swap_output_blocks"] = False
+        config["sdxl_fixed_block_swap_offload_after_backward"] = True
+        config["sdxl_fixed_block_swap_vram_threshold_ratio"] = 0.0
+        return warnings
+
+    swap_output_blocks = parse_boolish(config.get("sdxl_block_swap_output_blocks", True))
+    swap_middle_block = parse_boolish(config.get("sdxl_block_swap_middle_block", True))
+    swap_offload_after_backward = parse_boolish(config.get("sdxl_block_swap_offload_after_backward", True))
+    swap_input_blocks = parse_boolish(config.get("sdxl_block_swap_input_blocks", False))
+    swap_vram_threshold_ratio = _normalize_sdxl_low_vram_swap_threshold_ratio(config.get("sdxl_block_swap_vram_threshold", 70))
+    fixed_block_swap = bool(swap_input_blocks or swap_middle_block or swap_output_blocks)
+
+    config["sdxl_fixed_block_swap"] = fixed_block_swap
+    config["sdxl_fixed_block_swap_input_blocks"] = swap_input_blocks
+    config["sdxl_fixed_block_swap_middle_block"] = swap_middle_block
+    config["sdxl_fixed_block_swap_output_blocks"] = swap_output_blocks
+    config["sdxl_fixed_block_swap_offload_after_backward"] = swap_offload_after_backward
+    config["sdxl_fixed_block_swap_vram_threshold_ratio"] = swap_vram_threshold_ratio
+
+    if low_vram_enabled:
+        warnings.append("已启用独立 SDXL Block Swap；本次会覆盖 ≤6GB 低显存优化里的 block swap 预设。")
+
+    if fixed_block_swap:
+        threshold_label = (
+            "始终尽快卸载"
+            if swap_vram_threshold_ratio <= 0.0
+            else f"{swap_vram_threshold_ratio * 100:.0f}%"
+        )
+        warnings.append(
+            "已启用 SDXL Block Swap：推荐尝试顺序为 output -> middle -> offload_after_backward -> input。"
+            f" 当前交换范围={_format_sdxl_fixed_block_swap_scope(swap_input_blocks, swap_middle_block, swap_output_blocks)}，"
+            f"反向后卸载={'开启' if swap_offload_after_backward else '关闭'}，目标显存水线={threshold_label}。"
+        )
+    else:
+        warnings.append("SDXL Block Swap 总开关已开启，但当前未勾选任何交换范围，因此本次不会启用 block swap。")
+
+    return warnings
+
+
 def apply_sdxl_low_vram_ui_overrides(config: dict) -> list[str]:
     model_train_type = str(config.get("model_train_type", "") or "").strip().lower()
     if model_train_type != "sdxl-lora":
@@ -833,6 +941,7 @@ def apply_sdxl_low_vram_ui_overrides(config: dict) -> list[str]:
 
 def apply_training_ui_overrides(config: dict) -> list[str]:
     warnings = apply_sdxl_low_vram_ui_overrides(config)
+    warnings.extend(apply_sdxl_block_swap_ui_overrides(config))
     apply_anima_ui_overrides(config)
     apply_flux_tlora_ui_overrides(config)
     apply_stable_tlora_ui_overrides(config)
@@ -2356,9 +2465,6 @@ async def get_available_scripts() -> APIResponse:
             for script_name in avaliable_scripts
         ]
     })
-
-
-
 
 
 

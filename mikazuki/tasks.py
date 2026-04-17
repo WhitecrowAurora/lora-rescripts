@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -214,21 +215,52 @@ class Task:
 
     def execute(self):
         self.status = TaskStatus.RUNNING
-        self.process = subprocess.Popen(
-            self.command,
-            env=self.environ,
-            cwd=self.cwd,
-            stdout=PIPE,
-            stderr=subprocess.STDOUT,
-        )
+        popen_kwargs = {
+            "args": self.command,
+            "env": self.environ,
+            "cwd": self.cwd,
+            "stdout": PIPE,
+            "stderr": subprocess.STDOUT,
+        }
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        self.process = subprocess.Popen(**popen_kwargs)
         self._output_thread = threading.Thread(target=self._read_output, daemon=True)
         self._output_thread.start()
+
+    def _try_graceful_terminate(self, timeout: float = 120.0) -> bool:
+        if self.process is None:
+            return True
+        if self.process.poll() is not None:
+            self._join_output_thread()
+            return True
+        if os.name == "nt":
+            return False
+
+        try:
+            pgid = os.getpgid(self.process.pid)
+            os.killpg(pgid, signal.SIGINT)
+        except Exception as exc:
+            log.warning(f"Graceful SIGINT termination failed, falling back to force kill: {exc}")
+            return False
+
+        try:
+            self.process.wait(timeout=timeout)
+            self._join_output_thread()
+            return True
+        except TimeoutExpired:
+            log.warning(
+                f"Graceful task termination timed out after {timeout:.0f}s for task {self.task_id}; falling back to force kill."
+            )
+            return False
 
     def terminate(self):
         if self.process is None:
             self.status = TaskStatus.TERMINATED
             return
         try:
+            if self._try_graceful_terminate():
+                return
             kill_proc_tree(self.process.pid, True)
         except Exception as e:
             log.error(f"Error when killing process: {e}")

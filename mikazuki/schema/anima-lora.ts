@@ -70,7 +70,7 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
-            lora_type: Schema.union(["lora", "tlora", "lokr"]).default("lora").description("适配器类型。LoRA 更轻量；T-LoRA 会按时间步动态 rank；LoKr 走内置线性层注入的实验路线"),
+            lora_type: Schema.union(["lora", "lora_fa", "vera", "tlora", "lokr"]).default("lora").description("适配器类型。LoRA 是常规路线；LoRA-FA 会冻结 LoRA-A / lora_down，仅训练 LoRA-B / lora_up；VeRA 训练时使用共享随机投影、导出时自动转换成兼容 LoRA；T-LoRA 会按时间步动态 rank；LoKr 走内置线性层注入的实验路线"),
             network_weights: Schema.string().role('filepicker').description("从已有的 LoRA / LoKr 模型继续训练，填写路径"),
             network_dim: Schema.number().min(1).default(16).description("网络维度，常用 4~128，不是越大越好, 低 dim 可以降低显存占用"),
             network_alpha: Schema.number().min(1).default(16).description("常用值：等于 network_dim 或 network_dim*1/2 或 1。使用较小的 alpha 需要提升学习率"),
@@ -89,6 +89,24 @@ Schema.intersect([
                 network_module: Schema.const("networks.lora_anima").default("networks.lora_anima").hidden(),
                 network_dropout: Schema.number().step(0.01).default(0).description("LoRA dropout 概率"),
                 pissa_init: Schema.boolean().default(false).description("启用 PiSSA 初始化（实验性，仅在 LoRA 适配器类型下生效）"),
+                lycoris_algo: Schema.string().hidden(),
+                lokr_factor: Schema.number().hidden(),
+                dropout: Schema.number().hidden(),
+            }),
+            Schema.object({
+                lora_type: Schema.const("lora_fa").required(),
+                network_module: Schema.const("networks.lora_anima").default("networks.lora_anima").hidden(),
+                network_dropout: Schema.number().step(0.01).default(0).description("LoRA-FA dropout 概率"),
+                pissa_init: Schema.boolean().hidden(),
+                lycoris_algo: Schema.string().hidden(),
+                lokr_factor: Schema.number().hidden(),
+                dropout: Schema.number().hidden(),
+            }),
+            Schema.object({
+                lora_type: Schema.const("vera").required(),
+                network_module: Schema.const("networks.lora_anima").default("networks.lora_anima").hidden(),
+                network_dropout: Schema.number().step(0.01).default(0).description("VeRA dropout 概率"),
+                pissa_init: Schema.boolean().hidden(),
                 lycoris_algo: Schema.string().hidden(),
                 lokr_factor: Schema.number().hidden(),
                 dropout: Schema.number().hidden(),

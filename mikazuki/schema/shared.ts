@@ -7,7 +7,7 @@
     const LULYNX_EXPERIMENTAL_CORE_COMMON = Schema.intersect([
         Schema.object({
             lulynx_experimental_core_enabled: Schema.boolean().default(false).description("启用 Lulynx 实验核心。集中管理 SafeGuard、EMA、ResourceManager、BlockWeightManager、SmartRank、AutoController、LISA、PCGrad、Pause、Prodigy Guard 与轻量监控"),
-        }).description("Lulynx 实验核心"),
+        }),
         Schema.union([
             Schema.object({
                 lulynx_experimental_core_enabled: Schema.const(true).required(),
@@ -153,7 +153,7 @@
             }),
             Schema.object({}),
         ]),
-    ])
+    ]).description("Lulynx 实验核心")
 
     const LULYNX_EXPERIMENTAL_CORE_ANIMA = Schema.intersect([
         LULYNX_EXPERIMENTAL_CORE_COMMON,
@@ -168,7 +168,7 @@
             }),
             Schema.object({}),
         ]),
-    ])
+    ]).description("Lulynx 实验核心")
 
     const PEAK_VRAM_CONTROL = Schema.intersect([
         Schema.object({
@@ -521,7 +521,7 @@
                 initial_step: Schema.number().min(0).description("从指定 step 编号开始计数，会覆盖 initial_epoch"),
                 skip_until_initial_step: Schema.boolean().default(false).description("配合 initial_step 使用，真正跳过前面的训练步数"),
                 ui_custom_params: Schema.string().role('textarea').description("**危险** 自定义参数，请输入 TOML 格式，将会直接覆盖当前界面内任何参数。实时更新，推荐写完后再粘贴过来"),
-            }),
+            }).description("其他设置"),
             Schema.union([
                 Schema.object({
                     ema_enabled: Schema.const(true).required(),
@@ -546,7 +546,7 @@
                 }),
                 Schema.object({}),
             ]),
-        ]).description("其他设置"),
+        ]),
 
         DISTRIBUTED_TRAINING: Schema.object({
             enable_distributed_training: Schema.boolean().default(false).description("启用分布式启动。当前为最小实现，支持多进程 / 多机拉起，以及 worker 最小配置与缺失资源同步"),

@@ -6,6 +6,7 @@
 import json
 import math
 import os
+import weakref
 from functools import partial
 from typing import Dict, List, Optional, Tuple, Type, Union
 from diffusers import AutoencoderKL
@@ -48,6 +49,16 @@ def _normalize_pissa_export_mode(value) -> str:
     if "快速" in str(value or ""):
         return "approx"
     return "lossless"
+
+
+def _vera_kaiming_uniform(shape: Tuple[int, ...], seed: int) -> torch.Tensor:
+    tensor = torch.empty(shape, dtype=torch.float32)
+    fan_in = shape[1] if len(shape) >= 2 else shape[0]
+    fan_in = max(1, int(fan_in))
+    bound = math.sqrt(6.0 / float(fan_in))
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    with torch.no_grad():
+        return tensor.uniform_(-bound, bound, generator=generator)
 
 
 class LoRAModule(torch.nn.Module):
@@ -296,6 +307,119 @@ class PiSSAModule(LoRAModule):
         )
         down_weight = torch.cat([current_down, self._pissa_initial_lora_down_weight], dim=0)
         alpha = torch.tensor(float(down_weight.shape[0]), dtype=torch.float32)
+        return down_weight, up_weight, alpha
+
+
+class VeraModule(torch.nn.Module):
+    """
+    Lightweight VeRA module with shared projection buffers stored on the parent network.
+    Export is converted back to standard LoRA weights for compatibility.
+    """
+
+    def __init__(
+        self,
+        lora_name,
+        org_module: torch.nn.Module,
+        multiplier=1.0,
+        lora_dim=4,
+        alpha=1,
+        dropout=None,
+        rank_dropout=None,
+        module_dropout=None,
+        network_ref=None,
+        d_initial: float = 0.1,
+    ):
+        del alpha  # VeRA does not use LoRA alpha scaling during training.
+        super().__init__()
+        if org_module.__class__.__name__ != "Linear":
+            raise ValueError("VeRA in this route currently supports only Linear modules.")
+        if network_ref is None:
+            raise ValueError("VeRA requires a parent network reference for shared projection buffers.")
+
+        self.lora_name = lora_name
+        self.lora_dim = int(lora_dim)
+        self.multiplier = multiplier
+        self.dropout = dropout
+        self.rank_dropout = rank_dropout
+        self.module_dropout = module_dropout
+        self.org_module = org_module
+        self.in_features = int(org_module.in_features)
+        self.out_features = int(org_module.out_features)
+        self._vera_network_ref = weakref.ref(network_ref)
+
+        network_ref.ensure_vera_shared_buffers(self.out_features, self.in_features)
+
+        self.vera_lambda_b = torch.nn.Parameter(torch.zeros(self.out_features, dtype=torch.float32))
+        self.vera_lambda_d = torch.nn.Parameter(torch.full((self.lora_dim,), float(d_initial), dtype=torch.float32))
+
+    def _get_network(self):
+        network = self._vera_network_ref()
+        if network is None:
+            raise RuntimeError("VeRA parent network reference is no longer available.")
+        return network
+
+    def _get_sliced_projections(self, device: torch.device, dtype: torch.dtype):
+        network = self._get_network()
+        vera_A = network.get_vera_shared_A()[:, : self.in_features].to(device=device, dtype=dtype)
+        vera_B = network.get_vera_shared_B()[: self.out_features, :].to(device=device, dtype=dtype)
+        return vera_A, vera_B
+
+    def get_trainable_params(self):
+        return [self.vera_lambda_b, self.vera_lambda_d]
+
+    def requires_grad_(self, requires_grad: bool = True):
+        self.vera_lambda_b.requires_grad_(requires_grad)
+        self.vera_lambda_d.requires_grad_(requires_grad)
+        return self
+
+    def apply_to(self):
+        self.org_forward = self.org_module.forward
+        accel_modules = getattr(self.org_module, "_lulynx_fused_projection_delta_modules", None)
+        if accel_modules is None:
+            accel_modules = []
+            setattr(self.org_module, "_lulynx_fused_projection_delta_modules", accel_modules)
+        accel_modules.append(self)
+        self.org_module.forward = self.forward
+        del self.org_module
+
+    def compute_forward_delta(self, x):
+        if self.module_dropout is not None and self.training:
+            if torch.rand(1, device=x.device) < self.module_dropout:
+                return None
+
+        work_dtype = self.vera_lambda_d.dtype
+        vera_A, vera_B = self._get_sliced_projections(x.device, work_dtype)
+        lambda_d = self.vera_lambda_d.to(device=x.device, dtype=work_dtype)
+        lambda_b = self.vera_lambda_b.to(device=x.device, dtype=work_dtype)
+
+        hidden = torch.nn.functional.linear(x.to(work_dtype), lambda_d.unsqueeze(1) * vera_A)
+        if self.dropout is not None and self.training:
+            hidden = torch.nn.functional.dropout(hidden, p=self.dropout)
+
+        if self.rank_dropout is not None and self.training:
+            mask = torch.rand((hidden.size(0), self.lora_dim), device=hidden.device) > self.rank_dropout
+            if hidden.ndim == 3:
+                mask = mask.unsqueeze(1)
+            hidden = hidden * mask
+
+        delta = torch.nn.functional.linear(hidden, lambda_b.unsqueeze(1) * vera_B)
+        return delta * self.multiplier
+
+    def forward(self, x):
+        org_forwarded = self.org_forward(x)
+        delta = self.compute_forward_delta(x)
+        if delta is None:
+            return org_forwarded
+        return org_forwarded + delta.to(org_forwarded.dtype)
+
+    @torch.no_grad()
+    def export_standard_lora_weights(self):
+        vera_A, vera_B = self._get_sliced_projections(torch.device("cpu"), torch.float32)
+        lambda_d = self.vera_lambda_d.detach().to(device="cpu", dtype=torch.float32)
+        lambda_b = self.vera_lambda_b.detach().to(device="cpu", dtype=torch.float32)
+        down_weight = lambda_d.unsqueeze(1) * vera_A
+        up_weight = lambda_b.unsqueeze(1) * vera_B
+        alpha = torch.tensor(float(self.lora_dim), dtype=torch.float32)
         return down_weight, up_weight, alpha
 
 
@@ -603,6 +727,8 @@ def create_network(
 ):
     # if unet is an instance of SdxlUNet2DConditionModel or subclass, set is_sdxl to True
     is_sdxl = unet is not None and issubclass(unet.__class__, SdxlUNet2DConditionModel)
+    adapter_type = str(kwargs.get("adapter_type", "lora") or "lora").strip().lower() or "lora"
+    use_vera = adapter_type == "vera"
 
     if network_dim is None:
         network_dim = 4  # default
@@ -657,9 +783,18 @@ def create_network(
     pissa_oversample = int(kwargs.get("pissa_oversample", 8) or 8)
     pissa_apply_conv2d = _parse_bool_arg(kwargs.get("pissa_apply_conv2d", False), default=False)
     pissa_export_mode = _normalize_pissa_export_mode(kwargs.get("pissa_export_mode", "lossless"))
+    vera_projection_prng_key = int(kwargs.get("vera_projection_prng_key", 0) or 0)
+    vera_d_initial = float(kwargs.get("vera_d_initial", 0.1) or 0.1)
 
     module_class: Type[object] = LoRAModule
-    if pissa_init:
+    if use_vera and pissa_init:
+        logger.warning("PiSSA is not supported with VeRA. Disabling pissa_init automatically.")
+        pissa_init = False
+    if use_vera:
+        if conv_dim is not None:
+            logger.warning("VeRA currently ignores conv_dim / conv_alpha and only injects Linear modules.")
+        module_class = VeraModule
+    elif pissa_init:
         logger.info(
             "enable PiSSA initialization: method=%s, niter=%s, oversample=%s, apply_conv2d=%s",
             pissa_method,
@@ -694,6 +829,9 @@ def create_network(
         module_class=module_class,
         varbose=True,
         is_sdxl=is_sdxl,
+        adapter_type=adapter_type,
+        vera_projection_prng_key=vera_projection_prng_key,
+        vera_d_initial=vera_d_initial,
     )
     network.pissa_export_mode = pissa_export_mode
 
@@ -1099,6 +1237,9 @@ class LoRANetwork(torch.nn.Module):
         module_class: Type[object] = LoRAModule,
         varbose: Optional[bool] = False,
         is_sdxl: Optional[bool] = False,
+        adapter_type: Optional[str] = None,
+        vera_projection_prng_key: int = 0,
+        vera_d_initial: float = 0.1,
     ) -> None:
         """
         LoRA network: すごく引数が多いが、パターンは以下の通り
@@ -1118,16 +1259,23 @@ class LoRANetwork(torch.nn.Module):
         self.dropout = dropout
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
+        self.adapter_type = str(adapter_type or "lora").strip().lower() or "lora"
+        self.vera_projection_prng_key = int(vera_projection_prng_key)
+        self.vera_d_initial = float(vera_d_initial)
 
         self.loraplus_lr_ratio = None
         self.loraplus_unet_lr_ratio = None
         self.loraplus_text_encoder_lr_ratio = None
         self.pissa_export_mode = "lossless"
 
+        if self.adapter_type == "vera":
+            self.register_buffer("vera_shared_A", torch.empty((self.lora_dim, 0), dtype=torch.float32), persistent=True)
+            self.register_buffer("vera_shared_B", torch.empty((0, self.lora_dim), dtype=torch.float32), persistent=True)
+
         if modules_dim is not None:
-            logger.info(f"create LoRA network from weights")
+            logger.info(f"create {self.adapter_type.upper()} network from weights")
         elif block_dims is not None:
-            logger.info(f"create LoRA network from block_dims")
+            logger.info(f"create {self.adapter_type.upper()} network from block_dims")
             logger.info(
                 f"neuron dropout: p={self.dropout}, rank dropout: p={self.rank_dropout}, module dropout: p={self.module_dropout}"
             )
@@ -1137,7 +1285,7 @@ class LoRANetwork(torch.nn.Module):
                 logger.info(f"conv_block_dims: {conv_block_dims}")
                 logger.info(f"conv_block_alphas: {conv_block_alphas}")
         else:
-            logger.info(f"create LoRA network. base dim (rank): {lora_dim}, alpha: {alpha}")
+            logger.info(f"create {self.adapter_type.upper()} network. base dim (rank): {lora_dim}, alpha: {alpha}")
             logger.info(
                 f"neuron dropout: p={self.dropout}, rank dropout: p={self.rank_dropout}, module dropout: p={self.module_dropout}"
             )
@@ -1175,6 +1323,11 @@ class LoRANetwork(torch.nn.Module):
                             lora_name = prefix + "." + name + "." + child_name
                             lora_name = lora_name.replace(".", "_")
 
+                            if self.adapter_type == "vera" and not is_linear:
+                                if is_conv2d_1x1 or self.conv_lora_dim is not None or conv_block_dims is not None:
+                                    skipped.append(lora_name)
+                                continue
+
                             dim = None
                             alpha = None
 
@@ -1207,15 +1360,22 @@ class LoRANetwork(torch.nn.Module):
                                     skipped.append(lora_name)
                                 continue
 
+                            module_kwargs = dict(
+                                dropout=dropout,
+                                rank_dropout=rank_dropout,
+                                module_dropout=module_dropout,
+                            )
+                            if self.adapter_type == "vera":
+                                module_kwargs["network_ref"] = self
+                                module_kwargs["d_initial"] = self.vera_d_initial
+
                             lora = module_class(
                                 lora_name,
                                 child_module,
                                 self.multiplier,
                                 dim,
                                 alpha,
-                                dropout=dropout,
-                                rank_dropout=rank_dropout,
-                                module_dropout=module_dropout,
+                                **module_kwargs,
                             )
                             loras.append(lora)
             return loras, skipped
@@ -1264,6 +1424,37 @@ class LoRANetwork(torch.nn.Module):
             assert lora.lora_name not in names, f"duplicated lora name: {lora.lora_name}"
             names.add(lora.lora_name)
 
+    def ensure_vera_shared_buffers(self, out_features: int, in_features: int) -> None:
+        if self.adapter_type != "vera":
+            return
+
+        current_a = self.vera_shared_A
+        current_b = self.vera_shared_B
+        target_in = max(int(in_features), int(current_a.shape[1]))
+        target_out = max(int(out_features), int(current_b.shape[0]))
+        if target_in == current_a.shape[1] and target_out == current_b.shape[0]:
+            return
+
+        new_a = _vera_kaiming_uniform((self.lora_dim, target_in), self.vera_projection_prng_key)
+        new_b = _vera_kaiming_uniform((target_out, self.lora_dim), self.vera_projection_prng_key + 1)
+        if current_a.numel() > 0:
+            new_a[:, : current_a.shape[1]] = current_a.detach().to(device="cpu", dtype=torch.float32)
+        if current_b.numel() > 0:
+            new_b[: current_b.shape[0], :] = current_b.detach().to(device="cpu", dtype=torch.float32)
+
+        self._buffers["vera_shared_A"] = new_a.to(device=current_a.device, dtype=current_a.dtype)
+        self._buffers["vera_shared_B"] = new_b.to(device=current_b.device, dtype=current_b.dtype)
+
+    def get_vera_shared_A(self) -> torch.Tensor:
+        if self.adapter_type != "vera":
+            raise RuntimeError("VeRA shared projections are only available when adapter_type=vera.")
+        return self.vera_shared_A
+
+    def get_vera_shared_B(self) -> torch.Tensor:
+        if self.adapter_type != "vera":
+            raise RuntimeError("VeRA shared projections are only available when adapter_type=vera.")
+        return self.vera_shared_B
+
     def set_multiplier(self, multiplier):
         self.multiplier = multiplier
         for lora in self.text_encoder_loras + self.unet_loras:
@@ -1281,17 +1472,26 @@ class LoRANetwork(torch.nn.Module):
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
+        if self.adapter_type == "vera":
+            has_native_vera_state = any(("vera_lambda_" in key) or key.startswith("vera_shared_") for key in weights_sd.keys())
+            if not has_native_vera_state:
+                raise RuntimeError(
+                    "This VeRA route exports inference-compatible standard LoRA weights. "
+                    "Continuing VeRA training from exported adapter weights is not supported. "
+                    "Please resume from save_state / checkpoint instead."
+                )
+
         info = self.load_state_dict(weights_sd, False)
         return info
 
     def apply_to(self, text_encoder, unet, apply_text_encoder=True, apply_unet=True):
         if apply_text_encoder:
-            logger.info(f"enable LoRA for text encoder: {len(self.text_encoder_loras)} modules")
+            logger.info(f"enable {self.adapter_type.upper()} for text encoder: {len(self.text_encoder_loras)} modules")
         else:
             self.text_encoder_loras = []
 
         if apply_unet:
-            logger.info(f"enable LoRA for U-Net: {len(self.unet_loras)} modules")
+            logger.info(f"enable {self.adapter_type.upper()} for U-Net: {len(self.unet_loras)} modules")
         else:
             self.unet_loras = []
 
@@ -1457,11 +1657,64 @@ class LoRANetwork(torch.nn.Module):
     def get_trainable_params(self):
         return self.parameters()
 
+    def _prepare_adapter_export_metadata(self, metadata):
+        if self.adapter_type != "vera":
+            return metadata
+
+        metadata = {} if metadata is None else dict(metadata)
+        original_network_module = str(metadata.get("ss_network_module", "") or "").strip() or "networks.vera"
+        metadata.setdefault("ss_training_network_module", original_network_module)
+        metadata["ss_network_module"] = "networks.lora"
+        metadata["ss_adapter_variant"] = "vera"
+        metadata["ss_vera_compatible_export"] = "true"
+        return metadata
+
+    def _prepare_vera_export_for_save(self, state_dict, metadata):
+        if self.adapter_type != "vera":
+            return state_dict, metadata
+
+        vera_loras = [lora for lora in (self.text_encoder_loras + self.unet_loras) if isinstance(lora, VeraModule)]
+        if not vera_loras:
+            return state_dict, metadata
+
+        state_dict = dict(state_dict)
+        for lora in vera_loras:
+            down_weight, up_weight, alpha = lora.export_standard_lora_weights()
+            state_dict[f"{lora.lora_name}.lora_down.weight"] = down_weight
+            state_dict[f"{lora.lora_name}.lora_up.weight"] = up_weight
+            state_dict[f"{lora.lora_name}.alpha"] = alpha
+            state_dict.pop(f"{lora.lora_name}.vera_lambda_b", None)
+            state_dict.pop(f"{lora.lora_name}.vera_lambda_d", None)
+
+        state_dict.pop("vera_shared_A", None)
+        state_dict.pop("vera_shared_B", None)
+
+        metadata = self._prepare_adapter_export_metadata(metadata)
+        raw_network_args = metadata.get("ss_network_args") if metadata is not None else None
+        if raw_network_args:
+            try:
+                parsed = json.loads(raw_network_args)
+                if isinstance(parsed, dict):
+                    parsed.pop("adapter_type", None)
+                    parsed.pop("vera_projection_prng_key", None)
+                    parsed.pop("vera_d_initial", None)
+                elif isinstance(parsed, list):
+                    parsed = [
+                        item for item in parsed
+                        if not str(item).startswith(("adapter_type=", "vera_projection_prng_key=", "vera_d_initial="))
+                    ]
+                metadata["ss_network_args"] = json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                pass
+
+        return state_dict, metadata
+
     def save_weights(self, file, dtype, metadata):
         if metadata is not None and len(metadata) == 0:
             metadata = None
 
         state_dict = self.state_dict()
+        state_dict, metadata = self._prepare_vera_export_for_save(state_dict, metadata)
         state_dict, metadata = self._prepare_pissa_export_for_save(state_dict, metadata)
 
         if dtype is not None:
@@ -1627,6 +1880,34 @@ class LoRANetwork(torch.nn.Module):
             lora.enabled = False
 
     def apply_max_norm_regularization(self, max_norm_value, device):
+        if self.adapter_type == "vera":
+            norms = []
+            keys_scaled = 0
+            for lora in self.text_encoder_loras + self.unet_loras:
+                if not isinstance(lora, VeraModule):
+                    continue
+                down, up, alpha = lora.export_standard_lora_weights()
+                down = down.to(device)
+                up = up.to(device)
+                alpha = alpha.to(device)
+                dim = down.shape[0]
+                scale = alpha / dim
+                updown = (up @ down) * scale
+                norm = updown.norm().clamp(min=max_norm_value / 2)
+                desired = torch.clamp(norm, max=max_norm_value)
+                ratio = desired / norm
+                if float(ratio) != 1.0:
+                    sqrt_ratio = torch.sqrt(ratio)
+                    with torch.no_grad():
+                        lora.vera_lambda_b.mul_(sqrt_ratio.to(device=lora.vera_lambda_b.device, dtype=lora.vera_lambda_b.dtype))
+                        lora.vera_lambda_d.mul_(sqrt_ratio.to(device=lora.vera_lambda_d.device, dtype=lora.vera_lambda_d.dtype))
+                    keys_scaled += 1
+                norms.append(float((updown.norm() * ratio).item()))
+
+            if not norms:
+                return 0, 0, 0
+            return keys_scaled, sum(norms) / len(norms), max(norms)
+
         downkeys = []
         upkeys = []
         alphakeys = []

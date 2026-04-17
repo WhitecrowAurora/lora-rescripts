@@ -417,7 +417,10 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
                             weights_list,
                         )
                     else:
-                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                        input_ids = [
+                            ids.to(accelerator.device)
+                            for ids in strategy_sdxl.normalize_sdxl_token_pair(batch["input_ids_list"])
+                        ]
                         encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
                             tokenize_strategy,
                             self.get_models_for_text_encoding(args, accelerator, text_encoders),
