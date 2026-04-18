@@ -457,6 +457,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
 
             huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
             loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+            loss = self._apply_contrastive_flow_matching_loss(args, noise_pred, target, loss)
             if weighting is not None:
                 loss = loss * weighting
             if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -481,6 +482,20 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
                     "but a training-step OOM still requires structural changes such as long_edge mode, smaller batch size, or lower rank."
                 ) from exc
             raise
+
+    def get_flow_pixel_counts(self, args, batch, latents):
+        if (
+            bool(getattr(args, "flow_model", False))
+            and bool(getattr(args, "flow_uniform_shift", False))
+            and getattr(args, "flow_uniform_static_ratio", None) in (None, "")
+        ):
+            target_size = batch.get("target_sizes_hw")
+            if target_size is None:
+                raise ValueError(
+                    "Resolution-aware Rectified Flow shift requires target_sizes_hw in batch."
+                )
+            return (target_size[:, 0] * target_size[:, 1]).to(latents.device, torch.float32)
+        return None
 
     def get_text_cond(self, args, accelerator, batch, tokenizers, text_encoders, weight_dtype):
         if "text_encoder_outputs1_list" not in batch or batch["text_encoder_outputs1_list"] is None:

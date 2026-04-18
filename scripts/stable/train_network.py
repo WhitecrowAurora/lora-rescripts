@@ -461,6 +461,10 @@ class NetworkTrainer:
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizers, text_encoder, unet):
         train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizers[0], text_encoder, unet)
 
+    def get_flow_pixel_counts(self, args, batch, latents):
+        # Base route has no resolution-aware RF shift signal.
+        return None
+
     # region SD/SDXL
 
     def post_process_network(self, args, accelerator, network, text_encoders, unet):
@@ -497,7 +501,10 @@ class NetworkTrainer:
     ):
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
-        noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+        flow_pixel_counts = self.get_flow_pixel_counts(args, batch, latents)
+        noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(
+            args, noise_scheduler, latents, pixel_counts=flow_pixel_counts
+        )
         noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
         # ensure the hidden state will require grad
@@ -526,7 +533,9 @@ class NetworkTrainer:
                 if network is not None and hasattr(network, "clear_current_timestep"):
                     network.clear_current_timestep()
 
-        if args.v_parameterization:
+        if bool(getattr(args, "flow_model", False)):
+            target = noise - latents
+        elif args.v_parameterization:
             # v-parameterization training
             target = noise_scheduler.get_velocity(latents, noise, timesteps)
         else:
@@ -564,7 +573,23 @@ class NetworkTrainer:
 
         return noise_pred, target, timesteps, None
 
+    def _apply_contrastive_flow_matching_loss(self, args, noise_pred, target, loss):
+        if not bool(getattr(args, "contrastive_flow_matching", False)):
+            return loss
+        if not bool(getattr(args, "flow_model", False)):
+            return loss
+        if noise_pred.shape[0] <= 1:
+            return loss
+
+        negative_target = target.roll(1, 0)
+        contrastive = torch.nn.functional.mse_loss(noise_pred.float(), negative_target.float(), reduction="none")
+        cfm_lambda = float(getattr(args, "cfm_lambda", 0.05) or 0.05)
+        return loss - (cfm_lambda * contrastive)
+
     def post_process_loss(self, loss, args, timesteps: torch.IntTensor, noise_scheduler) -> torch.FloatTensor:
+        if bool(getattr(args, "flow_model", False)):
+            return loss
+
         if args.min_snr_gamma:
             loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
         if args.scale_v_pred_loss_like_noise_pred:
@@ -710,6 +735,7 @@ class NetworkTrainer:
 
         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
         loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+        loss = self._apply_contrastive_flow_matching_loss(args, noise_pred, target, loss)
         if weighting is not None:
             loss = loss * weighting
         if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -770,6 +796,48 @@ class NetworkTrainer:
             route_kind="sdxl" if self.is_sdxl else "stable",
         )
         self.configure_dataset_runtime_policy(args)
+
+        if bool(getattr(args, "flow_model", False)):
+            logger.info("Rectified Flow objective is enabled for this run.")
+            if bool(getattr(args, "v_parameterization", False)):
+                raise ValueError("`--flow_model` cannot be combined with `--v_parameterization`.")
+
+            def _disable_incompatible_flag(flag_name: str, replacement):
+                if getattr(args, flag_name, None):
+                    logger.warning(
+                        f"`--{flag_name}` is ignored when Rectified Flow is enabled; overriding to {replacement}."
+                    )
+                    setattr(args, flag_name, replacement)
+
+            _disable_incompatible_flag("min_snr_gamma", None)
+            _disable_incompatible_flag("debiased_estimation_loss", False)
+            _disable_incompatible_flag("scale_v_pred_loss_like_noise_pred", False)
+            _disable_incompatible_flag("v_pred_like_loss", None)
+            _disable_incompatible_flag("zero_terminal_snr", False)
+            _disable_incompatible_flag("ip_noise_gamma", None)
+            _disable_incompatible_flag("noise_offset", None)
+            _disable_incompatible_flag("multires_noise_iterations", None)
+
+            flow_dist = str(getattr(args, "flow_timestep_distribution", "logit_normal") or "logit_normal").strip().lower()
+            if flow_dist not in {"logit_normal", "uniform"}:
+                raise ValueError(
+                    f"Unsupported flow_timestep_distribution={flow_dist}. Expected one of: logit_normal, uniform."
+                )
+
+            flow_logit_std = float(getattr(args, "flow_logit_std", 1.0) or 1.0)
+            if flow_logit_std <= 0:
+                raise ValueError("`--flow_logit_std` must be positive.")
+
+            flow_uniform_static_ratio = getattr(args, "flow_uniform_static_ratio", None)
+            if flow_uniform_static_ratio is not None and str(flow_uniform_static_ratio).strip() != "":
+                try:
+                    parsed_ratio = float(flow_uniform_static_ratio)
+                except (TypeError, ValueError):
+                    raise ValueError("`--flow_uniform_static_ratio` must be a positive number.")
+                if parsed_ratio <= 0:
+                    raise ValueError("`--flow_uniform_static_ratio` must be positive.")
+        if bool(getattr(args, "contrastive_flow_matching", False)) and not bool(getattr(args, "flow_model", False)):
+            raise ValueError("`--contrastive_flow_matching` currently requires `--flow_model`.")
 
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
@@ -2461,6 +2529,64 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Max number of validation dataset items processed. By default, validation will run the entire validation dataset / 処理される検証データセット項目の最大数。デフォルトでは、検証は検証データセット全体を実行します",
+    )
+
+    parser.add_argument(
+        "--flow_model",
+        action="store_true",
+        help="enable Rectified Flow objective / Rectified Flow 训练目标",
+    )
+    parser.add_argument(
+        "--flow_use_ot",
+        action="store_true",
+        help="pair latents and noise with cosine optimal transport in Rectified Flow / 启用余弦最优传输配对",
+    )
+    parser.add_argument(
+        "--flow_timestep_distribution",
+        type=str,
+        default="logit_normal",
+        choices=["logit_normal", "uniform"],
+        help="Rectified Flow timestep distribution / Rectified Flow 时间步分布",
+    )
+    parser.add_argument(
+        "--flow_logit_mean",
+        type=float,
+        default=0.0,
+        help="logit-normal mean for Rectified Flow timestep sampling / RF logit-normal 均值",
+    )
+    parser.add_argument(
+        "--flow_logit_std",
+        type=float,
+        default=1.0,
+        help="logit-normal std for Rectified Flow timestep sampling / RF logit-normal 标准差",
+    )
+    parser.add_argument(
+        "--flow_uniform_shift",
+        action="store_true",
+        help="enable resolution-aware timestep shift for Rectified Flow / 启用分辨率相关 RF 时间步偏移",
+    )
+    parser.add_argument(
+        "--flow_uniform_base_pixels",
+        type=float,
+        default=1024.0 * 1024.0,
+        help="base pixel count used by resolution-aware RF shift / 分辨率相关偏移的基准像素数",
+    )
+    parser.add_argument(
+        "--flow_uniform_static_ratio",
+        type=float,
+        default=None,
+        help="fixed ratio used by RF timestep shift, overrides resolution-aware shift / 固定 RF 偏移比率",
+    )
+    parser.add_argument(
+        "--contrastive_flow_matching",
+        action="store_true",
+        help="enable contrastive flow matching (RF route) / 启用对比流匹配",
+    )
+    parser.add_argument(
+        "--cfm_lambda",
+        type=float,
+        default=0.05,
+        help="contrastive flow matching lambda / 对比流匹配权重",
     )
     return parser
 

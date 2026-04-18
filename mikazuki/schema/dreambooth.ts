@@ -76,6 +76,40 @@ Schema.intersect([
         Schema.object({}),
     ]),
 
+    Schema.union([
+        Schema.intersect([
+            Schema.object({
+                model_train_type: Schema.const("sdxl-finetune").required(),
+                flow_model: Schema.boolean().default(false).description("启用 Rectified Flow 训练目标（RF 底模微调时使用）"),
+            }).description("Rectified Flow"),
+            Schema.union([
+                Schema.object({
+                    model_train_type: Schema.const("sdxl-finetune").required(),
+                    flow_model: Schema.const(true).required(),
+                    flow_use_ot: Schema.boolean().default(false).description("使用余弦最优传输配对 latents 与噪声"),
+                    flow_timestep_distribution: Schema.union(["logit_normal", "uniform"]).default("logit_normal").description("RF 时间步采样分布"),
+                    flow_uniform_shift: Schema.boolean().default(false).description("启用分辨率相关 RF 时间步偏移"),
+                    flow_uniform_base_pixels: Schema.number().step(1).default(1048576).description("分辨率相关偏移基准像素数（默认 1024x1024）"),
+                    flow_uniform_static_ratio: Schema.number().step(0.01).description("固定 RF 时间步偏移比率。填写后会覆盖分辨率相关偏移"),
+                    contrastive_flow_matching: Schema.boolean().default(false).description("启用对比流匹配（CFM）损失"),
+                    cfm_lambda: Schema.number().step(0.01).default(0.05).description("CFM 对比项权重"),
+                }),
+                Schema.object({}),
+            ]),
+            Schema.union([
+                Schema.object({
+                    model_train_type: Schema.const("sdxl-finetune").required(),
+                    flow_model: Schema.const(true).required(),
+                    flow_timestep_distribution: Schema.const("logit_normal").required(),
+                    flow_logit_mean: Schema.number().step(0.1).default(0.0).description("logit-normal 均值"),
+                    flow_logit_std: Schema.number().step(0.1).default(1.0).description("logit-normal 标准差（必须 > 0）"),
+                }),
+                Schema.object({}),
+            ]),
+        ]),
+        Schema.object({}),
+    ]),
+
 
     Schema.intersect([
         Schema.object({

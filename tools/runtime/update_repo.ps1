@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $mirrorHelperPath = Join-Path $PSScriptRoot 'mirror_env.ps1'
 $defaultRepoUrl = 'https://github.com/WhitecrowAurora/lora-rescripts'
@@ -208,6 +209,93 @@ function Copy-RepoOverlay {
     }
 }
 
+function Invoke-DownloadFileWithProgress {
+    param(
+        [string]$Uri,
+        [string]$OutFile,
+        [int]$TimeoutSec = 120,
+        [string]$Label = "Downloading archive"
+    )
+
+    if (Test-Path -LiteralPath $OutFile) {
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $outputDir = Split-Path -Parent $OutFile
+    if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralPath $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    }
+
+    $request = [System.Net.HttpWebRequest]::Create($Uri)
+    $request.Method = "GET"
+    $request.Timeout = $TimeoutSec * 1000
+    $request.ReadWriteTimeout = $TimeoutSec * 1000
+    $request.UserAgent = "lora-rescripts-updater"
+
+    $response = $null
+    $responseStream = $null
+    $fileStream = $null
+
+    try {
+        $response = $request.GetResponse()
+        $responseStream = $response.GetResponseStream()
+        if (-not $responseStream) {
+            throw "Unable to open response stream."
+        }
+
+        $fileStream = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+        $buffer = New-Object byte[] 262144
+        $totalBytes = [int64]$response.ContentLength
+        $downloadedBytes = [int64]0
+        $lastReport = [DateTime]::UtcNow.AddSeconds(-1)
+
+        while ($true) {
+            $bytesRead = $responseStream.Read($buffer, 0, $buffer.Length)
+            if ($bytesRead -le 0) {
+                break
+            }
+
+            $fileStream.Write($buffer, 0, $bytesRead)
+            $downloadedBytes += [int64]$bytesRead
+
+            $now = [DateTime]::UtcNow
+            if (($now - $lastReport).TotalSeconds -ge 0.5) {
+                if ($totalBytes -gt 0) {
+                    $percent = [Math]::Min(100, [Math]::Round(($downloadedBytes * 100.0) / $totalBytes, 1))
+                    $downloadedMb = [Math]::Round($downloadedBytes / 1MB, 2)
+                    $totalMb = [Math]::Round($totalBytes / 1MB, 2)
+                    Write-Host ("{0}: {1}% ({2} MB / {3} MB)" -f $Label, $percent, $downloadedMb, $totalMb) -ForegroundColor DarkGray
+                }
+                else {
+                    $downloadedMb = [Math]::Round($downloadedBytes / 1MB, 2)
+                    Write-Host ("{0}: {1} MB downloaded" -f $Label, $downloadedMb) -ForegroundColor DarkGray
+                }
+                $lastReport = $now
+            }
+        }
+
+        if ($totalBytes -gt 0) {
+            $totalMb = [Math]::Round($totalBytes / 1MB, 2)
+            Write-Host ("{0}: 100% ({1} MB / {1} MB)" -f $Label, $totalMb) -ForegroundColor DarkGray
+        }
+        else {
+            $downloadedMb = [Math]::Round($downloadedBytes / 1MB, 2)
+            Write-Host ("{0}: completed ({1} MB)" -f $Label, $downloadedMb) -ForegroundColor DarkGray
+        }
+    }
+    finally {
+        if ($fileStream) {
+            $fileStream.Dispose()
+        }
+        if ($responseStream) {
+            $responseStream.Dispose()
+        }
+        if ($response) {
+            $response.Dispose()
+        }
+    }
+}
+
 function Invoke-ArchiveOverlayUpdate {
     param(
         [string]$RepoUrl,
@@ -232,7 +320,7 @@ function Invoke-ArchiveOverlayUpdate {
         foreach ($candidateUrl in (Get-ArchiveUrlCandidates -RepoUrl $RepoUrl -Branch $Branch)) {
             Write-Host ("Trying source archive: {0}" -f $candidateUrl) -ForegroundColor Yellow
             try {
-                Invoke-WebRequest -Uri $candidateUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
+                Invoke-DownloadFileWithProgress -Uri $candidateUrl -OutFile $zipPath -TimeoutSec 120 -Label "Archive download"
                 if ((Test-Path -LiteralPath $zipPath) -and ((Get-Item -LiteralPath $zipPath).Length -gt 0)) {
                     $downloaded = $true
                     break
