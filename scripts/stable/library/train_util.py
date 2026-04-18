@@ -5763,12 +5763,55 @@ def read_config_from_file(args: argparse.Namespace, parser: argparse.ArgumentPar
 # region utils
 
 
+def _resume_state_allows_missing_scheduler(args: argparse.Namespace) -> bool:
+    optimizer_type = str(getattr(args, "optimizer_type", "") or "").strip().lower()
+    if optimizer_type.endswith("schedulefree") or bool(getattr(args, "optimizer_schedulefree_wrapper", False)):
+        return True
+
+    lr_scheduler = str(getattr(args, "lr_scheduler", "") or "").strip().lower()
+    lr_scheduler_type = str(getattr(args, "lr_scheduler_type", "") or "").strip()
+    return lr_scheduler == "constant" and not lr_scheduler_type
+
+
+def _ensure_scheduler_state_compatibility(accelerator, args: argparse.Namespace, state_dir: str) -> None:
+    if not state_dir or not os.path.isdir(state_dir):
+        return
+
+    scheduler_file = os.path.join(state_dir, "scheduler.bin")
+    if os.path.isfile(scheduler_file) or not _resume_state_allows_missing_scheduler(args):
+        return
+
+    schedulers = list(getattr(accelerator, "_schedulers", []) or [])
+    if len(schedulers) == 0:
+        logger.info(
+            "resume/save state dir has no scheduler.bin, but this optimizer path does not register a resumable scheduler. continuing."
+        )
+        return
+
+    written_files = []
+    for i, scheduler in enumerate(schedulers):
+        state_dict_fn = getattr(scheduler, "state_dict", None)
+        if not callable(state_dict_fn):
+            continue
+
+        state_path = os.path.join(state_dir, "scheduler.bin" if i == 0 else f"scheduler_{i}.bin")
+        try:
+            torch.save(state_dict_fn(), state_path)
+            written_files.append(state_path)
+        except Exception as exc:
+            logger.warning(f"failed to synthesize scheduler state for compatibility: {state_path} ({exc})")
+
+    if written_files:
+        logger.info(f"wrote scheduler compatibility state file(s): {', '.join(written_files)}")
+
+
 def resume_from_local_or_hf_if_specified(accelerator, args):
     if not args.resume:
         return
 
     if not args.resume_from_huggingface:
         logger.info(f"resume training from local state: {args.resume}")
+        _ensure_scheduler_state_compatibility(accelerator, args, args.resume)
         accelerator.load_state(args.resume)
         return
 
@@ -5813,6 +5856,7 @@ def resume_from_local_or_hf_if_specified(accelerator, args):
             "No files found in the specified repo id/path/revision / 指定されたリポジトリID/パス/リビジョンにファイルが見つかりませんでした / 未在指定的 repo id/path/revision 中找到文件"
         )
     dirname = os.path.dirname(results[0])
+    _ensure_scheduler_state_compatibility(accelerator, args, dirname)
     accelerator.load_state(dirname)
 
 
@@ -7076,6 +7120,7 @@ def save_and_remove_state_on_epoch_end(args: argparse.Namespace, accelerator, ep
 
     state_dir = os.path.join(args.output_dir, EPOCH_STATE_NAME.format(model_name, epoch_no))
     accelerator.save_state(state_dir)
+    _ensure_scheduler_state_compatibility(accelerator, args, state_dir)
     if args.save_state_to_huggingface:
         logger.info("uploading state to huggingface.")
         huggingface_util.upload(args, state_dir, "/" + EPOCH_STATE_NAME.format(model_name, epoch_no))
@@ -7098,6 +7143,7 @@ def save_and_remove_state_stepwise(args: argparse.Namespace, accelerator, step_n
 
     state_dir = os.path.join(args.output_dir, STEP_STATE_NAME.format(model_name, step_no))
     accelerator.save_state(state_dir)
+    _ensure_scheduler_state_compatibility(accelerator, args, state_dir)
     if args.save_state_to_huggingface:
         logger.info("uploading state to huggingface.")
         huggingface_util.upload(args, state_dir, "/" + STEP_STATE_NAME.format(model_name, step_no))
@@ -7124,6 +7170,7 @@ def save_state_on_train_end(args: argparse.Namespace, accelerator):
 
     state_dir = os.path.join(args.output_dir, LAST_STATE_NAME.format(model_name))
     accelerator.save_state(state_dir)
+    _ensure_scheduler_state_compatibility(accelerator, args, state_dir)
 
     if args.save_state_to_huggingface:
         logger.info("uploading last state to huggingface.")

@@ -193,7 +193,7 @@ function Test-ModulesReady {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $PythonExe -c "import importlib, sys; failed=[];
+        & $PythonExe -c "import importlib, sys, warnings; warnings.filterwarnings('ignore', message='pkg_resources is deprecated as an API.*', category=UserWarning); failed=[];
 for name in sys.argv[1:]:
     try:
         importlib.import_module(name)
@@ -792,7 +792,7 @@ else {
 }
 
 Invoke-Step "Re-enabling pkg_resources compatibility for TensorBoard in $sageAttentionRuntimeDirName..." {
-    & $sageAttentionPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
+    & $sageAttentionPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81" 2>&1
 }
 
 if (-not (Test-ModulesReady -PythonExe $sageAttentionPython -Modules $mainRequiredModules)) {

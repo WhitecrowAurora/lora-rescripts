@@ -5,7 +5,7 @@ from typing import Iterable
 
 CKPT_EXTENSIONS = {".safetensors", ".ckpt", ".pt"}
 YOLO_RESUME_EXTENSIONS = {".pt", ".pth"}
-STATE_REQUIRED_FILES = ("train_state.json", "optimizer.bin", "scheduler.bin")
+STATE_ALWAYS_REQUIRED_FILES = ("train_state.json", "optimizer.bin")
 STATE_MODEL_FILE_CANDIDATES = ("model.safetensors", "pytorch_model.bin", "model.bin")
 
 
@@ -16,10 +16,33 @@ def resolve_local_path(path_value: str | Path, repo_root: Path) -> Path:
     return target_path.resolve()
 
 
-def check_resume_state_dir_complete(state_dir: Path) -> tuple[bool, str]:
-    for name in STATE_REQUIRED_FILES:
+def _flag_enabled(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resume_state_allows_missing_scheduler(config: dict | None = None) -> bool:
+    payload = config if isinstance(config, dict) else {}
+
+    optimizer_type = str(payload.get("optimizer_type", "") or "").strip().lower()
+    if optimizer_type.endswith("schedulefree") or _flag_enabled(payload.get("optimizer_schedulefree_wrapper")):
+        return True
+
+    lr_scheduler = str(payload.get("lr_scheduler", "") or "").strip().lower()
+    lr_scheduler_type = str(payload.get("lr_scheduler_type", "") or "").strip()
+    return lr_scheduler == "constant" and not lr_scheduler_type
+
+
+def check_resume_state_dir_complete(state_dir: Path, *, config: dict | None = None) -> tuple[bool, str]:
+    for name in STATE_ALWAYS_REQUIRED_FILES:
         if not (state_dir / name).is_file():
             return False, f"missing {name}"
+
+    if not resume_state_allows_missing_scheduler(config) and not (state_dir / "scheduler.bin").is_file():
+        return False, "missing scheduler.bin"
 
     has_model_file = any((state_dir / name).is_file() for name in STATE_MODEL_FILE_CANDIDATES)
     if not has_model_file:
@@ -119,7 +142,7 @@ def validate_resume_launch_guard(config: dict, repo_root: Path) -> tuple[bool, s
     if not resume_dir.exists() or not resume_dir.is_dir():
         return False, f"resume 路径不存在或不是目录，已阻止启动。resume={resume_dir}"
 
-    complete, incomplete_reason = check_resume_state_dir_complete(resume_dir)
+    complete, incomplete_reason = check_resume_state_dir_complete(resume_dir, config=config)
     if not complete:
         return (
             False,

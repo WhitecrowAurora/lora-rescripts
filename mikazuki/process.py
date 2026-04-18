@@ -73,6 +73,46 @@ def _flag_enabled(value, *, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+ACCELERATE_MIXED_PRECISION_CHOICES = {"no", "fp16", "bf16", "fp8"}
+ACCELERATE_DYNAMO_BACKEND_CHOICES = {
+    "no",
+    "eager",
+    "aot_eager",
+    "inductor",
+    "aot_ts_nvfuser",
+    "nvprims_nvfuser",
+    "cudagraphs",
+    "ofi",
+    "fx2trt",
+    "onnxrt",
+    "tensort",
+    "ipex",
+    "tvm",
+}
+
+
+def _resolve_accelerate_launch_config(toml_path: str, launch_config: Optional[dict]) -> dict:
+    if isinstance(launch_config, dict):
+        return launch_config
+    try:
+        return toml.load(toml_path)
+    except Exception:
+        return {}
+
+
+def _resolve_accelerate_mixed_precision(config_data: dict) -> str:
+    mixed_precision = str(config_data.get("mixed_precision", "") or "").strip().lower()
+    return mixed_precision if mixed_precision in ACCELERATE_MIXED_PRECISION_CHOICES else "no"
+
+
+def _resolve_accelerate_dynamo_backend(config_data: dict) -> str:
+    if not _flag_enabled(config_data.get("torch_compile"), default=False):
+        return "no"
+
+    dynamo_backend = str(config_data.get("dynamo_backend", "inductor") or "inductor").strip().lower()
+    return dynamo_backend if dynamo_backend in ACCELERATE_DYNAMO_BACKEND_CHOICES else "inductor"
+
+
 PYTORCH_ALLOC_CONF_ENV = "PYTORCH_ALLOC_CONF"
 PYTORCH_CUDA_ALLOC_CONF_ENV = "PYTORCH_CUDA_ALLOC_CONF"
 
@@ -159,6 +199,7 @@ def build_accelerate_launch_args(
     num_processes: int = 1,
     distributed_runtime: Optional[dict] = None,
     trainer_cli_args: Optional[list[str]] = None,
+    launch_config: Optional[dict] = None,
 ):
     runtime = distributed_runtime if isinstance(distributed_runtime, dict) else {}
     total_num_processes = int(runtime.get("total_num_processes", num_processes) or num_processes or 1)
@@ -166,22 +207,31 @@ def build_accelerate_launch_args(
     machine_rank = int(runtime.get("machine_rank", 0) or 0)
     main_process_ip = str(runtime.get("main_process_ip", "") or "").strip()
     main_process_port = int(runtime.get("main_process_port", 29500) or 29500)
+    config_data = _resolve_accelerate_launch_config(toml_path, launch_config)
+    mixed_precision = _resolve_accelerate_mixed_precision(config_data)
+    dynamo_backend = _resolve_accelerate_dynamo_backend(config_data)
 
     args = [
         sys.executable,
         "-m",
         "accelerate.commands.launch",
+        "--num_processes",
+        str(total_num_processes),
+        "--num_machines",
+        str(num_machines),
+        "--mixed_precision",
+        mixed_precision,
+        "--dynamo_backend",
+        dynamo_backend,
         "--num_cpu_threads_per_process",
         str(cpu_threads),
     ]
 
     if total_num_processes > 1 or num_machines > 1:
-        args.extend(["--multi_gpu", "--num_processes", str(total_num_processes)])
+        args.append("--multi_gpu")
         if num_machines > 1:
             args.extend(
                 [
-                    "--num_machines",
-                    str(num_machines),
                     "--machine_rank",
                     str(machine_rank),
                     "--main_process_ip",
@@ -394,6 +444,7 @@ def run_train(
             num_processes=int(distributed_runtime.get("total_num_processes", 1) or 1),
             distributed_runtime=distributed_runtime,
             trainer_cli_args=["--train_batch_size", str(int(launch_train_batch_override))],
+            launch_config=config_data,
         )
 
     low_vram_probe_result = maybe_run_sdxl_low_vram_auto_resolution_probe(

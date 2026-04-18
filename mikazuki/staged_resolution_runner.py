@@ -20,6 +20,7 @@ from mikazuki.process import (
     build_accelerate_launch_args,
     ensure_repo_on_pythonpath,
 )
+from mikazuki.utils.resume_guard import check_resume_state_dir_complete
 from mikazuki.utils.mixed_resolution import (
     MIXED_RESOLUTION_AUTO_RESUME,
     build_mixed_resolution_summary_text,
@@ -28,8 +29,6 @@ from mikazuki.utils.mixed_resolution import (
 )
 
 DATASET_DIR_KEYS = ("train_data_dir", "reg_data_dir")
-STATE_REQUIRED_FILES = ("train_state.json", "optimizer.bin", "scheduler.bin")
-STATE_MODEL_FILE_CANDIDATES = ("model.safetensors", "pytorch_model.bin", "model.bin")
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,27 +66,11 @@ def safe_int(value: Any, default: int = -1) -> int:
         return default
 
 
-def check_state_dir_complete(state_dir: Path) -> tuple[bool, str]:
-    for name in STATE_REQUIRED_FILES:
-        if not (state_dir / name).is_file():
-            return False, f"missing {name}"
-
-    has_model_file = any((state_dir / name).is_file() for name in STATE_MODEL_FILE_CANDIDATES)
-    if not has_model_file:
-        has_model_file = bool(list(state_dir.glob("pytorch_model*.bin")))
-    if not has_model_file:
-        has_model_file = bool(list(state_dir.glob("model*.safetensors")))
-    if not has_model_file:
-        return False, "missing model state file"
-
-    return True, ""
-
-
-def read_state_candidate(state_dir: Path) -> dict[str, Any] | None:
+def read_state_candidate(state_dir: Path, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if not state_dir.exists() or not state_dir.is_dir():
         return None
 
-    complete, reason = check_state_dir_complete(state_dir)
+    complete, reason = check_resume_state_dir_complete(state_dir, config=config)
     if not complete:
         print(
             f"[MixedResolution] Skip incomplete state dir: {state_dir} ({reason}). "
@@ -142,7 +125,7 @@ def list_state_candidates(config: dict, repo_root: Path) -> list[dict[str, Any]]
         if entry.name != f"{output_name}-state" and not entry.name.startswith(f"{output_name}-"):
             continue
 
-        candidate = read_state_candidate(entry)
+        candidate = read_state_candidate(entry, config=config)
         if candidate is None:
             continue
         candidates.append(candidate)
@@ -214,7 +197,7 @@ def infer_resume_context(plan, phase_configs: list[dict], repo_root: Path) -> di
     if explicit_resume:
         explicit_resume_path = resolve_local_path(explicit_resume_value, repo_root)
         if explicit_resume_path.exists() and explicit_resume_path.is_dir():
-            latest_state = read_state_candidate(explicit_resume_path)
+            latest_state = read_state_candidate(explicit_resume_path, config=first_phase_config)
 
     if latest_state is None:
         latest_state = select_latest_state(
@@ -516,6 +499,7 @@ def main() -> int:
             quiet=args.quiet,
             num_processes=max(1, int(args.num_processes or 1)),
             distributed_runtime=distributed_runtime,
+            launch_config=phase_config,
         )
 
         result = subprocess.run(command, env=env, cwd=repo_root)

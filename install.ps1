@@ -85,7 +85,7 @@ function Test-ModulesReady {
         return $true
     }
 
-    & $PythonExe -c "import importlib, sys; failed=[]; 
+    & $PythonExe -c "import importlib, sys, warnings; warnings.filterwarnings('ignore', message='pkg_resources is deprecated as an API.*', category=UserWarning); failed=[]; 
 for name in sys.argv[1:]:
     try:
         importlib.import_module(name)
@@ -194,7 +194,7 @@ Invoke-Step "Installing project dependencies..." {
 }
 
 Invoke-Step "Re-enabling pkg_resources compatibility for TensorBoard..." {
-    & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
+    & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81" 2>&1
 }
 
 if (-not (Test-ModulesReady -PythonExe $pythonExe -Modules $mainRequiredModules)) {

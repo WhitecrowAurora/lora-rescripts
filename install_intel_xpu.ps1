@@ -96,7 +96,8 @@ function Test-ModulesReady {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $PythonExe -c "import importlib, sys;
+        & $PythonExe -c "import importlib, sys, warnings;
+warnings.filterwarnings('ignore', message='pkg_resources is deprecated as an API.*', category=UserWarning)
 repo_root = sys.argv[1]
 if repo_root and repo_root not in sys.path:
     sys.path.insert(0, repo_root)
@@ -288,7 +289,7 @@ finally {
 }
 
 Invoke-Step -Message "Re-enabling pkg_resources compatibility for TensorBoard / 修复 TensorBoard 对 pkg_resources 的兼容性" -Action {
-    & $intelPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
+    & $intelPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81" 2>&1
 }
 
 if (-not (Test-ModulesReady -PythonExe $intelPython -Modules $mainRequiredModules)) {
