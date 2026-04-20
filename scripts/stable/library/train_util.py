@@ -4365,6 +4365,12 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
 
     parser.add_argument("--learning_rate", type=float, default=2.0e-6, help="learning rate / 学習率")
     parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=None,
+        help="weight decay for optimizer (equivalent to setting weight_decay=... in optimizer_args) / オプティマイザのweight decay（optimizer_argsの weight_decay=... と同等）",
+    )
+    parser.add_argument(
         "--max_grad_norm",
         default=1.0,
         type=float,
@@ -6017,6 +6023,16 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
             #     value = tuple(value)
 
             optimizer_kwargs[key] = value
+
+    configured_weight_decay = getattr(args, "weight_decay", None)
+    if configured_weight_decay is not None and "weight_decay" not in optimizer_kwargs:
+        try:
+            optimizer_kwargs["weight_decay"] = float(configured_weight_decay)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Ignoring invalid weight_decay value: {configured_weight_decay}. "
+                "Please pass a numeric value (for example 0.01)."
+            )
     # logger.info(f"optkwargs {optimizer}_{kwargs}")
 
     lr = args.learning_rate

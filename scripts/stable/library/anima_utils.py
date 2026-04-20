@@ -110,6 +110,8 @@ def load_anima_model(
     lora_weights_list: Optional[List[Dict[str, torch.Tensor]]] = None,
     lora_multipliers: Optional[list[float]] = None,
     llm_adapter_path: Optional[str] = None,
+    anima_debug_mode: Optional[bool] = None,
+    anima_rope_mismatch_mode: Optional[str] = None,
 ) -> anima_models.Anima:
     """
     Load Anima model from the specified checkpoint.
@@ -125,6 +127,8 @@ def load_anima_model(
         fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
         lora_weights_list (Optional[List[Dict[str, torch.Tensor]]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+        anima_debug_mode (Optional[bool]): Enable detailed Anima diagnostics if provided.
+        anima_rope_mismatch_mode (Optional[str]): RoPE mismatch handling mode ("strict" or "resample"), if provided.
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (
@@ -133,6 +137,10 @@ def load_anima_model(
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
+    anima_models.configure_anima_rope_runtime(
+        mismatch_mode=anima_rope_mismatch_mode,
+        debug_mode=anima_debug_mode,
+    )
 
     # We currently support fixed DiT config for Anima models
     dit_config = {

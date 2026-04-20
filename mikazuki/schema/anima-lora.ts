@@ -224,6 +224,12 @@ Schema.intersect([
                 enable_debug_options: Schema.const(true).required(),
                 anima_profile_window: Schema.number().min(0).default(0).description("每 N 个优化 step 输出一次 Anima 训练耗时聚合日志。0 表示关闭 profiler"),
                 anima_nan_check_interval: Schema.number().min(0).default(0).description("每 N 个训练 step 检查一次 Anima NaN。0 表示自动按运行环境决定"),
+                anima_debug_mode: Schema.boolean().default(false).description("启用 Anima 详细诊断日志（默认关闭）"),
+                anima_rope_mismatch_mode: Schema.union([
+                    Schema.const("strict"),
+                    Schema.const("resample"),
+                ]).default("strict").description("RoPE 不匹配处理模式：strict 报错停止；resample 允许插值继续"),
+                anima_rope_max_seq_tokens: Schema.number().min(0).default(0).description("Anima 分桶 token 上限预检查。0 表示不限制"),
             }),
             Schema.object({}),
         ]),

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 ANIMA_SUPPORTED_ATTN_MODES = ("torch", "xformers", "sageattn", "flash")
 ANIMA_SUPPORTED_PREVIEW_SAMPLERS = ("euler", "k_euler")
 ANIMA_SUPPORTED_PREVIEW_SCHEDULERS = ("simple",)
+ANIMA_TOKEN_GRID_DIVISOR = 16  # VAE downscale (8) * DiT patch_spatial (2)
 ANIMA_PREVIEW_SAMPLER_ALIASES = {
     "euler_a": "euler",
     "k_euler_a": "k_euler",
@@ -46,6 +47,26 @@ ANIMA_PREVIEW_SAMPLER_ALIASES = {
 @lru_cache(maxsize=64)
 def _warn_once(message: str) -> None:
     logger.warning(message)
+
+
+def is_anima_debug_mode(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "anima_debug_mode", False))
+
+
+def resolve_anima_rope_mismatch_mode(args: argparse.Namespace) -> str:
+    mode = str(getattr(args, "anima_rope_mismatch_mode", "strict") or "strict").strip().lower()
+    if mode not in {"strict", "resample"}:
+        _warn_once(f"Unknown anima_rope_mismatch_mode '{mode}', falling back to 'strict'.")
+        mode = "strict"
+    return mode
+
+
+def resolve_anima_rope_max_seq_tokens(args: argparse.Namespace) -> int:
+    try:
+        value = int(getattr(args, "anima_rope_max_seq_tokens", 0) or 0)
+    except Exception:
+        value = 0
+    return max(0, value)
 
 
 def normalize_anima_preview_sampling(
@@ -457,6 +478,26 @@ def resolve_optional_anima_path(
 
 def add_anima_training_arguments(parser: argparse.ArgumentParser):
     """Add Anima-specific training arguments to the parser."""
+    # In some parser construction paths, parser.add_argument can be monkey-patched
+    # with a stale bound target and silently add options to a different parser.
+    # Guard against that by falling back to argparse.ArgumentParser.add_argument
+    # when the option was not registered on this parser.
+    original_add_argument = parser.add_argument
+
+    def _safe_add_argument(*args, **kwargs):
+        action = original_add_argument(*args, **kwargs)
+
+        # Some parser chains register option strings/group actions correctly
+        # but miss parser._actions (defaults then disappear in parse_args([])).
+        # Make sure this parser owns the action.
+        if action is not None and action not in parser._actions:
+            parser._actions.append(action)
+        for option in getattr(action, "option_strings", []) or []:
+            parser._option_string_actions[option] = action
+        return action
+
+    parser.add_argument = _safe_add_argument
+
     parser.add_argument(
         "--qwen3",
         type=str,
@@ -590,6 +631,30 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         + " / N ステップごとに Anima テンソルの NaN を検査します。0 は実行時の自動設定です。"
         + " / 每 N 个训练步检查一次 Anima 张量中的 NaN，0 表示自动。",
     )
+    parser.add_argument(
+        "--anima_debug_mode",
+        action="store_true",
+        help="Enable detailed Anima diagnostics (including RoPE mismatch debug logs). Off by default."
+        + " / Anima の詳細診断ログ（RoPE mismatch など）を有効化します。デフォルトは無効です。"
+        + " / 启用 Anima 详细诊断日志（含 RoPE mismatch 诊断），默认关闭。",
+    )
+    parser.add_argument(
+        "--anima_rope_mismatch_mode",
+        type=str,
+        default="strict",
+        choices=["strict", "resample"],
+        help="RoPE mismatch handling mode: strict raises an error; resample attempts continuation."
+        + " / RoPE 不一致时の挙動。strict はエラーで停止、resample は補間して継続します。"
+        + " / RoPE 不匹配处理模式：strict 报错停止，resample 尝试插值继续。",
+    )
+    parser.add_argument(
+        "--anima_rope_max_seq_tokens",
+        type=int,
+        default=0,
+        help="Optional bucket precheck cap for Anima token sequence length (0 disables this cap)."
+        + " / Anima トークン長の bucket 事前チェック上限。0 で無効。"
+        + " / Anima token 序列长度的分桶预检查上限，0 表示不限制。",
+    )
 
 
 def resolve_required_anima_vae_path(args: argparse.Namespace, training_type: str) -> str:
@@ -695,6 +760,13 @@ def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "A
     component_cpu_offload = bool(getattr(args, "anima_component_cpu_offload", False))
     profile_window = int(getattr(args, "anima_profile_window", 0) or 0)
     nan_check_interval = resolve_anima_nan_check_interval(args)
+    debug_mode = is_anima_debug_mode(args)
+    rope_mismatch_mode = resolve_anima_rope_mismatch_mode(args)
+    rope_max_seq_tokens = resolve_anima_rope_max_seq_tokens(args)
+    anima_models.configure_anima_rope_runtime(
+        mismatch_mode=rope_mismatch_mode,
+        debug_mode=debug_mode,
+    )
 
     logger.info(
         f"{route_label} runtime summary: "
@@ -705,7 +777,10 @@ def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "A
         f"anima_component_cpu_offload={component_cpu_offload} | "
         f"enable_preview={enable_preview} | "
         f"anima_profile_window={profile_window} | "
-        f"anima_nan_check_interval={nan_check_interval}"
+        f"anima_nan_check_interval={nan_check_interval} | "
+        f"anima_debug_mode={debug_mode} | "
+        f"anima_rope_mismatch_mode={rope_mismatch_mode} | "
+        f"anima_rope_max_seq_tokens={rope_max_seq_tokens}"
     )
     logger.info(
         f"{route_label} 运行摘要："
@@ -716,7 +791,10 @@ def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "A
         f"anima_component_cpu_offload={component_cpu_offload}，"
         f"enable_preview={enable_preview}，"
         f"anima_profile_window={profile_window}，"
-        f"anima_nan_check_interval={nan_check_interval}"
+        f"anima_nan_check_interval={nan_check_interval}，"
+        f"anima_debug_mode={debug_mode}，"
+        f"anima_rope_mismatch_mode={rope_mismatch_mode}，"
+        f"anima_rope_max_seq_tokens={rope_max_seq_tokens}"
     )
 
     if attn_mode == "sageattn" and split_attn:
@@ -803,6 +881,142 @@ def should_run_anima_nan_check(args: argparse.Namespace, step_index: int) -> boo
     if interval <= 1:
         return True
     return step_index <= 1 or step_index % interval == 0
+
+
+def _coerce_bucket_resolution(raw_reso) -> Optional[tuple[int, int]]:
+    if raw_reso is None:
+        return None
+    if isinstance(raw_reso, (tuple, list)) and len(raw_reso) >= 2:
+        try:
+            return int(raw_reso[0]), int(raw_reso[1])
+        except Exception:
+            return None
+    if isinstance(raw_reso, str):
+        text = raw_reso.strip().lower().replace(" ", "")
+        if "x" in text:
+            parts = text.split("x", 1)
+        elif "," in text:
+            parts = text.split(",", 1)
+        else:
+            return None
+        try:
+            return int(parts[0]), int(parts[1])
+        except Exception:
+            return None
+    return None
+
+
+def _collect_bucket_resolutions_for_anima(train_dataset_group) -> list[tuple[int, int]]:
+    datasets = getattr(train_dataset_group, "datasets", None)
+    if not datasets:
+        datasets = [train_dataset_group]
+
+    collected: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+
+    for dataset in datasets:
+        if dataset is None:
+            continue
+
+        local_resos: list[tuple[int, int]] = []
+        bucket_manager = getattr(dataset, "bucket_manager", None)
+        manager_resos = getattr(bucket_manager, "resos", None) if bucket_manager is not None else None
+        if manager_resos:
+            for reso in manager_resos:
+                parsed = _coerce_bucket_resolution(reso)
+                if parsed is not None:
+                    local_resos.append(parsed)
+
+        if not local_resos:
+            bucket_info = getattr(dataset, "bucket_info", None)
+            if isinstance(bucket_info, dict):
+                buckets = bucket_info.get("buckets")
+                if isinstance(buckets, dict):
+                    for bucket_meta in buckets.values():
+                        reso = bucket_meta.get("resolution") if isinstance(bucket_meta, dict) else bucket_meta
+                        parsed = _coerce_bucket_resolution(reso)
+                        if parsed is not None:
+                            local_resos.append(parsed)
+
+        if not local_resos:
+            width = getattr(dataset, "width", None)
+            height = getattr(dataset, "height", None)
+            parsed = _coerce_bucket_resolution((width, height))
+            if parsed is not None:
+                local_resos.append(parsed)
+
+        for reso in local_resos:
+            if reso not in seen:
+                seen.add(reso)
+                collected.append(reso)
+
+    collected.sort(key=lambda item: (item[0] * item[1], item[0], item[1]))
+    return collected
+
+
+def validate_anima_bucket_compatibility(
+    args: argparse.Namespace,
+    train_dataset_group,
+    *,
+    route_label: str = "Anima",
+) -> None:
+    resolutions = _collect_bucket_resolutions_for_anima(train_dataset_group)
+    if not resolutions:
+        if is_anima_debug_mode(args):
+            logger.info(f"{route_label} bucket precheck skipped: no bucket resolution metadata available.")
+        return
+
+    invalid_resolutions: list[tuple[int, int, str]] = []
+    token_rows: list[tuple[int, int, int, int, int]] = []
+
+    for width, height in resolutions:
+        if width <= 0 or height <= 0:
+            invalid_resolutions.append((width, height, "non-positive resolution"))
+            continue
+        if width % ANIMA_TOKEN_GRID_DIVISOR != 0 or height % ANIMA_TOKEN_GRID_DIVISOR != 0:
+            invalid_resolutions.append(
+                (width, height, f"must be divisible by {ANIMA_TOKEN_GRID_DIVISOR} for Anima token grid")
+            )
+            continue
+
+        token_w = width // ANIMA_TOKEN_GRID_DIVISOR
+        token_h = height // ANIMA_TOKEN_GRID_DIVISOR
+        seq_tokens = token_w * token_h
+        token_rows.append((width, height, token_w, token_h, seq_tokens))
+
+    if invalid_resolutions:
+        details = ", ".join([f"{w}x{h} ({reason})" for w, h, reason in invalid_resolutions[:8]])
+        if len(invalid_resolutions) > 8:
+            details += ", ..."
+        raise ValueError(
+            f"{route_label}: detected incompatible bucket resolutions for Anima precheck: {details}. "
+            f"Please ensure bucket sizes are multiples of {ANIMA_TOKEN_GRID_DIVISOR}."
+        )
+
+    if not token_rows:
+        return
+
+    seq_values = [row[4] for row in token_rows]
+    min_seq = min(seq_values)
+    max_seq = max(seq_values)
+    seq_cap = resolve_anima_rope_max_seq_tokens(args)
+    if seq_cap > 0 and max_seq > seq_cap:
+        worst = max(token_rows, key=lambda row: row[4])
+        raise ValueError(
+            f"{route_label}: bucket RoPE precheck failed. max_seq_tokens={max_seq} exceeds "
+            f"anima_rope_max_seq_tokens={seq_cap} "
+            f"(bucket={worst[0]}x{worst[1]}, token_grid={worst[2]}x{worst[3]}). "
+            "Lower max bucket resolution or increase anima_rope_max_seq_tokens."
+        )
+
+    if is_anima_debug_mode(args):
+        largest_rows = sorted(token_rows, key=lambda row: row[4], reverse=True)[:5]
+        largest_text = ", ".join([f"{w}x{h}->{tokens}" for w, h, _, _, tokens in largest_rows])
+        logger.info(
+            f"{route_label} bucket precheck: {len(token_rows)} bucket sizes, token sequence range {min_seq}..{max_seq}, "
+            f"anima_rope_max_seq_tokens={seq_cap if seq_cap > 0 else 'disabled'}."
+        )
+        logger.info(f"{route_label} bucket precheck largest token buckets: {largest_text}")
 
 
 def move_anima_tensor(
@@ -1126,10 +1340,14 @@ def do_sample(
         warn=False,
     )
 
+    # Keep the sampling state in fp32 for preview stability (especially on bf16 routes).
+    compute_dtype = dtype
+    sample_dtype = torch.float32
+
     # Latent shape: (1, 16, 1, H/8, W/8) for single image
     latent_h = height // 8
     latent_w = width // 8
-    latent = torch.zeros(1, 16, 1, latent_h, latent_w, device=device, dtype=dtype)
+    latent = torch.zeros(1, 16, 1, latent_h, latent_w, device=device, dtype=sample_dtype)
 
     # UI treats seed=0 as random preview generation.
     if seed == 0:
@@ -1140,10 +1358,10 @@ def do_sample(
         generator = torch.manual_seed(seed)
     else:
         generator = None
-    noise = torch.randn(latent.size(), dtype=torch.float32, generator=generator, device="cpu").to(dtype).to(device)
+    noise = torch.randn(latent.size(), dtype=torch.float32, generator=generator, device="cpu").to(device=device, dtype=sample_dtype)
 
     # Timestep schedule: linear from 1.0 to 0.0
-    sigmas = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=dtype)
+    sigmas = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=sample_dtype)
     flow_shift = float(flow_shift)
     if flow_shift != 1.0:
         sigmas = (sigmas * flow_shift) / (1 + (flow_shift - 1) * sigmas)
@@ -1152,32 +1370,32 @@ def do_sample(
     x = noise.clone()
 
     # Padding mask (zeros = no padding) — resized in prepare_embedded_sequence to match latent dims
-    padding_mask = torch.zeros(1, 1, latent_h, latent_w, dtype=dtype, device=device)
+    padding_mask = torch.zeros(1, 1, latent_h, latent_w, dtype=compute_dtype, device=device)
 
     use_cfg = guidance_scale > 1.0 and neg_crossattn_emb is not None
 
     for i in tqdm(range(steps), desc="Sampling"):
         sigma = sigmas[i]
-        t = sigma.unsqueeze(0)  # (1,)
+        t = sigma.unsqueeze(0).to(dtype=compute_dtype)  # (1,)
+        x_in = x.to(dtype=compute_dtype)
 
         if use_cfg:
             # CFG: two separate passes to reduce memory usage
-            pos_out = dit(x, t, crossattn_emb, padding_mask=padding_mask)
+            pos_out = dit(x_in, t, crossattn_emb, padding_mask=padding_mask)
             pos_out = pos_out.float()
-            neg_out = dit(x, t, neg_crossattn_emb, padding_mask=padding_mask)
+            neg_out = dit(x_in, t, neg_crossattn_emb, padding_mask=padding_mask)
             neg_out = neg_out.float()
 
             model_output = neg_out + guidance_scale * (pos_out - neg_out)
         else:
-            model_output = dit(x, t, crossattn_emb, padding_mask=padding_mask)
+            model_output = dit(x_in, t, crossattn_emb, padding_mask=padding_mask)
             model_output = model_output.float()
 
         # Euler step: x_{t-1} = x_t - (sigma_t - sigma_{t-1}) * model_output
         dt = sigmas[i + 1] - sigma
         x = x + model_output * dt
-        x = x.to(dtype)
 
-    return x
+    return x.to(dtype=compute_dtype)
 
 
 def load_sample_prompts_flexible(sample_prompts: str):
@@ -1192,7 +1410,12 @@ def load_sample_prompts_flexible(sample_prompts: str):
     if not lines:
         return []
 
-    return [{"prompt": line} for line in lines]
+    prompts = []
+    for i, line in enumerate(lines):
+        prompt_dict = train_util.line_to_prompt_dict(line)
+        prompt_dict["enum"] = i
+        prompts.append(prompt_dict)
+    return prompts
 
 
 def sample_images(
@@ -1233,7 +1456,9 @@ def sample_images(
 
     # Unwrap models
     dit = accelerator.unwrap_model(dit)
-    if text_encoder is not None:
+    if isinstance(text_encoder, (list, tuple)):
+        text_encoder = [accelerator.unwrap_model(te) for te in text_encoder if te is not None]
+    elif text_encoder is not None:
         text_encoder = accelerator.unwrap_model(text_encoder)
 
     dit.switch_block_swap_for_inference()
@@ -1355,6 +1580,8 @@ def run_vae_roundtrip_self_check(
     train_dataset_group,
     vae_dtype: torch.dtype,
 ) -> None:
+    validate_anima_bucket_compatibility(args, train_dataset_group, route_label="Anima")
+
     if not accelerator.is_main_process:
         accelerator.wait_for_everyone()
         return
@@ -1511,7 +1738,8 @@ def _sample_image_inference(
             return sample_prompts_te_outputs[prpt]
         if text_encoder is not None:
             tokens = tokenize_strategy.tokenize(prpt)
-            encoded = text_encoding_strategy.encode_tokens(tokenize_strategy, [text_encoder], tokens)
+            model_list = text_encoder if isinstance(text_encoder, (list, tuple)) else [text_encoder]
+            encoded = text_encoding_strategy.encode_tokens(tokenize_strategy, model_list, tokens)
             return encoded
         return None
 
@@ -1597,9 +1825,12 @@ def _sample_image_inference(
     synchronize_device(accelerator.device)
     clean_memory_on_device(accelerator.device)
     org_vae_device = vae.device
-    vae.to(accelerator.device)
-    decoded = vae.decode_to_pixels(latents)
-    vae.to(org_vae_device)
+    org_vae_dtype = vae.dtype
+    latents = latents.to(accelerator.device, dtype=torch.float32)
+    vae.to(accelerator.device, dtype=torch.float32)
+    with torch.autocast(device_type=accelerator.device.type, enabled=False):
+        decoded = vae.decode_to_pixels(latents)
+    vae.to(org_vae_device, dtype=org_vae_dtype)
     clean_memory_on_device(accelerator.device)
 
     # Convert to image

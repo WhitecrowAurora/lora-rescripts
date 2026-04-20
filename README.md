@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.2.1 Beta16**
+**v1.4.6 Beta36**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -60,15 +60,13 @@ LoRA & Dreambooth training GUI & scripts preset & one key training environment f
 
 ## Recent Updates
 
-### v1.2.1 Beta16
+### v1.4.6 Beta36
 
-- added experimental dedicated runtime routes for SageAttention, Intel XPU, AMD ROCm, and AMD ROCm / Intel XPU Sage startup flows on Windows, with clearer launcher checks and isolated runtime selection
-- improved training startup safety with runtime-aware attention fallback guards, dependency preflight, resume-state protection, dataset cache checks, and more explicit startup warnings
-- improved external config import compatibility by keeping legacy field mapping, filling known missing values with safer defaults, and reducing layout breakage from non-native config files
-- added laptop-friendly cooldown controls and optional `nvidia-smi` GPU power limit support for long-running training sessions on thermally constrained devices
-- added YOLO workflow integration with local Ultralytics support, runtime dependency installers, custom or auto-generated dataset yaml handling, and better startup validation
-- added aesthetic scorer training, inference, and labeling-related backend support, together with runtime dependency management and workflow-side preparation tools
-- refactored large parts of the training launch path into smaller runtime helper modules to make future hardware adaptation and bug fixing easier to maintain
+- added a shared `weight_decay` option for training routes, with automatic optimizer arg injection when `optimizer_args` does not override it
+- added `anima_debug_mode` for opt-in detailed Anima diagnostics (default off)
+- added `anima_rope_mismatch_mode` (`strict`/`resample`) to control RoPE mismatch behavior in Anima and TLoRA-related paths
+- added Anima bucket precheck and `anima_rope_max_seq_tokens` guard to catch oversized token grids before training starts
+- improved Anima preview stability and compatibility (fp32 preview sampling path, prompt dict parsing compatibility, and text encoder unwrap handling)
 
 ## ✨NEW: Train WebUI
 

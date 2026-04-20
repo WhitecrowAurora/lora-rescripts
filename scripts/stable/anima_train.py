@@ -50,6 +50,9 @@ def train(args):
     args.attn_mode = anima_train_utils.normalize_anima_attn_mode(
         getattr(args, "attn_mode", None),
     )
+    args.anima_rope_mismatch_mode = anima_train_utils.resolve_anima_rope_mismatch_mode(args)
+    args.anima_rope_max_seq_tokens = anima_train_utils.resolve_anima_rope_max_seq_tokens(args)
+    args.anima_debug_mode = anima_train_utils.is_anima_debug_mode(args)
     args.sample_sampler, args.sample_scheduler = anima_train_utils.normalize_anima_preview_sampling(
         getattr(args, "sample_sampler", "euler"),
         getattr(args, "sample_scheduler", "simple"),
@@ -146,6 +149,7 @@ def train(args):
     collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
 
     train_dataset_group.verify_bucket_reso_steps(16)  # Qwen-Image VAE spatial downscale = 8 * patch size = 2
+    anima_train_utils.validate_anima_bucket_compatibility(args, train_dataset_group, route_label="Anima finetune")
 
     if args.debug_dataset:
         if args.cache_text_encoder_outputs:
@@ -264,6 +268,8 @@ def train(args):
         "cpu",
         dit_weight_dtype=None,
         llm_adapter_path=args.llm_adapter_path,
+        anima_debug_mode=args.anima_debug_mode,
+        anima_rope_mismatch_mode=args.anima_rope_mismatch_mode,
     )
     anima_train_utils.apply_opt_channels_last_for_anima(args, ("Anima DiT", dit))
 
@@ -1029,8 +1035,6 @@ if __name__ == "__main__":
         args.attn_mode = "torch"  # backward compatibility
 
     train(args)
-
-
 
 
 

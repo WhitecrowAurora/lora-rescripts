@@ -150,6 +150,93 @@ def _short_exc_message(exc: Exception) -> str:
     return message.splitlines()[0]
 
 
+_ANIMA_ROPE_MISMATCH_MODE = "strict"
+_ANIMA_DEBUG_MODE = False
+
+
+def _normalize_rope_mismatch_mode(mode: Optional[str]) -> str:
+    normalized = str(mode or "strict").strip().lower()
+    if normalized not in {"strict", "resample"}:
+        normalized = "strict"
+    return normalized
+
+
+def configure_anima_rope_runtime(
+    *,
+    mismatch_mode: Optional[str] = None,
+    debug_mode: Optional[bool] = None,
+) -> None:
+    global _ANIMA_ROPE_MISMATCH_MODE, _ANIMA_DEBUG_MODE
+
+    if mismatch_mode is not None:
+        requested_mode = str(mismatch_mode)
+        normalized_mode = _normalize_rope_mismatch_mode(requested_mode)
+        if normalized_mode != requested_mode.strip().lower():
+            _warn_once(
+                f"Unknown anima_rope_mismatch_mode '{requested_mode}', falling back to '{normalized_mode}'."
+            )
+        _ANIMA_ROPE_MISMATCH_MODE = normalized_mode
+
+    if debug_mode is not None:
+        _ANIMA_DEBUG_MODE = bool(debug_mode)
+
+
+def get_anima_rope_mismatch_mode() -> str:
+    return _ANIMA_ROPE_MISMATCH_MODE
+
+
+def is_anima_debug_mode_enabled() -> bool:
+    return _ANIMA_DEBUG_MODE
+
+
+def _seq_len_from_tensor(tensor: torch.Tensor, tensor_format: str) -> int:
+    if tensor_format == "bshd":
+        return int(tensor.shape[1])
+    if tensor_format == "sbhd":
+        return int(tensor.shape[0])
+    if tensor_format == "thd":
+        return int(tensor.shape[0])
+    raise ValueError(f"Unsupported tensor_format for RoPE length check: {tensor_format}")
+
+
+def _build_rope_mismatch_error(
+    *,
+    stage: str,
+    input_seq_len: int,
+    rope_seq_len: int,
+    tensor_format: str,
+    q_shape: Optional[tuple[int, ...]] = None,
+    rope_shape: Optional[tuple[int, ...]] = None,
+) -> str:
+    message = (
+        f"RoPE sequence length mismatch at {stage}: input_seq_len={input_seq_len}, rope_seq_len={rope_seq_len}, "
+        f"tensor_format={tensor_format}, mode={get_anima_rope_mismatch_mode()}."
+    )
+    if is_anima_debug_mode_enabled():
+        if q_shape is not None:
+            message += f" q_shape={q_shape}."
+        if rope_shape is not None:
+            message += f" rope_shape={rope_shape}."
+    message += " Set anima_rope_mismatch_mode='resample' to enable fallback."
+    return message
+
+
+def _resample_rotary_freqs(freqs: torch.Tensor, target_seq_len: int) -> torch.Tensor:
+    source_seq_len = int(freqs.shape[0])
+    if target_seq_len <= 0 or source_seq_len <= 0:
+        raise ValueError(f"Invalid RoPE sequence length: source={source_seq_len}, target={target_seq_len}")
+    if target_seq_len == source_seq_len:
+        return freqs
+    if target_seq_len < source_seq_len:
+        return freqs[:target_seq_len]
+
+    # Fallback for rare runtime shape mismatches (for example dynamic T-LoRA paths):
+    # stretch existing frequencies to the requested sequence length instead of hard-failing.
+    sample_index = torch.linspace(0, source_seq_len - 1, target_seq_len, device=freqs.device)
+    sample_index = torch.clamp(sample_index.round().to(torch.long), 0, source_seq_len - 1)
+    return freqs.index_select(0, sample_index)
+
+
 # Utility functions: RoPE for DiT
 def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
     if not interleaved:
@@ -176,8 +263,34 @@ def _apply_rotary_pos_emb_base(
         assert max_offset + cur_seq_len <= max_seq_len, f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
         freqs = torch.concatenate([freqs[i : i + cur_seq_len] for i in start_positions], dim=1)
 
-    assert cur_seq_len <= max_seq_len, f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    freqs = freqs[:cur_seq_len]
+    if cur_seq_len > max_seq_len:
+        mode = get_anima_rope_mismatch_mode()
+        if mode == "strict":
+            raise RuntimeError(
+                _build_rope_mismatch_error(
+                    stage="_apply_rotary_pos_emb_base",
+                    input_seq_len=cur_seq_len,
+                    rope_seq_len=max_seq_len,
+                    tensor_format=tensor_format,
+                    q_shape=tuple(t.shape),
+                    rope_shape=tuple(freqs.shape),
+                )
+            )
+
+        if is_anima_debug_mode_enabled():
+            logger.warning(
+                "RoPE mismatch fallback (resample) at _apply_rotary_pos_emb_base: "
+                f"input_seq_len={cur_seq_len}, rope_seq_len={max_seq_len}, "
+                f"tensor_format={tensor_format}, q_shape={tuple(t.shape)}, rope_shape={tuple(freqs.shape)}."
+            )
+        else:
+            _warn_once(
+                "RoPE sequence mismatch detected in Anima; using resample fallback "
+                "(anima_rope_mismatch_mode='resample')."
+            )
+        freqs = _resample_rotary_freqs(freqs, cur_seq_len)
+    else:
+        freqs = freqs[:cur_seq_len]
 
     if tensor_format == "bshd":
         freqs = freqs.transpose(0, 1)
@@ -365,8 +478,38 @@ class Attention(nn.Module):
         k = self.k_norm(k)
         v = self.v_norm(v)
         if self.is_selfattn and rope_emb is not None:
-            q = apply_rotary_pos_emb(q, rope_emb, tensor_format=self.qkv_format, fused=False)
-            k = apply_rotary_pos_emb(k, rope_emb, tensor_format=self.qkv_format, fused=False)
+            aligned_rope_emb = rope_emb
+            q_seq_len = _seq_len_from_tensor(q, self.qkv_format)
+            rope_seq_len = int(rope_emb.shape[0])
+            if q_seq_len != rope_seq_len:
+                mode = get_anima_rope_mismatch_mode()
+                if mode == "strict":
+                    raise RuntimeError(
+                        _build_rope_mismatch_error(
+                            stage="Attention.compute_qkv(source_align)",
+                            input_seq_len=q_seq_len,
+                            rope_seq_len=rope_seq_len,
+                            tensor_format=self.qkv_format,
+                            q_shape=tuple(q.shape),
+                            rope_shape=tuple(rope_emb.shape),
+                        )
+                    )
+
+                if is_anima_debug_mode_enabled():
+                    logger.warning(
+                        "RoPE source-side alignment fallback (resample) in Attention.compute_qkv: "
+                        f"input_seq_len={q_seq_len}, rope_seq_len={rope_seq_len}, "
+                        f"tensor_format={self.qkv_format}, q_shape={tuple(q.shape)}, rope_shape={tuple(rope_emb.shape)}."
+                    )
+                else:
+                    _warn_once(
+                        "RoPE source-side mismatch detected in Anima self-attention; using resample fallback "
+                        "(anima_rope_mismatch_mode='resample')."
+                    )
+                aligned_rope_emb = _resample_rotary_freqs(rope_emb, q_seq_len)
+
+            q = apply_rotary_pos_emb(q, aligned_rope_emb, tensor_format=self.qkv_format, fused=False)
+            k = apply_rotary_pos_emb(k, aligned_rope_emb, tensor_format=self.qkv_format, fused=False)
 
         return q, k, v
 

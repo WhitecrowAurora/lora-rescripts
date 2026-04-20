@@ -365,6 +365,7 @@
                 learning_rate: Schema.string().default("1e-4").description("总学习率, 在分开设置 U-Net 与文本编码器学习率后这个值失效。"),
                 unet_lr: Schema.string().default("1e-4").description("U-Net 学习率"),
                 text_encoder_lr: Schema.string().default("1e-5").description("文本编码器学习率"),
+                weight_decay: Schema.number().step(0.0001).description("权重衰减（等价于自动注入 optimizer_args: `weight_decay=...`）"),
                 lr_scheduler: Schema.union([
                     "linear",
                     "cosine",
