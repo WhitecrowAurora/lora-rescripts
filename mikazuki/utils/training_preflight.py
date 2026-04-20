@@ -465,6 +465,22 @@ def analyze_training_preflight(
         notes.append(
             f"torch.compile enabled with backend '{backend}'. The first launch and first few steps may be slower while graphs compile."
         )
+        compile_guard_reasons = []
+        if parse_boolish(payload.get("deepspeed")):
+            compile_guard_reasons.append("deepspeed")
+        if parse_boolish(payload.get("sdxl_fixed_block_swap")):
+            compile_guard_reasons.append("sdxl_fixed_block_swap")
+        if parse_boolish(payload.get("sdxl_component_cpu_residency")):
+            compile_guard_reasons.append("sdxl_component_cpu_residency")
+        if compile_guard_reasons:
+            warnings.append(
+                "torch.compile is enabled, but the current runtime also enables "
+                + ", ".join(compile_guard_reasons)
+                + ". This build may automatically disable compile at launch to prioritize training stability. "
+                "/ 当前同时启用了 "
+                + "、".join(compile_guard_reasons)
+                + "，启动时可能会自动关闭 torch.compile 以优先保证稳定性。"
+            )
 
     if bool(payload.get("opt_channels_last")):
         notes.append("channels_last optimization is enabled.")

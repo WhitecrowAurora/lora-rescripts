@@ -320,7 +320,7 @@ class SdxlTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
             return True
 
         try:
-            npz = np.load(npz_path)
+            npz = self._load_npz_archive(npz_path)
             if "hidden_state1" not in npz or "hidden_state2" not in npz or "pool2" not in npz:
                 return False
         except Exception as e:
@@ -330,7 +330,7 @@ class SdxlTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         return True
 
     def load_outputs_npz(self, npz_path: str) -> List[np.ndarray]:
-        data = np.load(npz_path)
+        data = self._load_npz_archive(npz_path)
         hidden_state1 = data["hidden_state1"]
         hidden_state2 = data["hidden_state2"]
         pool2 = data["pool2"]

@@ -435,13 +435,13 @@ def train(args):
 
     # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
     n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
+    dataloader_runtime_kwargs = train_util.resolve_dataloader_runtime_kwargs(args, n_workers)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset_group,
         batch_size=1,
         shuffle=True,
         collate_fn=collator,
-        num_workers=n_workers,
-        persistent_workers=args.persistent_data_loader_workers,
+        **dataloader_runtime_kwargs,
     )
 
     # 学習ステップ数を計算する

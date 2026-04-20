@@ -129,6 +129,33 @@ def get_bucket_runtime_policy() -> dict[str, Optional[int | str]]:
     return dict(_RUNTIME_BUCKET_POLICY)
 
 
+def resolve_dataloader_runtime_kwargs(args: argparse.Namespace, n_workers: int) -> dict:
+    resolved_workers = max(0, int(n_workers or 0))
+    persistent_requested = bool(getattr(args, "persistent_data_loader_workers", False))
+    persistent_workers = bool(persistent_requested and resolved_workers > 0)
+    if persistent_requested and resolved_workers <= 0:
+        logger.warning(
+            "persistent_data_loader_workers is enabled, but max_data_loader_n_workers resolved to 0. "
+            "The current run will disable persistent workers for compatibility."
+        )
+
+    prefetch_factor = 2
+    try:
+        raw_prefetch = int(getattr(args, "data_loader_prefetch_factor", 2) or 2)
+        prefetch_factor = max(1, raw_prefetch)
+    except (TypeError, ValueError):
+        prefetch_factor = 2
+
+    kwargs = {
+        "num_workers": resolved_workers,
+        "persistent_workers": persistent_workers,
+        "pin_memory": bool(torch.cuda.is_available()),
+    }
+    if resolved_workers > 0:
+        kwargs["prefetch_factor"] = prefetch_factor
+    return kwargs
+
+
 def _build_trilingual_status_pattern(
     english_and_japanese: str,
     chinese: str,
@@ -3142,26 +3169,26 @@ def is_disk_cached_latents_is_expected(reso, npz_path: str, flip_aug: bool, alph
         return False
 
     try:
-        npz = np.load(npz_path)
-        if "latents" not in npz or "original_size" not in npz or "crop_ltrb" not in npz:  # old ver?
-            return False
-        if npz["latents"].shape[1:3] != expected_latents_size:
-            return False
-
-        if flip_aug:
-            if "latents_flipped" not in npz:
+        with np.load(npz_path, allow_pickle=False) as npz:
+            if "latents" not in npz or "original_size" not in npz or "crop_ltrb" not in npz:  # old ver?
                 return False
-            if npz["latents_flipped"].shape[1:3] != expected_latents_size:
+            if npz["latents"].shape[1:3] != expected_latents_size:
                 return False
 
-        if alpha_mask:
-            if "alpha_mask" not in npz:
-                return False
-            if (npz["alpha_mask"].shape[1], npz["alpha_mask"].shape[0]) != reso:  # HxW => WxH != reso
-                return False
-        else:
-            if "alpha_mask" in npz:
-                return False
+            if flip_aug:
+                if "latents_flipped" not in npz:
+                    return False
+                if npz["latents_flipped"].shape[1:3] != expected_latents_size:
+                    return False
+
+            if alpha_mask:
+                if "alpha_mask" not in npz:
+                    return False
+                if (npz["alpha_mask"].shape[1], npz["alpha_mask"].shape[0]) != reso:  # HxW => WxH != reso
+                    return False
+            else:
+                if "alpha_mask" in npz:
+                    return False
     except Exception as e:
         logger.error(f"Error loading file: {npz_path}")
         raise e
@@ -3644,7 +3671,7 @@ def save_text_encoder_outputs_to_disk(npz_path, hidden_state1, hidden_state2, po
 
 
 def load_text_encoder_outputs_from_disk(npz_path):
-    with np.load(npz_path) as f:
+    with np.load(npz_path, allow_pickle=False) as f:
         hidden_state1 = torch.from_numpy(f["hidden_state1"])
         hidden_state2 = torch.from_numpy(f["hidden_state2"]) if "hidden_state2" in f else None
         pool2 = torch.from_numpy(f["pool2"]) if "pool2" in f else None
@@ -6592,6 +6619,33 @@ def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
             )
 
 
+def _runtime_flag_enabled(value, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_torch_compile_runtime(args: argparse.Namespace) -> tuple[bool, list[str]]:
+    if not _runtime_flag_enabled(getattr(args, "torch_compile", False), default=False):
+        return False, []
+
+    reasons: list[str] = []
+    if _runtime_flag_enabled(getattr(args, "deepspeed", False), default=False):
+        reasons.append("deepspeed")
+    if _runtime_flag_enabled(getattr(args, "sdxl_fixed_block_swap", False), default=False):
+        reasons.append("sdxl_fixed_block_swap")
+    if _runtime_flag_enabled(getattr(args, "sdxl_component_cpu_residency", False), default=False):
+        reasons.append("sdxl_component_cpu_residency")
+
+    if reasons:
+        return False, reasons
+    return True, []
+
+
 def prepare_accelerator(args: argparse.Namespace):
     """
     this function also prepares deepspeed plugin
@@ -6630,8 +6684,20 @@ def prepare_accelerator(args: argparse.Namespace):
                 wandb.login(key=args.wandb_api_key)
 
     # torch.compile のオプション。 NO の場合は torch.compile は使わない
+    torch_compile_enabled, compile_guard_reasons = resolve_torch_compile_runtime(args)
+    if not torch_compile_enabled and _runtime_flag_enabled(getattr(args, "torch_compile", False), default=False):
+        logger.warning(
+            "torch.compile was requested but will be disabled for runtime stability because: "
+            + ", ".join(compile_guard_reasons)
+        )
+        logger.warning(
+            "已请求 torch.compile，但为保证运行时稳定性将自动关闭，原因："
+            + "、".join(compile_guard_reasons)
+        )
+        args.torch_compile = False
+
     dynamo_backend = "NO"
-    if args.torch_compile:
+    if torch_compile_enabled:
         dynamo_backend = args.dynamo_backend
         logger.info(f"Enable torch.compile for training (dynamo backend: {dynamo_backend})")
         logger.info(f"当前已启用 torch.compile（dynamo 后端：{dynamo_backend}）")

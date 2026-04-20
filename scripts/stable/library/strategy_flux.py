@@ -113,7 +113,7 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
             return True
 
         try:
-            npz = np.load(npz_path)
+            npz = self._load_npz_archive(npz_path)
             if "l_pooled" not in npz:
                 return False
             if "t5_out" not in npz:
@@ -134,7 +134,7 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         return True
 
     def load_outputs_npz(self, npz_path: str) -> List[np.ndarray]:
-        data = np.load(npz_path)
+        data = self._load_npz_archive(npz_path)
         l_pooled = data["l_pooled"]
         t5_out = data["t5_out"]
         txt_ids = data["txt_ids"]

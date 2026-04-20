@@ -450,6 +450,18 @@ class NetworkTrainer:
             t_enc.to(accelerator.device, dtype=weight_dtype)
 
     def call_unet(self, args, accelerator, unet, noisy_latents, timesteps, text_conds, batch, weight_dtype, **kwargs):
+        indices = kwargs.get("indices")
+        if indices is not None and len(indices) > 0:
+            index_tensor = torch.as_tensor(indices, device=noisy_latents.device, dtype=torch.long)
+            noisy_latents = noisy_latents.index_select(0, index_tensor)
+            timesteps = timesteps.index_select(0, index_tensor)
+            if isinstance(text_conds, (list, tuple)) and len(text_conds) > 0:
+                primary_cond = text_conds[0]
+                if isinstance(primary_cond, torch.Tensor) and primary_cond.shape[0] > int(index_tensor.max().item()):
+                    text_conds = list(text_conds)
+                    text_indices = index_tensor.to(primary_cond.device)
+                    text_conds[0] = primary_cond.index_select(0, text_indices)
+
         noise_pred = unet(noisy_latents, timesteps, text_conds[0]).sample
         return noise_pred
 
@@ -550,25 +562,27 @@ class NetworkTrainer:
 
             if len(diff_output_pr_indices) > 0:
                 network.set_multiplier(0.0)
-                with torch.no_grad(), accelerator.autocast():
-                    try:
-                        if network is not None and hasattr(network, "set_current_timestep"):
-                            network.set_current_timestep(timesteps[diff_output_pr_indices])
-                        noise_pred_prior = self.call_unet(
-                            args,
-                            accelerator,
-                            unet,
-                            noisy_latents,
-                            timesteps,
-                            text_encoder_conds,
-                            batch,
-                            weight_dtype,
-                            indices=diff_output_pr_indices,
-                        )
-                    finally:
-                        if network is not None and hasattr(network, "clear_current_timestep"):
-                            network.clear_current_timestep()
-                network.set_multiplier(1.0)  # may be overwritten by "network_multipliers" in the next step
+                try:
+                    with torch.no_grad(), accelerator.autocast():
+                        try:
+                            if network is not None and hasattr(network, "set_current_timestep"):
+                                network.set_current_timestep(timesteps[diff_output_pr_indices])
+                            noise_pred_prior = self.call_unet(
+                                args,
+                                accelerator,
+                                unet,
+                                noisy_latents,
+                                timesteps,
+                                text_encoder_conds,
+                                batch,
+                                weight_dtype,
+                                indices=diff_output_pr_indices,
+                            )
+                        finally:
+                            if network is not None and hasattr(network, "clear_current_timestep"):
+                                network.clear_current_timestep()
+                finally:
+                    network.set_multiplier(1.0)  # may be overwritten by "network_multipliers" in the next step
                 target[diff_output_pr_indices] = noise_pred_prior.to(target.dtype)
 
         return noise_pred, target, timesteps, None
@@ -1148,14 +1162,14 @@ class NetworkTrainer:
 
         # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
         n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
+        dataloader_runtime_kwargs = train_util.resolve_dataloader_runtime_kwargs(args, n_workers)
 
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
             batch_size=1,
             shuffle=True,
             collate_fn=collator,
-            num_workers=n_workers,
-            persistent_workers=args.persistent_data_loader_workers,
+            **dataloader_runtime_kwargs,
         )
 
         val_dataloader = torch.utils.data.DataLoader(
@@ -1163,8 +1177,7 @@ class NetworkTrainer:
             shuffle=False,
             batch_size=1,
             collate_fn=collator,
-            num_workers=n_workers,
-            persistent_workers=args.persistent_data_loader_workers,
+            **dataloader_runtime_kwargs,
         )
 
         # 学習ステップ数を計算する

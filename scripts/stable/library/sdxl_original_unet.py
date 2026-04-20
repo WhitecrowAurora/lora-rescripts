@@ -627,6 +627,11 @@ class CrossAttention(nn.Module):
         self.use_flashattn = False
         self.use_sageattn = False
         self.use_cross_attn_fused_kv = False
+        self._cross_attn_fused_kv_cache_ready = False
+        self._cross_attn_fused_kv_supported = False
+        self._cross_attn_fused_k_modules = []
+        self._cross_attn_fused_v_modules = []
+        self._cross_attn_fused_kv_module_refs = (self.to_k, self.to_v)
 
     def set_use_memory_efficient_attention(self, xformers, mem_eff):
         self.use_memory_efficient_attention_xformers = xformers
@@ -662,6 +667,7 @@ class CrossAttention(nn.Module):
 
     def set_use_cross_attn_fused_kv(self, enabled: bool):
         self.use_cross_attn_fused_kv = bool(enabled)
+        self._cross_attn_fused_kv_cache_ready = False
 
     @staticmethod
     def _is_native_linear_forward(module: nn.Module) -> bool:
@@ -685,9 +691,12 @@ class CrossAttention(nn.Module):
             supported_modules.append(delta_module)
         return supported_modules
 
-    def _project_context_kv(self, context: torch.Tensor, *, allow_fused: bool):
-        if not allow_fused:
-            return self.to_k(context), self.to_v(context)
+    def _resolve_cross_attn_fused_kv_state(self) -> None:
+        self._cross_attn_fused_kv_cache_ready = True
+        self._cross_attn_fused_kv_module_refs = (self.to_k, self.to_v)
+        self._cross_attn_fused_k_modules = []
+        self._cross_attn_fused_v_modules = []
+        self._cross_attn_fused_kv_supported = False
 
         k_delta_modules = self._get_supported_projection_delta_modules(self.to_k)
         v_delta_modules = self._get_supported_projection_delta_modules(self.to_v)
@@ -695,12 +704,27 @@ class CrossAttention(nn.Module):
             _warn_sdxl_crossattn_fused_kv_fallback_once(
                 "detected an unsupported projection patch on to_k/to_v; using the original unfused path."
             )
-            return self.to_k(context), self.to_v(context)
+            return
 
         if (self.to_k.bias is None) != (self.to_v.bias is None):
             _warn_sdxl_crossattn_fused_kv_fallback_once(
                 "to_k and to_v bias layout is inconsistent; using the original unfused path."
             )
+            return
+
+        self._cross_attn_fused_k_modules = k_delta_modules
+        self._cross_attn_fused_v_modules = v_delta_modules
+        self._cross_attn_fused_kv_supported = True
+
+    def _project_context_kv(self, context: torch.Tensor, *, allow_fused: bool):
+        if not allow_fused:
+            return self.to_k(context), self.to_v(context)
+
+        if self._cross_attn_fused_kv_module_refs != (self.to_k, self.to_v):
+            self._cross_attn_fused_kv_cache_ready = False
+        if not self._cross_attn_fused_kv_cache_ready:
+            self._resolve_cross_attn_fused_kv_state()
+        if not self._cross_attn_fused_kv_supported:
             return self.to_k(context), self.to_v(context)
 
         kv_weight = torch.cat((self.to_k.weight, self.to_v.weight), dim=0)
@@ -711,11 +735,11 @@ class CrossAttention(nn.Module):
         kv = F.linear(context, kv_weight, kv_bias)
         k_out, v_out = kv.split((self.to_k.out_features, self.to_v.out_features), dim=-1)
 
-        for delta_module in k_delta_modules:
+        for delta_module in self._cross_attn_fused_k_modules:
             delta = delta_module.compute_forward_delta(context)
             if delta is not None:
                 k_out = k_out + delta
-        for delta_module in v_delta_modules:
+        for delta_module in self._cross_attn_fused_v_modules:
             delta = delta_module.compute_forward_delta(context)
             if delta is not None:
                 v_out = v_out + delta

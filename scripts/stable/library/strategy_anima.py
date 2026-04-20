@@ -206,7 +206,7 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
             return True
 
         try:
-            npz = np.load(npz_path)
+            npz = self._load_npz_archive(npz_path)
             if "prompt_embeds" not in npz:
                 return False
             if "attn_mask" not in npz:
@@ -242,7 +242,7 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         )
 
     def load_outputs_npz(self, npz_path: str) -> List[np.ndarray]:
-        data = np.load(npz_path)
+        data = self._load_npz_archive(npz_path)
         prompt_embeds = data["prompt_embeds"]
         attn_mask = data["attn_mask"]
         t5_input_ids = data["t5_input_ids"]

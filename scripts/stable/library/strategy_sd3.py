@@ -281,7 +281,7 @@ class Sd3TextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
             return True
 
         try:
-            npz = np.load(npz_path)
+            npz = self._load_npz_archive(npz_path)
             if "lg_out" not in npz:
                 return False
             if "lg_pooled" not in npz:
@@ -309,7 +309,7 @@ class Sd3TextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         return True
 
     def load_outputs_npz(self, npz_path: str) -> List[np.ndarray]:
-        data = np.load(npz_path)
+        data = self._load_npz_archive(npz_path)
         lg_out = data["lg_out"]
         lg_pooled = data["lg_pooled"]
         t5_out = data["t5_out"]

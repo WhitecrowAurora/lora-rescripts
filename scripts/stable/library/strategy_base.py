@@ -1,5 +1,6 @@
 # base class for platform strategies. this file defines the interface for strategies
 
+from collections import OrderedDict
 import os
 import re
 from typing import Any, List, Optional, Tuple, Union, Callable
@@ -18,6 +19,22 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_npz_cache_items(env_key: str, default_value: int) -> int:
+    raw_value = os.environ.get(env_key, "")
+    if not raw_value:
+        return max(0, int(default_value))
+    try:
+        resolved = int(raw_value)
+    except (TypeError, ValueError):
+        return max(0, int(default_value))
+    return max(0, resolved)
+
+
+def _resolve_npz_cache_identity(npz_path: str) -> tuple[str, int, int]:
+    stat = os.stat(npz_path)
+    return (npz_path, int(stat.st_mtime_ns), int(stat.st_size))
 
 
 class TokenizeStrategy:
@@ -335,6 +352,8 @@ class TextEncoderOutputsCachingStrategy:
         self.skip_disk_cache_validity_check = skip_disk_cache_validity_check
         self._is_partial = is_partial
         self._is_weighted = is_weighted
+        self._npz_cache_items = _resolve_npz_cache_items("MIKAZUKI_TEXT_NPZ_CACHE_ITEMS", 32)
+        self._npz_cache: OrderedDict[tuple[str, int, int], dict[str, np.ndarray]] = OrderedDict()
 
     @classmethod
     def set_strategy(cls, strategy):
@@ -362,6 +381,26 @@ class TextEncoderOutputsCachingStrategy:
     def is_weighted(self):
         return self._is_weighted
 
+    def _load_npz_archive(self, npz_path: str) -> dict[str, np.ndarray]:
+        cache_identity = None
+        if self._npz_cache_items > 0:
+            try:
+                cache_identity = _resolve_npz_cache_identity(npz_path)
+            except OSError:
+                cache_identity = None
+            if cache_identity is not None and cache_identity in self._npz_cache:
+                self._npz_cache.move_to_end(cache_identity)
+                return self._npz_cache[cache_identity]
+
+        with np.load(npz_path, allow_pickle=False) as npz:
+            archive = {key: np.asarray(npz[key]) for key in npz.files}
+
+        if cache_identity is not None:
+            self._npz_cache[cache_identity] = archive
+            while len(self._npz_cache) > self._npz_cache_items:
+                self._npz_cache.popitem(last=False)
+        return archive
+
     def get_outputs_npz_path(self, image_abs_path: str) -> str:
         raise NotImplementedError
 
@@ -386,6 +425,8 @@ class LatentsCachingStrategy:
         self._cache_to_disk = cache_to_disk
         self._batch_size = batch_size
         self.skip_disk_cache_validity_check = skip_disk_cache_validity_check
+        self._npz_cache_items = _resolve_npz_cache_items("MIKAZUKI_LATENTS_NPZ_CACHE_ITEMS", 16)
+        self._npz_cache: OrderedDict[tuple[str, int, int], dict[str, np.ndarray]] = OrderedDict()
 
     @classmethod
     def set_strategy(cls, strategy):
@@ -404,6 +445,26 @@ class LatentsCachingStrategy:
     @property
     def batch_size(self):
         return self._batch_size
+
+    def _load_npz_archive(self, npz_path: str) -> dict[str, np.ndarray]:
+        cache_identity = None
+        if self._npz_cache_items > 0:
+            try:
+                cache_identity = _resolve_npz_cache_identity(npz_path)
+            except OSError:
+                cache_identity = None
+            if cache_identity is not None and cache_identity in self._npz_cache:
+                self._npz_cache.move_to_end(cache_identity)
+                return self._npz_cache[cache_identity]
+
+        with np.load(npz_path, allow_pickle=False) as npz:
+            archive = {key: np.asarray(npz[key]) for key in npz.files}
+
+        if cache_identity is not None:
+            self._npz_cache[cache_identity] = archive
+            while len(self._npz_cache) > self._npz_cache_items:
+                self._npz_cache.popitem(last=False)
+        return archive
 
     @property
     def cache_suffix(self):
@@ -458,7 +519,7 @@ class LatentsCachingStrategy:
         key_reso_suffix = f"_{expected_latents_size[0]}x{expected_latents_size[1]}" if multi_resolution else ""
 
         try:
-            npz = np.load(npz_path)
+            npz = self._load_npz_archive(npz_path)
             if "latents" + key_reso_suffix not in npz:
                 return False
             latents = npz["latents" + key_reso_suffix]
@@ -595,7 +656,7 @@ class LatentsCachingStrategy:
             latents_size = (bucket_reso[1] // latents_stride, bucket_reso[0] // latents_stride)  # bucket_reso is (W, H)
             key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}"  # e.g. "_32x64", HxW
 
-        npz = np.load(npz_path)
+        npz = self._load_npz_archive(npz_path)
         if "latents" + key_reso_suffix not in npz:
             raise ValueError(f"latents{key_reso_suffix} not found in {npz_path}")
 
@@ -633,9 +694,9 @@ class LatentsCachingStrategy:
 
         if os.path.exists(npz_path):
             # load existing npz and update it
-            npz = np.load(npz_path)
-            for key in npz.files:
-                kwargs[key] = npz[key]
+            with np.load(npz_path, allow_pickle=False) as npz:
+                for key in npz.files:
+                    kwargs[key] = np.asarray(npz[key])
 
         # TODO float() is needed if vae is in bfloat16. Remove it if vae is float16.
         kwargs["latents" + key_reso_suffix] = latents_tensor.float().cpu().numpy()

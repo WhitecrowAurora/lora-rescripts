@@ -183,7 +183,7 @@ class LuminaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy)
             return True
 
         try:
-            npz = np.load(npz_path)
+            npz = self._load_npz_archive(npz_path)
             if "hidden_state" not in npz:
                 return False
             if "attention_mask" not in npz:
@@ -203,7 +203,7 @@ class LuminaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy)
         Returns:
             List[np.ndarray]: hidden_state, input_ids, attention_mask
         """
-        data = np.load(npz_path)
+        data = self._load_npz_archive(npz_path)
         hidden_state = data["hidden_state"]
         attention_mask = data["attention_mask"]
         input_ids = data["input_ids"]

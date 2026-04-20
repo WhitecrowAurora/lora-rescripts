@@ -56,6 +56,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         self.is_sdxl = True
         self._preview_oom_downgrade_count = 0
         self._peak_vram_startup_guard_released = False
+        self._last_fixed_block_swap_signature = None
 
     def configure_dataset_runtime_policy(self, args):
         mode = None
@@ -114,6 +115,32 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             scopes.append("output")
         return "/".join(scopes) if scopes else "none"
 
+    def _build_fixed_block_swap_signature(self, config: dict):
+        return (
+            bool(config.get("enabled")),
+            bool(config.get("swap_input_blocks")),
+            bool(config.get("swap_middle_block")),
+            bool(config.get("swap_output_blocks")),
+            bool(config.get("offload_after_backward", True)),
+            round(float(config.get("vram_threshold_ratio", 0.0) or 0.0), 6),
+        )
+
+    def _apply_fixed_block_swap_if_needed(self, target_unet, device, config: dict, *, force: bool = False) -> bool:
+        signature = self._build_fixed_block_swap_signature(config)
+        if not force and self._last_fixed_block_swap_signature == signature:
+            return False
+
+        target_unet.enable_fixed_block_swap(
+            device,
+            swap_input_blocks=config["swap_input_blocks"],
+            swap_middle_block=config["swap_middle_block"],
+            swap_output_blocks=config["swap_output_blocks"],
+            offload_after_backward=config["offload_after_backward"],
+            vram_threshold_ratio=config["vram_threshold_ratio"],
+        )
+        self._last_fixed_block_swap_signature = signature
+        return True
+
     def _maybe_release_peak_vram_startup_guard(self, args, accelerator, unet) -> None:
         if self._peak_vram_startup_guard_released:
             return
@@ -137,16 +164,22 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         )
         try:
             if release_enabled:
-                target_unet.enable_fixed_block_swap(
+                self._apply_fixed_block_swap_if_needed(
+                    target_unet,
                     accelerator.device,
-                    swap_input_blocks=bool(release_config.get("swap_input_blocks")),
-                    swap_middle_block=bool(release_config.get("swap_middle_block")),
-                    swap_output_blocks=bool(release_config.get("swap_output_blocks")),
-                    offload_after_backward=bool(release_config.get("offload_after_backward", True)),
-                    vram_threshold_ratio=float(release_config.get("vram_threshold_ratio", 0.0)),
+                    {
+                        "enabled": True,
+                        "swap_input_blocks": bool(release_config.get("swap_input_blocks")),
+                        "swap_middle_block": bool(release_config.get("swap_middle_block")),
+                        "swap_output_blocks": bool(release_config.get("swap_output_blocks")),
+                        "offload_after_backward": bool(release_config.get("offload_after_backward", True)),
+                        "vram_threshold_ratio": float(release_config.get("vram_threshold_ratio", 0.0)),
+                    },
+                    force=True,
                 )
             elif hasattr(target_unet, "disable_fixed_block_swap"):
                 target_unet.disable_fixed_block_swap()
+                self._last_fixed_block_swap_signature = None
 
             args.sdxl_fixed_block_swap = release_enabled
             args.sdxl_fixed_block_swap_input_blocks = bool(release_config.get("swap_input_blocks"))
@@ -179,6 +212,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
                 "/ 当前 SDXL 固定档 block swap 仅支持单进程且非 Deepspeed 训练，本次已自动跳过。"
             )
             args.sdxl_fixed_block_swap = False
+            self._last_fixed_block_swap_signature = None
             return
 
         target_unet = accelerator.unwrap_model(unet)
@@ -189,16 +223,10 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
                 "/ 当前 SDXL U-Net 路由不支持固定档 block swap，本次已自动跳过。"
             )
             args.sdxl_fixed_block_swap = False
+            self._last_fixed_block_swap_signature = None
             return
 
-        target_unet.enable_fixed_block_swap(
-            accelerator.device,
-            swap_input_blocks=config["swap_input_blocks"],
-            swap_middle_block=config["swap_middle_block"],
-            swap_output_blocks=config["swap_output_blocks"],
-            offload_after_backward=config["offload_after_backward"],
-            vram_threshold_ratio=config["vram_threshold_ratio"],
-        )
+        self._apply_fixed_block_swap_if_needed(target_unet, accelerator.device, config, force=True)
         clean_memory_on_device(accelerator.device)
         accelerator.print(
             "SDXL fixed block swap enabled. "
@@ -214,17 +242,11 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         self._maybe_release_peak_vram_startup_guard(args, accelerator, unet)
         config = self._get_fixed_block_swap_config(args)
         if not self.should_use_fixed_block_swap(args):
+            self._last_fixed_block_swap_signature = None
             return
         target_unet = accelerator.unwrap_model(unet)
         if hasattr(target_unet, "enable_fixed_block_swap"):
-            target_unet.enable_fixed_block_swap(
-                accelerator.device,
-                swap_input_blocks=config["swap_input_blocks"],
-                swap_middle_block=config["swap_middle_block"],
-                swap_output_blocks=config["swap_output_blocks"],
-                offload_after_backward=config["offload_after_backward"],
-                vram_threshold_ratio=config["vram_threshold_ratio"],
-            )
+            self._apply_fixed_block_swap_if_needed(target_unet, accelerator.device, config, force=False)
 
     def assert_extra_args(
         self,

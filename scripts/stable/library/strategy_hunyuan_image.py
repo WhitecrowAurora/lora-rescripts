@@ -102,7 +102,7 @@ class HunyuanImageTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStr
             return True
 
         try:
-            npz = np.load(npz_path)
+            npz = self._load_npz_archive(npz_path)
             if "vlm_embed" not in npz:
                 return False
             if "vlm_mask" not in npz:
@@ -120,7 +120,7 @@ class HunyuanImageTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStr
         return True
 
     def load_outputs_npz(self, npz_path: str) -> List[np.ndarray]:
-        data = np.load(npz_path)
+        data = self._load_npz_archive(npz_path)
         vln_embed = data["vlm_embed"]
         vlm_mask = data["vlm_mask"]
         byt5_embed = data["byt5_embed"]
