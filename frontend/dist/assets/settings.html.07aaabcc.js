@@ -251,7 +251,7 @@ setStatus("卸载成功，正在刷新UI列表...");
 await loadProfiles();
 if(payload?.data?.reload_required){
 setStatus("卸载完成，正在刷新页面...");
-window.setTimeout(()=>window.location.reload(),200);
+window.setTimeout(()=>window.location.assign("/"),200);
 }else{
 setStatus("卸载完成。");
 }
@@ -292,7 +292,7 @@ if(!response.ok||payload?.status!=="success"){
 throw new Error(payload?.message||`请求失败：${response.status}`);
 }
 setStatus("UI切换成功，正在刷新页面...");
-window.setTimeout(()=>window.location.reload(),200);
+window.setTimeout(()=>window.location.assign("/"),200);
 }catch(error){
 setStatus(error instanceof Error?error.message:"切换UI失败。",true);
 refreshBtn.disabled=false;

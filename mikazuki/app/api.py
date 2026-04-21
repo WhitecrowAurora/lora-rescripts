@@ -2147,6 +2147,50 @@ async def get_task_output(task_id: str, tail: int = 50) -> APIResponse:
     })
 
 
+@router.get("/system_monitor")
+async def get_system_monitor() -> APIResponse:
+    """Return real-time system resource usage: GPU VRAM + CPU + RAM."""
+    result: dict = {"gpu": {"available": False}, "cpu": {}, "ram": {}}
+    # --- GPU (nvidia-smi for system-wide VRAM, torch for device names) ---
+    try:
+        from mikazuki.utils.nvidia_smi import query_gpu_memory, query_gpu_metrics
+        mem_info = query_gpu_memory()
+        if mem_info.get("ok") and mem_info.get("gpus"):
+            metrics_info = query_gpu_metrics()
+            metrics_map = {}
+            if metrics_info.get("ok"):
+                for gm in metrics_info.get("gpus", []):
+                    metrics_map[str(gm.get("index", ""))] = gm
+            gpus = []
+            for g in mem_info["gpus"]:
+                idx = str(g.get("index", ""))
+                total_mb = g.get("memory_total_mb") or 0
+                used_mb = g.get("memory_used_mb") or 0
+                free_mb = g.get("memory_free_mb") or 0
+                pct = round(used_mb / total_mb * 100, 1) if total_mb > 0 else 0
+                gm = metrics_map.get(idx, {})
+                # Try to get GPU name from torch (cached), fall back to index
+                gpu_name = f"GPU {idx}"
+                try:
+                    import torch
+                    if torch.cuda.is_available() and int(idx) < torch.cuda.device_count():
+                        gpu_name = torch.cuda.get_device_properties(int(idx)).name
+                except Exception:
+                    pass
+                gpus.append({"index": idx, "name": gpu_name, "total_mb": round(total_mb), "used_mb": round(used_mb), "free_mb": round(free_mb), "utilization_pct": pct, "temperature_c": gm.get("temperature_c"), "power_draw_w": gm.get("power_draw_w")})
+            result["gpu"] = {"available": True, "gpus": gpus}
+    except Exception:
+        pass
+    # --- CPU + RAM (psutil) ---
+    try:
+        import psutil
+        result["cpu"] = {"percent": psutil.cpu_percent(interval=0), "count": psutil.cpu_count()}
+        vm = psutil.virtual_memory()
+        result["ram"] = {"total_mb": round(vm.total / 1048576), "used_mb": round(vm.used / 1048576), "percent": vm.percent}
+    except Exception:
+        pass
+    return APIResponseSuccess(data=result)
+
 @router.get("/gpu_status")
 async def get_gpu_status() -> APIResponse:
     """Return real-time GPU VRAM usage."""
