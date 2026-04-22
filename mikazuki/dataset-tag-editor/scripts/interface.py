@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 import tempfile
+import warnings
 
 from PIL import PngImagePlugin, Image
 
@@ -458,6 +459,11 @@ def main():
         if settings.current.cleanup_tmpdir:
             cleanup_tmpdr()
 
+        warnings.filterwarnings(
+            "ignore",
+            category=FutureWarning,
+            message=r"Importing from timm\.models\.layers is deprecated, please import via timm\.layers",
+        )
         write_status("loading_interrogators", "Loading interrogator registry...")
         dte_instance.load_interrogators()
 
@@ -466,7 +472,8 @@ def main():
 
         allowed_paths = collect_allowed_paths()
         logger.write(f"Gradio allowed_paths = {allowed_paths}")
-        write_status("starting_server", "Starting Gradio server on port 28001...")
+        active_port = cmd_args.opts.port or 28001
+        write_status("starting_server", f"Starting Gradio server on port {active_port}...")
         app, _, _ = launch_interface_with_localhost_fallback(allowed_paths)
         write_status("ready", "Tag editor service is ready.")
 

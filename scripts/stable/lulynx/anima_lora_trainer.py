@@ -37,6 +37,7 @@ from library import (
 )
 from library.config_util import BlueprintGenerator, ConfigSanitizer
 from library.custom_train_functions import apply_masked_loss
+from library.sageattention_compat import requires_reentrant_checkpoint_for_sageattention
 from library.utils import setup_logging
 from mikazuki.plugins.training_hooks import (
     apply_modify_loss_event,
@@ -59,6 +60,27 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _is_anima_sageattention_training_shim_active(args: argparse.Namespace) -> bool:
+    return (
+        str(getattr(args, "attn_mode", "") or "").strip().lower() == "sageattn"
+        and requires_reentrant_checkpoint_for_sageattention()
+    )
+
+
+def _apply_anima_sageattention_checkpoint_safety(args: argparse.Namespace) -> None:
+    if not _is_anima_sageattention_training_shim_active(args):
+        return
+
+    if bool(getattr(args, "unsloth_offload_checkpointing", False)):
+        logger.warning(
+            "Anima detected SageAttention training shim mode. "
+            "unsloth_offload_checkpointing has been disabled automatically for this run because its custom checkpoint "
+            "recompute path can still diverge from the Sage shim backward recompute path. "
+            "Falling back to standard reentrant gradient checkpointing."
+        )
+        args.unsloth_offload_checkpointing = False
 
 
 DEEPSPEED_OPTION_DEFAULTS = {
@@ -190,7 +212,7 @@ class AnimaNetworkTrainer:
 
         args.fp8_scaled = False
         args.attn_mode = anima_train_utils.normalize_anima_attn_mode(getattr(args, "attn_mode", None))
-
+        _apply_anima_sageattention_checkpoint_safety(args)
         if args.cache_text_encoder_outputs_to_disk and not args.cache_text_encoder_outputs:
             if self.is_train_text_encoder(args):
                 logger.warning(
@@ -641,6 +663,7 @@ class AnimaNetworkTrainer:
         args.cpu_offload_checkpointing = bool(getattr(args, "cpu_offload_checkpointing", False))
         args.unsloth_offload_checkpointing = bool(getattr(args, "unsloth_offload_checkpointing", False))
         args.blocks_to_swap = getattr(args, "blocks_to_swap", None)
+        _apply_anima_sageattention_checkpoint_safety(args)
         args.split_attn = bool(getattr(args, "split_attn", False))
         args.sample_prompts = getattr(args, "sample_prompts", None)
         args.text_encoder_batch_size = getattr(args, "text_encoder_batch_size", None)
@@ -998,7 +1021,7 @@ class AnimaNetworkTrainer:
                 len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
             )
             accelerator.print(
-                f"override steps. steps for {args.max_train_epochs} epochs is / 鎸囧畾銈ㄣ儩銉冦偗銇俱仹銇偣銉嗐儍銉楁暟: {args.max_train_steps}"
+                f"override steps. steps for {args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}"
             )
 
         train_dataset_group.set_max_train_steps(args.max_train_steps)
@@ -1219,21 +1242,21 @@ class AnimaNetworkTrainer:
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
-        accelerator.print("running training / 瀛︾繏闁嬪")
-        accelerator.print(f"  num train images * repeats / 瀛︾繏鐢诲儚銇暟脳绻般倞杩斻仐鍥炴暟: {train_dataset_group.num_train_images}")
-        accelerator.print(f"  num reg images / 姝ｅ墖鍖栫敾鍍忋伄鏁? {train_dataset_group.num_reg_images}")
-        accelerator.print(f"  num batches per epoch / 1epoch銇儛銉冦儊鏁? {len(train_dataloader)}")
-        accelerator.print(f"  num epochs / epoch鏁? {displayed_num_train_epochs}")
+        accelerator.print("running training / 学習開始")
+        accelerator.print(f"  num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")
+        accelerator.print(f"  num reg images / 正則化画像の数: {train_dataset_group.num_reg_images}")
+        accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
+        accelerator.print(f"  num epochs / epoch数: {displayed_num_train_epochs}")
         if mixed_resolution_phase_target_epoch > 0:
             accelerator.print(
-                f"  mixed-resolution epoch window / 闃舵鍒嗚鲸鐜囪繛缁?epoch 鍖洪棿: "
+                f"  mixed-resolution epoch window / 阶段分辨率连续 epoch 区间: "
                 f"{mixed_resolution_phase_start_epoch + 1} -> {mixed_resolution_phase_target_epoch}"
             )
         accelerator.print(
-            f"  batch size per device / 銉愩儍銉併偟銈ゃ偤: {', '.join([str(dataset.batch_size) for dataset in train_dataset_group.datasets])}"
+            f"  batch size per device / バッチサイズ: {', '.join([str(dataset.batch_size) for dataset in train_dataset_group.datasets])}"
         )
-        accelerator.print(f"  gradient accumulation steps / 鍕鹃厤銈掑悎瑷堛仚銈嬨偣銉嗐儍銉楁暟 = {args.gradient_accumulation_steps}")
-        accelerator.print(f"  total optimization steps / 瀛︾繏銈广儐銉冦儣鏁? {args.max_train_steps}")
+        accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
+        accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
 
         optimizer_eval_fn()
         self.sample_images(
@@ -1758,20 +1781,5 @@ def setup_parser() -> argparse.ArgumentParser:
         help="[Deprecated] use 'skip_cache_check' instead",
     )
     return parser
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 

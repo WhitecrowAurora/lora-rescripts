@@ -351,11 +351,17 @@ class AnimaLatentsCachingStrategy(LatentsCachingStrategy):
         return self._default_is_disk_cached_latents_expected(8, bucket_reso, npz_path, flip_aug, alpha_mask, multi_resolution=True)
 
     def load_latents_from_disk(
-        self, npz_path: str, bucket_reso: Tuple[int, int]
+        self, cache_ref_or_path, bucket_reso: Tuple[int, int]
     ) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[List[int]], Optional[np.ndarray], Optional[np.ndarray]]:
-        return self._default_load_latents_from_disk(8, npz_path, bucket_reso)
+        if not isinstance(cache_ref_or_path, (str, os.PathLike)):
+            return super().load_latents_from_disk(cache_ref_or_path, bucket_reso)
+        return self._default_load_latents_from_disk(8, os.fspath(cache_ref_or_path), bucket_reso)
 
     def cache_batch_latents(self, vae, image_infos: List, flip_aug: bool, alpha_mask: bool, random_crop: bool):
+        prepared_batch = self.prepare_batch_latents(image_infos, alpha_mask, random_crop)
+        self.cache_batch_latents_prepared(vae, image_infos, prepared_batch, flip_aug, alpha_mask, random_crop)
+
+    def cache_batch_latents_prepared(self, vae, image_infos: List, prepared_batch, flip_aug: bool, alpha_mask: bool, random_crop: bool):
         """Cache batch of latents using Qwen Image VAE.
 
         vae is expected to be the Qwen Image VAE (AutoencoderKLQwenImage).
@@ -375,8 +381,14 @@ class AnimaLatentsCachingStrategy(LatentsCachingStrategy):
             latents = vae.encode_pixels_to_latents(img_tensor)  # Keep 4D for input/output
             return latents.to("cpu")
 
-        self._default_cache_batch_latents(
-            encode_by_vae, vae_device, vae_dtype, image_infos, flip_aug, alpha_mask, random_crop, multi_resolution=True
+        self._default_cache_batch_latents_prepared(
+            encode_by_vae,
+            vae_device,
+            vae_dtype,
+            image_infos,
+            prepared_batch,
+            flip_aug,
+            multi_resolution=True,
         )
 
         if not train_util.HIGH_VRAM:

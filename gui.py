@@ -6,9 +6,16 @@ import platform
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=r"Importing from timm\.models\.layers is deprecated, please import via timm\.layers",
+)
 
 from mikazuki.launch_utils import (base_dir_path, catch_exception, git_tag,
                                    prepare_environment, check_port_avaliable, find_avaliable_ports)
@@ -18,12 +25,15 @@ from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_r
 from mikazuki.utils.runtime_paths import get_project_local_main_python_roots, get_tageditor_python_candidates
 
 APP_NAME = "SD-reScripts"
-APP_VERSION = "v1.3.8"
+APP_VERSION = "v1.4.8"
 ALLOW_SYSTEM_PYTHON_ENV = "MIKAZUKI_ALLOW_SYSTEM_PYTHON"
 REPO_ROOT = base_dir_path()
 LOG_DIR = REPO_ROOT / "logs"
 TAGEDITOR_ROOT = REPO_ROOT / "mikazuki" / "dataset-tag-editor"
 TAGEDITOR_LAUNCH = TAGEDITOR_ROOT / "scripts" / "launch.py"
+DEFAULT_TAGEDITOR_PORT = 28001
+TAGEDITOR_FALLBACK_PORT_RANGE_END = DEFAULT_TAGEDITOR_PORT + 20
+TAGEDITOR_PORT = DEFAULT_TAGEDITOR_PORT
 
 parser = argparse.ArgumentParser(description="GUI for stable diffusion training")
 parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -229,11 +239,11 @@ def run_tag_editor():
 
     os.environ["MIKAZUKI_TAGEDITOR_RUNTIME"] = runtime_kind
     log.info("Starting tageditor...")
-    update_tageditor_status("starting", "Launching tag editor subprocess...")
+    update_tageditor_status("starting", f"Launching tag editor subprocess on port {TAGEDITOR_PORT}...")
     cmd = [
         python_exe,
         TAGEDITOR_LAUNCH,
-        "--port", "28001",
+        "--port", str(TAGEDITOR_PORT),
         "--shadow-gradio-output",
         "--root-path", "/proxy/tageditor"
     ]
@@ -259,13 +269,44 @@ def resolve_server_port() -> None:
         log.error("port finding fallback error")
 
 
+def resolve_tag_editor_port() -> None:
+    global TAGEDITOR_PORT
+
+    if check_port_avaliable(DEFAULT_TAGEDITOR_PORT):
+        TAGEDITOR_PORT = DEFAULT_TAGEDITOR_PORT
+        return
+
+    fallback_port = find_avaliable_ports(DEFAULT_TAGEDITOR_PORT + 1, TAGEDITOR_FALLBACK_PORT_RANGE_END + 1)
+    if fallback_port is None:
+        TAGEDITOR_PORT = DEFAULT_TAGEDITOR_PORT
+        log.warning(
+            "Tag editor default port %s is already in use and no fallback port was found in %s-%s.",
+            DEFAULT_TAGEDITOR_PORT,
+            DEFAULT_TAGEDITOR_PORT + 1,
+            TAGEDITOR_FALLBACK_PORT_RANGE_END,
+        )
+        return
+
+    TAGEDITOR_PORT = fallback_port
+    log.warning(
+        "Tag editor default port %s is already in use. Falling back to port %s for this launch.",
+        DEFAULT_TAGEDITOR_PORT,
+        TAGEDITOR_PORT,
+    )
+    log.warning(
+        "标签编辑器默认端口 %s 已被占用，本次启动将改用端口 %s。",
+        DEFAULT_TAGEDITOR_PORT,
+        TAGEDITOR_PORT,
+    )
+
+
 def apply_runtime_environment() -> None:
     os.environ["MIKAZUKI_HOST"] = args.host
     os.environ["MIKAZUKI_PORT"] = str(args.port)
     os.environ["MIKAZUKI_TENSORBOARD_HOST"] = args.tensorboard_host
     os.environ["MIKAZUKI_TENSORBOARD_PORT"] = str(args.tensorboard_port)
     os.environ["MIKAZUKI_TAGEDITOR_HOST"] = "127.0.0.1"
-    os.environ["MIKAZUKI_TAGEDITOR_PORT"] = "28001"
+    os.environ["MIKAZUKI_TAGEDITOR_PORT"] = str(TAGEDITOR_PORT)
     os.environ["MIKAZUKI_DEV"] = "1" if args.dev else "0"
     os.environ["MIKAZUKI_TAGEDITOR_STATUS_FILE"] = str(TAGEDITOR_STATUS_FILE)
     os.environ[BACKEND_STATUS_FILE_ENV] = str(BACKEND_STATUS_FILE)
@@ -309,6 +350,7 @@ def launch():
         pass
 
     resolve_server_port()
+    resolve_tag_editor_port()
 
     git_version = git_tag(REPO_ROOT)
     version_suffix = f" ({git_version})" if git_version != "<none>" else ""

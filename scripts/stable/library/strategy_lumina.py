@@ -321,7 +321,7 @@ class LuminaLatentsCachingStrategy(LatentsCachingStrategy):
         )
 
     def load_latents_from_disk(
-        self, npz_path: str, bucket_reso: Tuple[int, int]
+        self, cache_ref_or_path, bucket_reso: Tuple[int, int]
     ) -> Tuple[
         Optional[np.ndarray],
         Optional[List[int]],
@@ -343,8 +343,10 @@ class LuminaLatentsCachingStrategy(LatentsCachingStrategy):
                 Optional[np.ndarray],
             ]: Tuple of latent tensors, attention_mask, input_ids, latents, latents_unet
         """
+        if not isinstance(cache_ref_or_path, (str, os.PathLike)):
+            return super().load_latents_from_disk(cache_ref_or_path, bucket_reso)
         return self._default_load_latents_from_disk(
-            8, npz_path, bucket_reso
+            8, os.fspath(cache_ref_or_path), bucket_reso
         )  # support multi-resolution
 
     # TODO remove circular dependency for ImageInfo
@@ -356,18 +358,29 @@ class LuminaLatentsCachingStrategy(LatentsCachingStrategy):
         alpha_mask: bool,
         random_crop: bool,
     ):
+        prepared_batch = self.prepare_batch_latents(batch, alpha_mask, random_crop)
+        self.cache_batch_latents_prepared(model, batch, prepared_batch, flip_aug, alpha_mask, random_crop)
+
+    def cache_batch_latents_prepared(
+        self,
+        model,
+        batch: List,
+        prepared_batch,
+        flip_aug: bool,
+        alpha_mask: bool,
+        random_crop: bool,
+    ):
         encode_by_vae = lambda img_tensor: model.encode(img_tensor).to("cpu")
         vae_device = model.device
         vae_dtype = model.dtype
 
-        self._default_cache_batch_latents(
+        self._default_cache_batch_latents_prepared(
             encode_by_vae,
             vae_device,
             vae_dtype,
             batch,
+            prepared_batch,
             flip_aug,
-            alpha_mask,
-            random_crop,
             multi_resolution=True,
         )
 

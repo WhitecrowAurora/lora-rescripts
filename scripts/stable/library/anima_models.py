@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from library import custom_offloading_utils, attention
+from library.sageattention_compat import requires_reentrant_checkpoint_for_sageattention
 
 
 def to_device(x, device):
@@ -142,6 +143,9 @@ def _info_once(message: str) -> None:
 def _warn_once(message: str) -> None:
     logger.warning(message)
 
+
+def _uses_sageattention_reentrant_checkpoint_shim(attn_mode: Optional[str]) -> bool:
+    return str(attn_mode or "").strip().lower() == "sageattn" and requires_reentrant_checkpoint_for_sageattention()
 
 def _short_exc_message(exc: Exception) -> str:
     message = str(exc).strip()
@@ -1142,19 +1146,33 @@ class Block(nn.Module):
         adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
         extra_per_block_pos_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        checkpoint_use_reentrant = False
+        if self.training and self.gradient_checkpointing and _uses_sageattention_reentrant_checkpoint_shim(
+            getattr(attn_params, "attn_mode", "")
+        ):
+            checkpoint_use_reentrant = True
+            _warn_once(
+                "Anima gradient checkpointing switched to reentrant mode for SageAttention shim compatibility."
+            )
         if self.training and self.gradient_checkpointing:
             if self.unsloth_offload_checkpointing:
-                # Unsloth: async non-blocking CPU RAM offload (fastest offload method)
-                return unsloth_checkpoint(
-                    self._forward,
-                    x_B_T_H_W_D,
-                    emb_B_T_D,
-                    crossattn_emb,
-                    attn_params,
-                    rope_emb_L_1_1_D,
-                    adaln_lora_B_T_3D,
-                    extra_per_block_pos_emb,
-                )
+                if checkpoint_use_reentrant:
+                    _warn_once(
+                        "Anima disabled unsloth_offload_checkpointing because SageAttention shim requires reentrant checkpointing. "
+                        "Falling back to standard gradient checkpointing."
+                    )
+                else:
+                    # Unsloth: async non-blocking CPU RAM offload (fastest offload method)
+                    return unsloth_checkpoint(
+                        self._forward,
+                        x_B_T_H_W_D,
+                        emb_B_T_D,
+                        crossattn_emb,
+                        attn_params,
+                        rope_emb_L_1_1_D,
+                        adaln_lora_B_T_3D,
+                        extra_per_block_pos_emb,
+                    )
             elif self.cpu_offload_checkpointing:
                 # Standard cpu offload: blocking transfers
                 def create_custom_forward(func):
@@ -1176,7 +1194,7 @@ class Block(nn.Module):
                     rope_emb_L_1_1_D,
                     adaln_lora_B_T_3D,
                     extra_per_block_pos_emb,
-                    use_reentrant=False,
+                    use_reentrant=checkpoint_use_reentrant,
                 )
             else:
                 # Standard gradient checkpointing (no offload)
@@ -1189,7 +1207,7 @@ class Block(nn.Module):
                     rope_emb_L_1_1_D,
                     adaln_lora_B_T_3D,
                     extra_per_block_pos_emb,
-                    use_reentrant=False,
+                    use_reentrant=checkpoint_use_reentrant,
                 )
         else:
             return self._forward(
@@ -1338,6 +1356,12 @@ class Anima(nn.Module):
         self.t_embedding_norm.reset_parameters()
 
     def enable_gradient_checkpointing(self, cpu_offload: bool = False, unsloth_offload: bool = False):
+        if _uses_sageattention_reentrant_checkpoint_shim(self.attn_mode) and unsloth_offload:
+            _warn_once(
+                "Anima disabled unsloth_offload_checkpointing because SageAttention shim requires reentrant checkpointing. "
+                "Falling back to standard gradient checkpointing."
+            )
+            unsloth_offload = False
         for block in self.blocks:
             block.enable_gradient_checkpointing(cpu_offload=cpu_offload, unsloth_offload=unsloth_offload)
 
@@ -1433,6 +1457,12 @@ class Anima(nn.Module):
         assert (
             self.blocks_to_swap <= self.num_blocks - 2
         ), f"Cannot swap more than {self.num_blocks - 2} blocks. Requested: {self.blocks_to_swap} blocks."
+
+        if _uses_sageattention_reentrant_checkpoint_shim(self.attn_mode):
+            _warn_once(
+                "Anima block swap is running together with SageAttention shim. This path remains experimental under heavy "
+                "VRAM pressure; if you see rare instability, disable blocks_to_swap first or switch to FlashAttention2 / SDPA."
+            )
 
         self.offloader = custom_offloading_utils.ModelOffloader(self.blocks, self.blocks_to_swap, device)
         logger.info(f"Anima: Block swap enabled. Swapping {num_blocks} blocks, total blocks: {self.num_blocks}, device: {device}.")

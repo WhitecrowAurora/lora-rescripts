@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import sys
 
 from glob import glob
@@ -14,7 +15,7 @@ from typing import Tuple, Optional
 
 import toml
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import mikazuki.process as process
 from mikazuki import launch_utils
@@ -115,6 +116,78 @@ from mikazuki.utils.tk_window import (open_directory_selector,
                                        open_file_selector)
 
 router = APIRouter()
+
+REPO_ROOT = launch_utils.base_dir_path()
+ASSETS_ROOT = REPO_ROOT / "assets"
+UI_STATE_ROOT = ASSETS_ROOT / "ui_state"
+SAVED_CONFIGS_DIR = UI_STATE_ROOT / "saved_configs"
+TASK_HISTORY_FILE = UI_STATE_ROOT / "task_history.json"
+LOGS_ROOT = REPO_ROOT / "logs"
+TRAIN_ROOT = REPO_ROOT / "train"
+OUTPUT_ROOT = REPO_ROOT / "output"
+SAMPLE_OUTPUT_DIR = OUTPUT_ROOT / "sample"
+SD_MODELS_ROOT = REPO_ROOT / "sd-models"
+PREVIEW_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+MODEL_FILE_EXTENSIONS = {".safetensors", ".ckpt", ".pt"}
+BUILTIN_PICKER_ROOTS = {
+    "folder": TRAIN_ROOT,
+    "output-folder": OUTPUT_ROOT,
+    "model-file": SD_MODELS_ROOT,
+    "file": SD_MODELS_ROOT,
+    "model-saved-file": OUTPUT_ROOT,
+}
+
+
+def _json_error(message: str, status_code: int = 400) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"status": "error", "message": message})
+
+
+def _ensure_ui_state_root() -> None:
+    UI_STATE_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _sanitize_saved_config_name(raw_name: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]+', "_", str(raw_name or "")).strip()
+
+
+def _get_saved_config_path(raw_name: str) -> Path:
+    safe_name = _sanitize_saved_config_name(raw_name)
+    if not safe_name:
+        raise ValueError("参数名称不能为空。")
+    _ensure_ui_state_root()
+    SAVED_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    return SAVED_CONFIGS_DIR / f"{safe_name}.json"
+
+
+def _require_safe_child_name(raw_name: str, *, label: str) -> str:
+    name = str(raw_name or "").strip()
+    if not name:
+        raise ValueError(f"{label} is required")
+    if any(part in {"..", ""} for part in Path(name).parts) or "/" in name or "\\" in name:
+        raise ValueError(f"Invalid {label}")
+    return name
+
+
+def _resolve_builtin_relative_dir(raw_dir: str) -> Path:
+    relative_dir = Path(str(raw_dir or "").strip())
+    if not str(relative_dir):
+        raise ValueError("缺少目录名。")
+    if relative_dir.is_absolute() or ".." in relative_dir.parts:
+        raise ValueError("目录名无效。")
+    resolved = (TRAIN_ROOT / relative_dir).resolve()
+    try:
+        resolved.relative_to(TRAIN_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("目录名无效。") from exc
+    return resolved
+
+
+def _open_directory_in_shell(target_dir: Path) -> None:
+    if sys.platform == "win32":
+        os.startfile(str(target_dir))  # type: ignore[attr-defined]
+        return
+    command = ["open", str(target_dir)] if sys.platform == "darwin" else ["xdg-open", str(target_dir)]
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 avaliable_scripts = [
     "networks/extract_lora_from_models.py",
@@ -2032,6 +2105,37 @@ async def get_files(pick_type) -> APIResponse:
     })
 
 
+@router.get("/builtin_picker")
+async def get_builtin_picker(picker_type: str = "file") -> APIResponse:
+    root_path = BUILTIN_PICKER_ROOTS.get(picker_type, BUILTIN_PICKER_ROOTS["file"])
+    try:
+        root_label = str(root_path.relative_to(REPO_ROOT)).replace("\\", "/")
+    except ValueError:
+        root_label = str(root_path)
+
+    items: list[str] = []
+    if root_path.exists():
+        entries = list(root_path.iterdir())
+        if picker_type in {"folder", "output-folder"}:
+            items = sorted(
+                [entry.name for entry in entries if entry.is_dir() and not entry.name.startswith(".")],
+                key=str.lower,
+            )
+        else:
+            items = sorted(
+                [
+                    entry.name
+                    for entry in entries
+                    if entry.is_file()
+                    and not entry.name.startswith(".")
+                    and entry.suffix.lower() in MODEL_FILE_EXTENSIONS
+                ],
+                key=str.lower,
+            )
+
+    return APIResponseSuccess(data={"rootLabel": root_label, "items": items})
+
+
 @router.get("/tasks", response_model_exclude_none=True)
 async def get_tasks() -> APIResponse:
     return APIResponseSuccess(data={
@@ -2408,6 +2512,257 @@ async def get_config_summary() -> APIResponse:
         "config_path": str(app_config.path),
         "plugin_developer_mode": bool(app_config["plugin_developer_mode"]),
     })
+
+
+@router.post("/saved_configs/save")
+async def save_named_config(request: Request):
+    try:
+        payload = json.loads((await request.body()).decode("utf-8"))
+    except json.JSONDecodeError:
+        return _json_error("请求体不是合法 JSON。")
+    if not isinstance(payload, dict):
+        return _json_error("请求体必须是 JSON 对象。")
+
+    name = payload.get("name")
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        return _json_error("缺少参数名称或配置内容。")
+
+    try:
+        file_path = _get_saved_config_path(str(name or ""))
+    except ValueError as exc:
+        return _json_error(str(exc))
+
+    safe_name = file_path.stem
+    file_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    return APIResponseSuccess(data={"name": safe_name})
+
+
+@router.get("/saved_configs/list")
+async def list_saved_configs() -> APIResponse:
+    if not SAVED_CONFIGS_DIR.exists():
+        return APIResponseSuccess(data={"configs": []})
+
+    configs = sorted(
+        (
+            {
+                "name": file.stem,
+                "time": int(file.stat().st_mtime * 1000),
+            }
+            for file in SAVED_CONFIGS_DIR.glob("*.json")
+            if file.is_file()
+        ),
+        key=lambda item: item["time"],
+        reverse=True,
+    )
+    return APIResponseSuccess(data={"configs": configs})
+
+
+@router.get("/saved_configs/load")
+async def load_named_config(name: str):
+    try:
+        file_path = _get_saved_config_path(name)
+    except ValueError as exc:
+        return _json_error(str(exc))
+
+    if not file_path.exists():
+        return _json_error("参数文件不存在。", status_code=404)
+
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return _json_error("参数文件损坏，无法读取。", status_code=500)
+
+    if not isinstance(payload, dict):
+        return _json_error("参数文件格式无效。", status_code=500)
+
+    return APIResponseSuccess(data=payload)
+
+
+@router.get("/saved_configs/delete")
+async def delete_named_config(name: str):
+    try:
+        file_path = _get_saved_config_path(name)
+    except ValueError as exc:
+        return _json_error(str(exc))
+
+    if not file_path.exists():
+        return _json_error("参数文件不存在。", status_code=404)
+
+    file_path.unlink()
+    return APIResponseSuccess()
+
+
+@router.post("/saved_configs/rename")
+async def rename_saved_config(request: Request):
+    try:
+        payload = json.loads((await request.body()).decode("utf-8"))
+    except json.JSONDecodeError:
+        return _json_error("请求体不是合法 JSON。")
+    if not isinstance(payload, dict):
+        return _json_error("请求体必须是 JSON 对象。")
+
+    old_name = str(payload.get("oldName", "") or "")
+    new_name = str(payload.get("newName", "") or "")
+
+    try:
+        old_path = _get_saved_config_path(old_name)
+        new_path = _get_saved_config_path(new_name)
+    except ValueError as exc:
+        return _json_error(str(exc))
+
+    if not old_path.exists():
+        return _json_error("原参数文件不存在。", status_code=404)
+
+    if old_path == new_path:
+        return APIResponseSuccess(data={"name": new_path.stem})
+
+    if new_path.exists():
+        return _json_error("新名称已存在，请换一个名称。", status_code=409)
+
+    old_path.rename(new_path)
+    return APIResponseSuccess(data={"name": new_path.stem})
+
+
+@router.get("/log_dirs")
+async def get_log_dirs() -> APIResponse:
+    if not LOGS_ROOT.exists():
+        return APIResponseSuccess(data={"dirs": []})
+
+    dirs = sorted(
+        (
+            {
+                "name": directory.name,
+                "time": int(directory.stat().st_mtime * 1000),
+                "hasEvents": any(child.name.startswith("events.out") for child in directory.iterdir()),
+            }
+            for directory in LOGS_ROOT.iterdir()
+            if directory.is_dir()
+        ),
+        key=lambda item: item["time"],
+        reverse=True,
+    )
+    return APIResponseSuccess(data={"dirs": dirs})
+
+
+@router.get("/log_detail")
+async def get_log_detail(dir: str):
+    if not dir:
+        return _json_error("缺少目录名。")
+
+    target_dir = (LOGS_ROOT / dir).resolve()
+    try:
+        target_dir.relative_to(LOGS_ROOT.resolve())
+    except ValueError:
+        return _json_error("目录名无效。")
+
+    if not target_dir.exists() or not target_dir.is_dir():
+        return _json_error("日志目录不存在。", status_code=404)
+
+    files = [
+        {
+            "name": item.name,
+            "size": item.stat().st_size,
+            "time": int(item.stat().st_mtime * 1000),
+        }
+        for item in sorted(target_dir.iterdir(), key=lambda child: child.name.lower())
+        if item.is_file()
+    ]
+    return APIResponseSuccess(data={"dir": dir, "files": files})
+
+
+@router.get("/local/sample_images")
+async def get_sample_images() -> APIResponse:
+    if not SAMPLE_OUTPUT_DIR.exists() or not SAMPLE_OUTPUT_DIR.is_dir():
+        return APIResponseSuccess(data={"images": [], "total": 0})
+
+    images = sorted(
+        (
+            {
+                "name": file.name,
+                "path": str(file.resolve()).replace("\\", "/"),
+                "mtime": int(file.stat().st_mtime * 1000),
+            }
+            for file in SAMPLE_OUTPUT_DIR.iterdir()
+            if file.is_file() and file.suffix.lower() in PREVIEW_IMAGE_EXTENSIONS
+        ),
+        key=lambda item: item["mtime"],
+        reverse=True,
+    )
+    return APIResponseSuccess(data={"images": images, "total": len(images)})
+
+
+@router.get("/local/sample_file")
+async def get_sample_file(name: str):
+    try:
+        safe_name = _require_safe_child_name(name, label="file name")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    target_file = SAMPLE_OUTPUT_DIR / safe_name
+    if not target_file.exists() or not target_file.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    if target_file.suffix.lower() not in PREVIEW_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported image type")
+
+    return FileResponse(target_file)
+
+
+@router.post("/local/open_folder")
+async def open_local_folder(request: Request):
+    try:
+        payload = json.loads((await request.body()).decode("utf-8"))
+    except json.JSONDecodeError:
+        return _json_error("请求体不是合法 JSON。")
+    if not isinstance(payload, dict):
+        return _json_error("请求体必须是 JSON 对象。")
+
+    raw_folder = str(payload.get("folder", "") or "").strip() or "output"
+    target_dir = Path(raw_folder).expanduser()
+    if not target_dir.is_absolute():
+        target_dir = (REPO_ROOT / target_dir).resolve()
+    else:
+        target_dir = target_dir.resolve()
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        await asyncio.to_thread(_open_directory_in_shell, target_dir)
+    except Exception as exc:
+        return _json_error(f"打开目录失败：{exc}", status_code=500)
+    return APIResponseSuccess()
+
+
+@router.api_route("/local/task_history", methods=["GET", "POST", "DELETE"])
+async def manage_local_task_history(request: Request):
+    _ensure_ui_state_root()
+
+    if request.method == "GET":
+        try:
+            tasks = json.loads(TASK_HISTORY_FILE.read_text(encoding="utf-8")) if TASK_HISTORY_FILE.exists() else []
+            if not isinstance(tasks, list):
+                tasks = []
+        except Exception:
+            tasks = []
+        return APIResponseSuccess(data={"tasks": tasks})
+
+    if request.method == "DELETE":
+        if TASK_HISTORY_FILE.exists():
+            TASK_HISTORY_FILE.unlink()
+        return APIResponseSuccess()
+
+    try:
+        payload = json.loads((await request.body()).decode("utf-8"))
+    except json.JSONDecodeError:
+        return _json_error("请求体不是合法 JSON。")
+    if not isinstance(payload, dict):
+        return _json_error("请求体必须是 JSON 对象。")
+
+    tasks = payload.get("tasks", [])
+    if not isinstance(tasks, list):
+        return _json_error("tasks 必须是数组。")
+
+    TASK_HISTORY_FILE.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+    return APIResponseSuccess()
 
 
 @router.get("/plugins/runtime")

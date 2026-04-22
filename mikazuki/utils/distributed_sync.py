@@ -134,7 +134,11 @@ def count_dataset_files_without_npz(path: Path, *, missing_value: int, not_dir_v
 
     count = 0
     for candidate in path.rglob("*"):
-        if candidate.is_file() and candidate.suffix.lower() != ".npz":
+        if not candidate.is_file():
+            continue
+        if ".mikazuki-cache" in {part.lower() for part in candidate.parts}:
+            continue
+        if candidate.suffix.lower() != ".npz":
             count += 1
     return count
 
@@ -202,7 +206,8 @@ def resolve_worker_sync_runtime(config: dict, distributed_runtime: dict, repo_ro
         notes.append("Worker sync will compare dataset/resource availability and pull missing assets from the main node when needed.")
     if clear_dataset_npz_before_train:
         notes.append(
-            "clear_dataset_npz_before_train is enabled, so worker dataset .npz caches and metadata_cache.json will be cleared before launch."
+            "clear_dataset_npz_before_train is enabled, so worker dataset latent caches (.safetensors / .npz) "
+            "and metadata_cache.json will be cleared before launch."
         )
 
     if (sync_config_from_main or sync_missing_assets_from_main) and shared_main_repo_root is None:
@@ -493,6 +498,8 @@ def synchronize_local_dir_without_npz(source_dir: Path, local_dir: Path) -> None
     source_dirs: set[Path] = {Path(".")}
     for path in source_dir.rglob("*"):
         relative = path.relative_to(source_dir)
+        if ".mikazuki-cache" in {part.lower() for part in relative.parts}:
+            continue
         if path.is_dir():
             source_dirs.add(relative)
             continue
@@ -507,9 +514,11 @@ def synchronize_local_dir_without_npz(source_dir: Path, local_dir: Path) -> None
     for local_file in local_dir.rglob("*"):
         if not local_file.is_file():
             continue
+        relative = local_file.relative_to(local_dir)
+        if ".mikazuki-cache" in {part.lower() for part in relative.parts}:
+            continue
         if local_file.suffix.lower() == ".npz":
             continue
-        relative = local_file.relative_to(local_dir)
         if relative not in source_files:
             local_file.unlink()
 
@@ -528,7 +537,8 @@ def count_remote_dataset_files_without_npz(remote_dir: str, sync_runtime: dict) 
     remote_host = str(sync_runtime.get("remote_host", "") or "").strip()
     result, error_message = run_ssh_command(
         remote_host,
-        f"find {shlex.quote(remote_dir)} -type f ! -iname '*.npz' ! -iname '*.NPZ' | wc -l",
+        f"find {shlex.quote(remote_dir)} \\( -type d -name '.mikazuki-cache' -prune \\) -o "
+        f"\\( -type f ! -iname '*.npz' ! -iname '*.NPZ' -print \\) | wc -l",
         sync_runtime,
     )
     if result is None:
@@ -567,7 +577,7 @@ def build_rsync_dir_command(
     if delete:
         cmd.append("--delete")
     if exclude_npz:
-        cmd.extend(["--exclude", "*.npz", "--exclude", "*.NPZ"])
+        cmd.extend(["--exclude", "*.npz", "--exclude", "*.NPZ", "--exclude", ".mikazuki-cache/"])
     cmd.extend(
         [
             "-e",
@@ -630,6 +640,9 @@ def clear_dataset_npz_cache(toml_path: str, repo_root: Path) -> tuple[bool, str]
         return True, ""
 
     total_npz_removed = 0
+    total_safetensors_removed = 0
+    total_cache_manifest_removed = 0
+    total_other_cache_files_removed = 0
     total_metadata_removed = 0
     for key, _, local_dir in dataset_dirs:
         if not local_dir.exists():
@@ -647,6 +660,37 @@ def clear_dataset_npz_cache(toml_path: str, repo_root: Path) -> tuple[bool, str]
                 return False, f"删除缓存失败: {npz_file} ({exc})"
         total_npz_removed += removed_npz
 
+        removed_safetensors = 0
+        removed_cache_manifests = 0
+        removed_other_cache_files = 0
+        latents_cache_dir = local_dir / ".mikazuki-cache" / "latents"
+        if latents_cache_dir.exists():
+            if not latents_cache_dir.is_dir():
+                return False, f"latent 缓存路径不是目录，无法清理: {latents_cache_dir}"
+            for cache_file in latents_cache_dir.rglob("*"):
+                if not cache_file.is_file():
+                    continue
+                suffix = cache_file.suffix.lower()
+                if suffix == ".safetensors":
+                    removed_safetensors += 1
+                elif suffix == ".json":
+                    removed_cache_manifests += 1
+                else:
+                    removed_other_cache_files += 1
+            try:
+                shutil.rmtree(latents_cache_dir)
+            except Exception as exc:
+                return False, f"删除缓存失败: {latents_cache_dir} ({exc})"
+            mikazuki_cache_dir = latents_cache_dir.parent
+            if mikazuki_cache_dir.exists():
+                try:
+                    mikazuki_cache_dir.rmdir()
+                except OSError:
+                    pass
+        total_safetensors_removed += removed_safetensors
+        total_cache_manifest_removed += removed_cache_manifests
+        total_other_cache_files_removed += removed_other_cache_files
+
         metadata_cache = local_dir / "metadata_cache.json"
         removed_metadata = 0
         if metadata_cache.exists():
@@ -658,11 +702,15 @@ def clear_dataset_npz_cache(toml_path: str, repo_root: Path) -> tuple[bool, str]
         total_metadata_removed += removed_metadata
 
         log.info(
-            f"[cache-reset] {key}: removed {removed_npz} npz files and {removed_metadata} metadata cache files under {local_dir}"
+            f"[cache-reset] {key}: removed {removed_npz} npz files, {removed_safetensors} safetensors shard files, "
+            f"{removed_cache_manifests} cache manifests, {removed_other_cache_files} other cache files, "
+            f"and {removed_metadata} metadata cache files under {local_dir}"
         )
 
     log.info(
-        f"[cache-reset] removed total npz files: {total_npz_removed}, total metadata cache files: {total_metadata_removed}"
+        f"[cache-reset] removed total npz files: {total_npz_removed}, total safetensors shard files: {total_safetensors_removed}, "
+        f"total cache manifests: {total_cache_manifest_removed}, total other cache files: {total_other_cache_files_removed}, "
+        f"total metadata cache files: {total_metadata_removed}"
     )
     return True, ""
 

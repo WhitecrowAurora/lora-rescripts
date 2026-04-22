@@ -1,5 +1,6 @@
 from pathlib import Path
 import re, sys
+import warnings
 from typing import Optional, Iterable
 from enum import Enum
 from PIL import ImageFile
@@ -87,9 +88,14 @@ class DatasetTagEditor(Singleton):
         self.raw_clip_token_used = None
         
     def load_interrogators(self):
+        warnings.filterwarnings(
+            "ignore",
+            category=FutureWarning,
+            message=r"Importing from timm\.models\.layers is deprecated, please import via timm\.layers",
+        )
         custom_tagger_scripts = CustomScripts(paths.userscript_path / "taggers")
         custom_taggers:list[Tagger] = custom_tagger_scripts.load_derived_classes(Tagger)
-        logger.write(f"Custom taggers loaded: {[tagger().name() for tagger in custom_taggers]}")
+        logger.info(f"Custom taggers loaded: {[tagger().name() for tagger in custom_taggers]}")
 
         def read_wd_batchsize(name:str):
             if "vit-large" in name:

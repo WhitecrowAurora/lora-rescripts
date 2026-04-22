@@ -519,7 +519,8 @@ def analyze_training_preflight(
 
     if bool(payload.get("clear_dataset_npz_before_train")):
         notes.append(
-            "clear_dataset_npz_before_train is enabled, so train/reg dataset .npz caches and metadata_cache.json will be cleared before launch."
+            "clear_dataset_npz_before_train is enabled, so train/reg dataset latent caches (.safetensors / .npz) "
+            "and metadata_cache.json will be cleared before launch."
         )
 
     if not direct_python_training:

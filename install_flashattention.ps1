@@ -400,6 +400,74 @@ function Resolve-FlashAttentionWheel {
     return "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/$ReleaseTag/$encodedFileName"
 }
 
+function Get-DefaultFlashAttentionWheelUrl {
+    param(
+        [string]$PythonExe
+    )
+
+    $versionInfo = Get-PythonRuntimeVersionInfo -PythonExe $PythonExe
+    if (-not $versionInfo) {
+        throw "Could not determine Python ABI tag for $flashAttentionRuntimeDirName."
+    }
+
+    $abiTag = $versionInfo.abi_tag
+    $fileName = "flash_attn-$FlashAttentionVersion+cu128torch2.10-$abiTag-$abiTag-win_amd64.whl"
+    $encodedFileName = [System.Uri]::EscapeDataString($fileName)
+    return "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/$ReleaseTag/$encodedFileName"
+}
+
+function Test-IsManagedFlashAttentionWheelPath {
+    param(
+        [string]$WheelPath,
+        [string]$PythonExe
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WheelPath) -or ($WheelPath -match '^https?://')) {
+        return $false
+    }
+
+    if (-not (Test-Path $WheelPath)) {
+        return $false
+    }
+
+    try {
+        $resolvedWheelPath = (Resolve-Path $WheelPath).Path
+    }
+    catch {
+        return $false
+    }
+
+    $defaultWheelUrl = Get-DefaultFlashAttentionWheelUrl -PythonExe $PythonExe
+    $expectedFileName = [System.IO.Path]::GetFileName(([System.Uri]$defaultWheelUrl).AbsolutePath)
+    if ([System.IO.Path]::GetFileName($resolvedWheelPath) -ne $expectedFileName) {
+        return $false
+    }
+
+    $managedRoots = @(
+        $repoRoot,
+        (Join-Path $repoRoot "flashattention-wheels"),
+        (Join-Path $repoRoot "flashattention_wheels"),
+        (Join-Path $repoRoot "wheels")
+    )
+
+    foreach ($root in $managedRoots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+        try {
+            $resolvedRoot = (Resolve-Path $root).Path
+        }
+        catch {
+            continue
+        }
+        if ($resolvedWheelPath.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Get-GitHubMirrorCandidates {
     $candidates = @()
 
@@ -613,8 +681,26 @@ if ($resolvedWheel -match '^https?://') {
 }
 
 Write-Host -ForegroundColor Yellow "Using FlashAttention wheel: $resolvedWheel"
-Invoke-Step "Installing FlashAttention wheel from local file..." {
-    & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
+try {
+    Invoke-Step "Installing FlashAttention wheel from local file..." {
+        & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
+    }
+}
+catch {
+    $shouldRetryWithDownload = Test-IsManagedFlashAttentionWheelPath -WheelPath $resolvedWheel -PythonExe $flashAttentionPython
+    if (-not $shouldRetryWithDownload) {
+        throw
+    }
+
+    $fallbackWheelUrl = Get-DefaultFlashAttentionWheelUrl -PythonExe $flashAttentionPython
+    Write-Host -ForegroundColor Yellow "Local FlashAttention wheel install failed. The bundled wheel may be corrupted or incomplete."
+    Write-Host -ForegroundColor Yellow "Retrying with a fresh download from: $fallbackWheelUrl"
+    Remove-Item -LiteralPath $resolvedWheel -Force -ErrorAction SilentlyContinue
+    $resolvedWheel = Download-FlashAttentionWheel -WheelUrl $fallbackWheelUrl
+    Write-Host -ForegroundColor Yellow "Using refreshed FlashAttention wheel: $resolvedWheel"
+    Invoke-Step "Installing FlashAttention wheel from refreshed local file..." {
+        & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
+    }
 }
 
 if (-not (Test-ModulesReady -PythonExe $flashAttentionPython -Modules $mainRequiredModules)) {

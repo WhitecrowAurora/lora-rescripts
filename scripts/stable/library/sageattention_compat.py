@@ -144,6 +144,12 @@ def _runtime_prefers_native_backward() -> bool:
     return False
 
 
+def requires_reentrant_checkpoint_for_sageattention() -> bool:
+    if _runtime_sageattn is None and _runtime_sageattn_varlen is None:
+        return False
+    return not _runtime_prefers_native_backward()
+
+
 def _get_cuda_device_arch(tensor: torch.Tensor) -> str:
     if not tensor.is_cuda:
         return ""

@@ -142,6 +142,20 @@ def get_xformers_status(gpu_ids=None):
     return select_xformers_status(xformers_status, gpu_ids)
 
 
+def _should_log_sdpa_cutless_reassurance(torch_module, attention_summary: dict, status: dict) -> bool:
+    if not bool(getattr(torch_module.version, "cuda", None)):
+        return False
+    if not attention_summary.get("sdpa_available", False):
+        return False
+    return (not status.get("installed", False)) or (not status.get("supported", False))
+
+
+def _log_sdpa_cutless_reassurance() -> None:
+    log.info(
+        "SDPA已切换到cutless线路,并做了shim优化,效率接近甚至超过xformers,请放心使用,如果不放心可以对比测试"
+    )
+
+
 def check_torch_gpu():
     try:
         import torch
@@ -286,5 +300,8 @@ def check_torch_gpu():
         else:
             version_suffix = f" (xformers {status['version']})" if status.get("version") else ""
             log.info(f"xformers runtime probe passed on all detected GPUs.{version_suffix}")
+
+        if _should_log_sdpa_cutless_reassurance(torch, attention_summary, status):
+            _log_sdpa_cutless_reassurance()
     except Exception as e:
         log.error(f'Could not load torch: {e}')

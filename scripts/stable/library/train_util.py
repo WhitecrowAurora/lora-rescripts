@@ -34,7 +34,14 @@ from packaging.version import Version
 
 import torch
 from library.device_utils import init_ipex, clean_memory_on_device
-from library.strategy_base import LatentsCachingStrategy, TokenizeStrategy, TextEncoderOutputsCachingStrategy, TextEncodingStrategy
+from library.strategy_base import (
+    LatentsCachingStrategy,
+    TokenizeStrategy,
+    TextEncoderOutputsCachingStrategy,
+    TextEncodingStrategy,
+    configure_latents_cache_runtime,
+)
+from library.latents_disk_cache import normalize_latents_disk_cache_format
 from mikazuki.utils.runtime_sageattention import load_runtime_sageattention_symbols
 from mikazuki.utils.runtime_mode import infer_attention_runtime_mode, is_amd_rocm_runtime, is_intel_xpu_runtime
 from mikazuki.utils.runtime_safe_preview import (
@@ -154,6 +161,26 @@ def resolve_dataloader_runtime_kwargs(args: argparse.Namespace, n_workers: int) 
     if resolved_workers > 0:
         kwargs["prefetch_factor"] = prefetch_factor
     return kwargs
+
+
+def resolve_cache_latents_runtime_kwargs(args: argparse.Namespace) -> dict:
+    raw_workers = getattr(args, "cache_latents_cpu_workers", None)
+    try:
+        resolved_workers = None if raw_workers in (None, "") else max(0, int(raw_workers))
+    except (TypeError, ValueError):
+        resolved_workers = None
+
+    raw_prefetch = getattr(args, "cache_latents_prefetch_batches", None)
+    try:
+        resolved_prefetch = None if raw_prefetch in (None, "") else max(1, int(raw_prefetch))
+    except (TypeError, ValueError):
+        resolved_prefetch = None
+
+    return {
+        "preprocess_workers": resolved_workers,
+        "prefetch_batches": resolved_prefetch,
+        "disk_cache_format": normalize_latents_disk_cache_format(getattr(args, "latent_cache_disk_format", None)),
+    }
 
 
 def _build_trilingual_status_pattern(
@@ -400,6 +427,8 @@ class ImageInfo:
         self.latents: Optional[torch.Tensor] = None
         self.latents_flipped: Optional[torch.Tensor] = None
         self.latents_npz: Optional[str] = None  # set in cache_latents
+        self.latents_disk_cache_ref: Optional[Any] = None
+        self.latents_cache_root: Optional[str] = None
         self.latents_original_size: Optional[Tuple[int, int]] = None  # original image size, not latents size
         self.latents_crop_ltrb: Optional[Tuple[int, int]] = (
             None  # crop left top right bottom in resized / target pixel space, not latent space
@@ -1537,11 +1566,12 @@ class BaseDataset(torch.utils.data.Dataset):
 
         # split by resolution and some conditions
         class Condition:
-            def __init__(self, reso, flip_aug, alpha_mask, random_crop):
+            def __init__(self, reso, flip_aug, alpha_mask, random_crop, cache_root):
                 self.reso = reso
                 self.flip_aug = flip_aug
                 self.alpha_mask = alpha_mask
                 self.random_crop = random_crop
+                self.cache_root = cache_root
 
             def __eq__(self, other):
                 return (
@@ -1550,14 +1580,133 @@ class BaseDataset(torch.utils.data.Dataset):
                     and self.flip_aug == other.flip_aug
                     and self.alpha_mask == other.alpha_mask
                     and self.random_crop == other.random_crop
+                    and self.cache_root == other.cache_root
                 )
 
         batch: List[ImageInfo] = []
         current_condition = None
+        current_cache_batch_size = None
 
         # support multiple-gpus
         num_processes = accelerator.num_processes
         process_index = accelerator.process_index
+
+        def finalize_caching_strategy() -> None:
+            finalize_caching = getattr(caching_strategy, "finalize_caching", None)
+            if callable(finalize_caching):
+                finalize_caching()
+
+        def flush_pending_disk_cache() -> None:
+            flush_cache = getattr(caching_strategy, "flush_pending_disk_cache", None)
+            if callable(flush_cache):
+                flush_cache()
+
+        use_pipelined_preprocessing = bool(
+            getattr(caching_strategy, "preprocess_workers", 0) > 0 and hasattr(caching_strategy, "cache_batch_latents_prepared")
+        )
+
+        if use_pipelined_preprocessing:
+            preprocess_workers = max(1, int(caching_strategy.preprocess_workers))
+            prefetch_batches = max(1, int(getattr(caching_strategy, "prefetch_batches", 1) or 1))
+            preprocess_executor = ThreadPoolExecutor(max_workers=preprocess_workers)
+            prepared_batches: deque[tuple[List[ImageInfo], Condition, Future]] = deque()
+
+            def submit_prepared_batch(batch_items, cond):
+                batch_copy = list(batch_items)
+                future = preprocess_executor.submit(
+                    caching_strategy.prepare_batch_latents,
+                    batch_copy,
+                    cond.alpha_mask,
+                    cond.random_crop,
+                )
+                prepared_batches.append((batch_copy, cond, future))
+
+            def consume_prepared_batches(force_wait: bool) -> None:
+                while prepared_batches and (force_wait or len(prepared_batches) >= prefetch_batches):
+                    queued_batch, queued_condition, future = prepared_batches.popleft()
+                    prepared_batch = future.result()
+                    caching_strategy.cache_batch_latents_prepared(
+                        model,
+                        queued_batch,
+                        prepared_batch,
+                        queued_condition.flip_aug,
+                        queued_condition.alpha_mask,
+                        queued_condition.random_crop,
+                    )
+
+            try:
+                logger.info(
+                    "caching latents with pipelined CPU preprocessing: "
+                    f"workers={preprocess_workers}, prefetch_batches={prefetch_batches}"
+                )
+                for i, info in enumerate(tqdm(image_infos)):
+                    subset = self.image_to_subset[info.image_key]
+
+                    if info.latents_npz is not None:  # fine tuning dataset
+                        continue
+
+                    info.latents_cache_root = caching_strategy.resolve_disk_cache_root(
+                        info.absolute_path, getattr(subset, "image_dir", None)
+                    )
+
+                    if caching_strategy.cache_to_disk:
+                        if i % num_processes != process_index:
+                            continue
+
+                        cache_ref = caching_strategy.find_existing_latents_disk_cache_ref(
+                            info.absolute_path,
+                            info.image_size,
+                            cache_root=info.latents_cache_root,
+                            bucket_reso=info.bucket_reso,
+                            flip_aug=subset.flip_aug,
+                            alpha_mask=subset.alpha_mask,
+                        )
+                        if cache_ref is not None:
+                            if cache_ref.format == "npz":
+                                info.latents_npz = cache_ref.path
+                            else:
+                                info.latents_disk_cache_ref = cache_ref
+                            continue
+                        info.latents_disk_cache_ref = None
+                        info.latents_npz = (
+                            caching_strategy.get_latents_npz_path(info.absolute_path, info.image_size)
+                            if caching_strategy.disk_cache_format == "npz"
+                            else None
+                        )
+
+                    condition = Condition(
+                        info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop, info.latents_cache_root
+                    )
+                    if len(batch) > 0 and current_condition != condition:
+                        submit_prepared_batch(batch, current_condition)
+                        batch = []
+                        if caching_strategy.uses_safetensors_disk_cache:
+                            consume_prepared_batches(force_wait=True)
+                            flush_pending_disk_cache()
+                        else:
+                            consume_prepared_batches(force_wait=False)
+                    if condition != current_condition and HIGH_VRAM:
+                        clean_memory_on_device(accelerator.device)
+
+                    if condition != current_condition or current_cache_batch_size is None:
+                        current_cache_batch_size = caching_strategy.resolve_cache_batch_size(condition.reso)
+
+                    batch.append(info)
+                    current_condition = condition
+
+                    if len(batch) >= current_cache_batch_size:
+                        submit_prepared_batch(batch, current_condition)
+                        batch = []
+                        consume_prepared_batches(force_wait=False)
+
+                if len(batch) > 0:
+                    submit_prepared_batch(batch, current_condition)
+
+                consume_prepared_batches(force_wait=True)
+            finally:
+                preprocess_executor.shutdown()
+                finalize_caching_strategy()
+            return
 
         # define a function to submit a batch to cache
         def submit_batch(batch, cond):
@@ -1573,7 +1722,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # define ThreadPoolExecutor to load images in parallel
         max_workers = min(os.cpu_count(), len(image_infos))
         max_workers = max(1, max_workers // num_processes)  # consider multi-gpu
-        max_workers = min(max_workers, caching_strategy.batch_size)  # max_workers should be less than batch_size
+        max_workers = min(max_workers, getattr(caching_strategy, "max_batch_size", caching_strategy.batch_size))
         executor = ThreadPoolExecutor(max_workers)
 
         try:
@@ -1585,50 +1734,68 @@ class BaseDataset(torch.utils.data.Dataset):
                 if info.latents_npz is not None:  # fine tuning dataset
                     continue
 
+                info.latents_cache_root = caching_strategy.resolve_disk_cache_root(
+                    info.absolute_path, getattr(subset, "image_dir", None)
+                )
+
                 # check disk cache exists and size of latents
                 if caching_strategy.cache_to_disk:
-                    # info.latents_npz = os.path.splitext(info.absolute_path)[0] + file_suffix
-                    info.latents_npz = caching_strategy.get_latents_npz_path(info.absolute_path, info.image_size)
-
                     # if the modulo of num_processes is not equal to process_index, skip caching
                     # this makes each process cache different latents
                     if i % num_processes != process_index:
                         continue
 
-                    # print(f"{process_index}/{num_processes} {i}/{len(image_infos)} {info.latents_npz}")
-
-                    cache_available = caching_strategy.is_disk_cached_latents_expected(
-                        info.bucket_reso, info.latents_npz, subset.flip_aug, subset.alpha_mask
+                    cache_ref = caching_strategy.find_existing_latents_disk_cache_ref(
+                        info.absolute_path,
+                        info.image_size,
+                        cache_root=info.latents_cache_root,
+                        bucket_reso=info.bucket_reso,
+                        flip_aug=subset.flip_aug,
+                        alpha_mask=subset.alpha_mask,
                     )
-                    if cache_available:  # do not add to batch
+                    if cache_ref is not None:  # do not add to batch
+                        if cache_ref.format == "npz":
+                            info.latents_npz = cache_ref.path
+                        else:
+                            info.latents_disk_cache_ref = cache_ref
                         continue
+                    info.latents_disk_cache_ref = None
+                    info.latents_npz = (
+                        caching_strategy.get_latents_npz_path(info.absolute_path, info.image_size)
+                        if caching_strategy.disk_cache_format == "npz"
+                        else None
+                    )
 
-                # if batch is not empty and condition is changed, flush the batch. Note that current_condition is not None if batch is not empty
-                condition = Condition(info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop)
+                condition = Condition(
+                    info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop, info.latents_cache_root
+                )
                 if len(batch) > 0 and current_condition != condition:
                     submit_batch(batch, current_condition)
+                    flush_pending_disk_cache()
                     batch = []
                 if condition != current_condition and HIGH_VRAM:  # even with high VRAM, if shape is changed
                     clean_memory_on_device(accelerator.device)
 
+                if condition != current_condition or current_cache_batch_size is None:
+                    current_cache_batch_size = caching_strategy.resolve_cache_batch_size(condition.reso)
+
                 if info.image is None:
-                    # load image in parallel
                     info.image = executor.submit(load_image, info.absolute_path, condition.alpha_mask)
 
                 batch.append(info)
                 current_condition = condition
 
-                # if number of data in batch is enough, flush the batch
-                if len(batch) >= caching_strategy.batch_size:
+                if len(batch) >= current_cache_batch_size:
                     submit_batch(batch, current_condition)
                     batch = []
-                    # current_condition = None  # keep current_condition to avoid next `clean_memory_on_device` call
 
             if len(batch) > 0:
                 submit_batch(batch, current_condition)
+                flush_pending_disk_cache()
 
         finally:
             executor.shutdown()
+            finalize_caching_strategy()
 
     def cache_latents(self, vae, vae_batch_size=1, cache_to_disk=False, is_main_process=True, file_suffix=".npz"):
         # マルチGPUには対応していないので、そちらはtools/cache_latents.pyを使うこと
@@ -2012,6 +2179,25 @@ class BaseDataset(torch.utils.data.Dataset):
                     alpha_mask = None if image_info.alpha_mask is None else torch.flip(image_info.alpha_mask, [1])
 
                 image = None
+            elif image_info.latents_disk_cache_ref is not None:
+                latents, original_size, crop_ltrb, flipped_latents, alpha_mask = self.latents_caching_strategy.load_latents_from_disk(
+                    image_info.latents_disk_cache_ref, image_info.bucket_reso
+                )
+                if flipped:
+                    latents = flipped_latents
+                    alpha_mask = None if alpha_mask is None else torch.flip(alpha_mask, [1])
+                    del flipped_latents
+                if isinstance(latents, np.ndarray):
+                    latents = torch.from_numpy(latents)
+                else:
+                    latents = latents.detach().cpu()
+                if alpha_mask is not None:
+                    if isinstance(alpha_mask, np.ndarray):
+                        alpha_mask = torch.from_numpy(alpha_mask)
+                    else:
+                        alpha_mask = alpha_mask.detach().cpu()
+
+                image = None
             elif image_info.latents_npz is not None:  # FineTuningDatasetまたはcache_latents_to_disk=Trueの場合
                 latents, original_size, crop_ltrb, flipped_latents, alpha_mask = (
                     self.latents_caching_strategy.load_latents_from_disk(image_info.latents_npz, image_info.bucket_reso)
@@ -2235,11 +2421,11 @@ class BaseDataset(torch.utils.data.Dataset):
                 raise RuntimeError(
                     "Latents in the same batch have different shapes. This usually means stale latent cache files were reused "
                     "(for example after changing resolution/bucket settings or replacing images without clearing cache). "
-                    "Delete the dataset latent cache files (*.npz such as *_sd.npz / *_sdxl.npz / legacy .npz) and any "
+                    "Delete the dataset latent cache files (*.safetensors or *.npz such as *_sd.npz / *_sdxl.npz / legacy .npz) and any "
                     "metadata_cache.json in the dataset folder, then run again.\n"
                     "同一个 batch 中的 latent 形状不一致。通常表示复用了过期的 latent 缓存文件，"
                     "例如修改了分辨率 / bucket 设置，或替换了图片但没有清理缓存。"
-                    "请删除数据集目录中的 latent 缓存文件（*.npz，例如 *_sd.npz / *_sdxl.npz / 旧版 .npz）"
+                    "请删除数据集目录中的 latent 缓存文件（*.safetensors 或 *.npz，例如 *_sd.npz / *_sdxl.npz / 旧版 .npz）"
                     "以及 metadata_cache.json 后再重试。\n"
                     f"Batch latents:\n{batch_summary}"
                 )
@@ -3477,6 +3663,21 @@ def trim_and_resize_if_required(
     return image, original_size, crop_ltrb
 
 
+def _resolve_image_for_caching(info: "ImageInfo", use_alpha_mask: bool) -> np.ndarray:
+    if info.image is None:
+        return load_image(info.absolute_path, use_alpha_mask)
+    if isinstance(info.image, np.ndarray):
+        return info.image if info.image.dtype == np.uint8 else info.image.astype(np.uint8, copy=False)
+    return np.asarray(info.image, dtype=np.uint8)
+
+
+def _image_to_tensor_for_caching(image: np.ndarray) -> torch.Tensor:
+    image = np.ascontiguousarray(image[:, :, :3])
+    tensor = torch.from_numpy(image).permute(2, 0, 1).to(dtype=torch.float32)
+    tensor.div_(127.5).sub_(1.0)
+    return tensor
+
+
 # for new_cache_latents
 def load_images_and_masks_for_caching(
     image_infos: List[ImageInfo], use_alpha_mask: bool, random_crop: bool
@@ -3496,7 +3697,7 @@ def load_images_and_masks_for_caching(
     original_sizes: List[Tuple[int, int]] = []
     crop_ltrbs: List[Tuple[int, int, int, int]] = []
     for info in image_infos:
-        image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
+        image = _resolve_image_for_caching(info, use_alpha_mask)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
         image, original_size, crop_ltrb = trim_and_resize_if_required(
             random_crop, image, info.bucket_reso, info.resized_size, resize_interpolation=info.resize_interpolation
@@ -3509,16 +3710,14 @@ def load_images_and_masks_for_caching(
             if image.shape[2] == 4:
                 alpha_mask = image[:, :, 3]  # [H,W]
                 alpha_mask = alpha_mask.astype(np.float32) / 255.0
-                alpha_mask = torch.FloatTensor(alpha_mask)  # [H,W]
+                alpha_mask = torch.from_numpy(alpha_mask)  # [H,W]
             else:
                 alpha_mask = torch.ones_like(image[:, :, 0], dtype=torch.float32)  # [H,W]
         else:
             alpha_mask = None
         alpha_masks.append(alpha_mask)
 
-        image = image[:, :, :3]  # remove alpha channel if exists
-        image = IMAGE_TRANSFORMS(image)
-        images.append(image)
+        images.append(_image_to_tensor_for_caching(image))
 
     img_tensor = torch.stack(images, dim=0)
     return img_tensor, alpha_masks, original_sizes, crop_ltrbs
@@ -3539,7 +3738,7 @@ def cache_batch_latents(
     images = []
     alpha_masks: List[np.ndarray] = []
     for info in image_infos:
-        image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
+        image = _resolve_image_for_caching(info, use_alpha_mask)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
         image, original_size, crop_ltrb = trim_and_resize_if_required(
             random_crop, image, info.bucket_reso, info.resized_size, resize_interpolation=info.resize_interpolation
@@ -3552,16 +3751,14 @@ def cache_batch_latents(
             if image.shape[2] == 4:
                 alpha_mask = image[:, :, 3]  # [H,W]
                 alpha_mask = alpha_mask.astype(np.float32) / 255.0
-                alpha_mask = torch.FloatTensor(alpha_mask)  # [H,W]
+                alpha_mask = torch.from_numpy(alpha_mask)  # [H,W]
             else:
                 alpha_mask = torch.ones_like(image[:, :, 0], dtype=torch.float32)  # [H,W]
         else:
             alpha_mask = None
         alpha_masks.append(alpha_mask)
 
-        image = image[:, :, :3]  # remove alpha channel if exists
-        image = IMAGE_TRANSFORMS(image)
-        images.append(image)
+        images.append(_image_to_tensor_for_caching(image))
 
     img_tensors = torch.stack(images, dim=0)
     img_tensors = img_tensors.to(device=vae.device, dtype=vae.dtype)
@@ -5559,9 +5756,28 @@ def add_dataset_arguments(
         "--vae_batch_size", type=int, default=1, help="batch size for caching latents / latentのcache時のバッチサイズ"
     )
     parser.add_argument(
+        "--cache_latents_cpu_workers",
+        type=int,
+        default=None,
+        help="CPU worker threads used to preprocess latent-cache batches ahead of the GPU. 0 disables the pipelined cache preprocessor. / latent キャッシュ用 batch を GPU より先に前処理する CPU ワーカースレッド数。0 でパイプライン前処理を無効化します。",
+    )
+    parser.add_argument(
+        "--cache_latents_prefetch_batches",
+        type=int,
+        default=None,
+        help="how many preprocessed latent-cache batches to keep queued ahead of GPU execution / GPU 実行の先に何 batch 分の latent キャッシュ前処理をキューするか",
+    )
+    parser.add_argument(
         "--cache_latents_to_disk",
         action="store_true",
         help="cache latents to disk to reduce VRAM usage (augmentations must be disabled) / VRAM削減のためにlatentをディスクにcacheする（augmentationは使用不可）",
+    )
+    parser.add_argument(
+        "--latent_cache_disk_format",
+        type=str,
+        default=None,
+        choices=["safetensors", "npz"],
+        help="disk format for latent cache. Defaults to safetensors; existing npz cache files are still readable as fallback / latent ディスクキャッシュの保存形式。デフォルトは safetensors で、既存の npz キャッシュも引き続き読み込み可能です。",
     )
     parser.add_argument(
         "--skip_cache_check",
@@ -6604,6 +6820,15 @@ def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
         args.caption_extension = args.caption_extention
         args.caption_extention = None
 
+    cache_latents_runtime = resolve_cache_latents_runtime_kwargs(args)
+    if hasattr(args, "cache_latents_cpu_workers"):
+        args.cache_latents_cpu_workers = cache_latents_runtime["preprocess_workers"]
+    if hasattr(args, "cache_latents_prefetch_batches"):
+        args.cache_latents_prefetch_batches = cache_latents_runtime["prefetch_batches"]
+    if hasattr(args, "latent_cache_disk_format"):
+        args.latent_cache_disk_format = cache_latents_runtime["disk_cache_format"]
+    configure_latents_cache_runtime(**cache_latents_runtime)
+
     if hasattr(args, "bucket_selection_mode") and args.bucket_selection_mode is not None:
         args.bucket_selection_mode = str(args.bucket_selection_mode).strip().lower()
     if hasattr(args, "caption_tag_dropout_target_mode") and args.caption_tag_dropout_target_mode is not None:
@@ -6631,7 +6856,9 @@ def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
     if support_metadata:
         if args.in_json is not None and (args.color_aug or args.random_crop):
             logger.warning(
-                f"latents in npz is ignored when color_aug or random_crop is True / color_augまたはrandom_cropを有効にした場合、npzファイルのlatentsは無視されます / 启用 color_aug 或 random_crop 时，npz 中的 latents 会被忽略"
+                "disk-cached latents are ignored when color_aug or random_crop is True / "
+                "color_augまたはrandom_cropを有効にした場合、ディスクキャッシュされた latent は無視されます / "
+                "启用 color_aug 或 random_crop 时，磁盘缓存的 latents 会被忽略"
             )
 
 
