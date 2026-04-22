@@ -4,6 +4,8 @@
 
 注意：这里的“插件”当前特指“社区 UI / UI profile 包”。
 它用于切换前端界面，不等于通用后端插件系统。
+后端训练插件的设计草案见：`PLUGIN_SYSTEM_ROADMAP.md`。
+后端训练插件安全底座现状见：`PLUGIN_BACKEND.md`。
 
 ## 1. 当前范围
 

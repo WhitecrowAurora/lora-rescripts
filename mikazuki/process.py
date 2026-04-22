@@ -32,6 +32,7 @@ from mikazuki.utils.tensorboard_runs import (
 )
 from mikazuki.utils.trainer_registry import get_trainer_definition_by_file
 from mikazuki.utils.nvidia_smi import apply_gpu_power_limit, restore_gpu_power_limits
+from mikazuki.plugins.runtime import plugin_runtime
 
 
 def ensure_repo_on_pythonpath(customize_env: dict):
@@ -481,6 +482,9 @@ def run_train(
 
     def _run():
         power_limit_restore_state = []
+        completed_returncode = None
+        completed_ok = False
+        fatal_error = ""
         try:
             requested_gpu_power_limit_w = config_data.get("gpu_power_limit_w")
             try:
@@ -507,6 +511,8 @@ def run_train(
             run_started_at = time.time()
             task.execute()
             result = task.communicate()
+            completed_returncode = result.returncode
+            completed_ok = result.returncode == 0
             checkpoint_generated = has_new_checkpoint_since(config_data, base_dir_path(), run_started_at)
             if tensorboard_run_dir is not None and not checkpoint_generated:
                 cleanup_tensorboard_records_without_checkpoint(
@@ -522,8 +528,20 @@ def run_train(
             else:
                 log.info("Training finished / 训练完成")
         except Exception as exc:
+            fatal_error = str(exc)
             log.error(f"An error occurred when training / 训练出现致命错误: {exc}")
         finally:
+            plugin_runtime.emit_event(
+                "on_train_complete",
+                {
+                    "task_id": task.task_id,
+                    "ok": completed_ok,
+                    "returncode": completed_returncode,
+                    "trainer_file": str(resolved_trainer_file),
+                    "fatal_error": fatal_error,
+                },
+                source="process.run_train",
+            )
             if power_limit_restore_state:
                 restore_result = restore_gpu_power_limits(power_limit_restore_state)
                 restored_records = restore_result.get("restored", []) or []

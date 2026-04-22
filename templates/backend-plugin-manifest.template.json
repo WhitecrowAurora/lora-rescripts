@@ -1,0 +1,19 @@
+{
+  "schema_version": "plugin-manifest-v1",
+  "id": "community.example.readonly-train-complete",
+  "name": "Readonly Train Complete",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "description": "Observe readonly training completion events.",
+  "capabilities": [
+    "read_step_metrics"
+  ],
+  "hooks": [
+    {
+      "event": "on_train_complete",
+      "handler": "on_train_complete",
+      "priority": 100
+    }
+  ],
+  "enabled_by_default": true
+}

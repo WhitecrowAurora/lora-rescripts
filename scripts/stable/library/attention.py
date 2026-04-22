@@ -184,6 +184,44 @@ def _build_sageattn_call_kwargs(q: torch.Tensor, *, tensor_layout: str) -> dict:
     return kwargs
 
 
+@lru_cache(maxsize=4)
+def _resolve_sage_fixed_layout_override() -> str:
+    raw_value = str(os.environ.get("LULYNX_SAGE_FIXED_LAYOUT", "") or "").strip().upper()
+    if not raw_value:
+        return "NHD"
+    if raw_value in {"NHD", "HND"}:
+        if raw_value == "HND":
+            _info_once(
+                "LULYNX_SAGE_FIXED_LAYOUT=HND is enabled for SageAttention fixed-length path."
+                " / 已为 SageAttention 定长路径启用 HND 布局。"
+            )
+        return raw_value
+    _warn_once(
+        f"Unknown LULYNX_SAGE_FIXED_LAYOUT='{raw_value}', fallback to NHD. "
+        f"未知的 LULYNX_SAGE_FIXED_LAYOUT='{raw_value}'，已回退到 NHD。"
+    )
+    return "NHD"
+
+
+def _prepare_sage_fixed_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]:
+    tensor_layout = _resolve_sage_fixed_layout_override()
+    if tensor_layout == "HND":
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+    return q, k, v, tensor_layout
+
+
+def _restore_sage_fixed_output(x: torch.Tensor, *, tensor_layout: str) -> torch.Tensor:
+    if tensor_layout == "HND":
+        return x.transpose(1, 2).contiguous()
+    return x
+
+
 def _should_try_sageattention_fallback(q: torch.Tensor) -> bool:
     return _get_tensor_runtime(q) == "intel-xpu"
 
@@ -464,13 +502,15 @@ def _execute_attention_impl(
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
-                sage_kwargs = _build_sageattn_call_kwargs(q[i], tensor_layout="NHD")
+                q_i, k_i, v_i, tensor_layout = _prepare_sage_fixed_inputs(q[i], k[i], v[i])
+                sage_kwargs = _build_sageattn_call_kwargs(q_i, tensor_layout=tensor_layout)
                 x_i = call_sageattention(
-                    q[i],
-                    k[i],
-                    v[i],
+                    q_i,
+                    k_i,
+                    v_i,
                     **sage_kwargs,
                 )  # B, L, H, D. No dropout support
+                x_i = _restore_sage_fixed_output(x_i, tensor_layout=tensor_layout)
                 q[i] = None
                 k[i] = None
                 v[i] = None
@@ -478,13 +518,15 @@ def _execute_attention_impl(
             x = torch.cat(x, dim=0)
             del q, k, v
         elif attn_params.cu_seqlens is None:  # all tokens are valid
-            sage_kwargs = _build_sageattn_call_kwargs(q, tensor_layout="NHD")
+            q, k, v, tensor_layout = _prepare_sage_fixed_inputs(q, k, v)
+            sage_kwargs = _build_sageattn_call_kwargs(q, tensor_layout=tensor_layout)
             x = call_sageattention(
                 q,
                 k,
                 v,
                 **sage_kwargs,
             )  # B, L, H, D. No dropout support
+            x = _restore_sage_fixed_output(x, tensor_layout=tensor_layout)
             del q, k, v
         else:
             # Reshape to [(bxs), a, d]

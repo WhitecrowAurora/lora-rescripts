@@ -1,0 +1,19 @@
+{
+  "schema_version": "plugin-manifest-v1",
+  "id": "community.example.modify-loss-mvp",
+  "name": "Modify Loss MVP Example",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "description": "Demonstrate the current Tier3 modify_loss affine mutation contract.",
+  "capabilities": [
+    "modify_loss"
+  ],
+  "hooks": [
+    {
+      "event": "modify_loss",
+      "handler": "on_modify_loss",
+      "priority": 1000
+    }
+  ],
+  "enabled_by_default": false
+}

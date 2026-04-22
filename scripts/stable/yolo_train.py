@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Optional
 
 import toml
+from mikazuki.plugins.training_hooks import (
+    emit_after_optimizer_step_event,
+    emit_after_loss_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 
 YOLO_MODEL_EXTENSIONS = {".pt", ".pth", ".yaml", ".yml"}
@@ -45,6 +51,13 @@ def normalize_text_list(value) -> list[str]:
 def safe_int(value, default: int) -> int:
     try:
         return int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -139,6 +152,124 @@ def resolve_device_argument(config: dict) -> Optional[str]:
     return ",".join(str(index) for index in range(len(device_ids)))
 
 
+def install_yolo_plugin_callbacks(model, config: dict) -> None:
+    state = {
+        "global_step": 0,
+        "batch_index": 0,
+        "pending_global_step_increment": False,
+        "current_batch_size": 1,
+    }
+    training_type = str(config.get("model_train_type", "yolo") or "yolo").strip() or "yolo"
+
+    def _gradient_accumulation_steps(trainer) -> int:
+        return max(1, safe_int(getattr(trainer, "accumulate", 1), 1))
+
+    def _current_batch_size(trainer) -> int:
+        return max(1, safe_int(getattr(trainer, "batch_size", 1), 1))
+
+    def _current_loss(trainer) -> float:
+        loss = getattr(trainer, "loss", None)
+        if loss is None:
+            return 0.0
+        try:
+            return float(loss.detach().item())
+        except Exception:
+            return safe_float(loss, 0.0)
+
+    def _common_extra(trainer) -> dict:
+        return {
+            "epoch": safe_int(getattr(trainer, "epoch", 0), 0) + 1,
+            "batch_index": int(state["batch_index"]),
+            "ultralytics_accumulate": _gradient_accumulation_steps(trainer),
+        }
+
+    def _on_train_start(trainer):
+        if getattr(trainer, "_mikazuki_plugin_patch_applied", False):
+            return
+        trainer._mikazuki_plugin_patch_applied = True
+        original_optimizer_step = trainer.optimizer_step
+
+        def _wrapped_optimizer_step():
+            emit_before_optimizer_step_event(
+                route="yolo",
+                training_type=training_type,
+                global_step=int(state["global_step"]),
+                current_loss=_current_loss(trainer),
+                optimizer=getattr(trainer, "optimizer", None),
+                lr_scheduler=getattr(trainer, "scheduler", None),
+                gradient_accumulation_steps=_gradient_accumulation_steps(trainer),
+                sync_gradients=True,
+                max_grad_norm=10.0,
+                extra=_common_extra(trainer),
+                source="yolo_train",
+            )
+            result = original_optimizer_step()
+            emit_after_optimizer_step_event(
+                route="yolo",
+                training_type=training_type,
+                global_step=int(state["global_step"]),
+                current_loss=_current_loss(trainer),
+                optimizer=getattr(trainer, "optimizer", None),
+                lr_scheduler=getattr(trainer, "scheduler", None),
+                gradient_accumulation_steps=_gradient_accumulation_steps(trainer),
+                sync_gradients=True,
+                max_grad_norm=10.0,
+                optimizer_step_executed=True,
+                scheduler_step_executed=False,
+                zero_grad_called=True,
+                extra=_common_extra(trainer),
+                source="yolo_train",
+            )
+            state["pending_global_step_increment"] = True
+            return result
+
+        trainer.optimizer_step = _wrapped_optimizer_step
+
+    def _on_train_batch_start(trainer):
+        state["batch_index"] += 1
+        state["current_batch_size"] = _current_batch_size(trainer)
+        emit_before_forward_event(
+            route="yolo",
+            training_type=training_type,
+            global_step=int(state["global_step"]),
+            micro_batch_index=1,
+            micro_batch_count=1,
+            micro_batch_size=int(state["current_batch_size"]),
+            gradient_accumulation_steps=_gradient_accumulation_steps(trainer),
+            sync_gradients=bool(_gradient_accumulation_steps(trainer) <= 1),
+            extra=_common_extra(trainer),
+            source="yolo_train",
+        )
+
+    def _on_train_batch_end(trainer):
+        current_loss = _current_loss(trainer)
+        emit_after_loss_event(
+            route="yolo",
+            training_type=training_type,
+            global_step=int(state["global_step"]),
+            micro_batch_index=1,
+            micro_batch_count=1,
+            micro_batch_size=int(state["current_batch_size"]),
+            loss_value=current_loss,
+            loss_scale=1.0,
+            weighted_loss=current_loss,
+            gradient_accumulation_steps=_gradient_accumulation_steps(trainer),
+            sync_gradients=bool(state["pending_global_step_increment"] or _gradient_accumulation_steps(trainer) <= 1),
+            extra={
+                **_common_extra(trainer),
+                "loss_items": str(getattr(trainer, "loss_items", "")),
+            },
+            source="yolo_train",
+        )
+        if state["pending_global_step_increment"]:
+            state["global_step"] += 1
+            state["pending_global_step_increment"] = False
+
+    model.add_callback("on_train_start", _on_train_start)
+    model.add_callback("on_train_batch_start", _on_train_batch_start)
+    model.add_callback("on_train_batch_end", _on_train_batch_end)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", required=True)
@@ -190,6 +321,7 @@ def main():
 
     model_init_source = resume_path or model_source
     model = YOLO(model_init_source, task="detect")
+    install_yolo_plugin_callbacks(model, config)
 
     print(f"[yolo] model: {model_source}")
     print(f"[yolo] data: {data_config}")

@@ -22,6 +22,13 @@ from library import deepspeed_utils, sdxl_model_util, strategy_base, strategy_sd
 import library.train_util as train_util
 
 from library.utils import setup_logging, add_logging_arguments
+from mikazuki.plugins.training_hooks import (
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 setup_logging()
 import logging
@@ -775,6 +782,22 @@ def train(args):
                 noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
                 # Predict the noise residual
+                emit_before_forward_event(
+                    route="sdxl-finetune",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "flow_model": bool(getattr(args, "flow_model", False)),
+                        "fused_backward_pass": bool(args.fused_backward_pass),
+                        "fused_optimizer_groups": bool(args.fused_optimizer_groups),
+                    },
+                    source="sdxl_train",
+                )
                 with accelerator.autocast():
                     noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
 
@@ -823,6 +846,25 @@ def train(args):
                     loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "mean", huber_c)
 
                 current_loss = loss.detach().item()
+                emit_after_loss_event(
+                    route="sdxl-finetune",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "flow_model": bool(getattr(args, "flow_model", False)),
+                        "fused_backward_pass": bool(args.fused_backward_pass),
+                        "fused_optimizer_groups": bool(args.fused_optimizer_groups),
+                    },
+                    source="sdxl_train",
+                )
                 if safeguard is not None:
                     safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
                     if safeguard_decision.reason:
@@ -834,6 +876,26 @@ def train(args):
                         continue
 
                 accelerator.backward(loss)
+                emit_after_backward_event(
+                    route="sdxl-finetune",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    backward_loss=current_loss,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "flow_model": bool(getattr(args, "flow_model", False)),
+                        "fused_backward_pass": bool(args.fused_backward_pass),
+                        "fused_optimizer_groups": bool(args.fused_optimizer_groups),
+                    },
+                    source="sdxl_train",
+                )
 
                 if not (args.fused_backward_pass or args.fused_optimizer_groups):
                     if accelerator.sync_gradients and args.max_grad_norm != 0.0:
@@ -842,15 +904,89 @@ def train(args):
                             params_to_clip.extend(m.parameters())
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                    emit_before_optimizer_step_event(
+                        route="sdxl-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        extra={
+                            "flow_model": bool(getattr(args, "flow_model", False)),
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "fused_optimizer_groups": bool(args.fused_optimizer_groups),
+                        },
+                        source="sdxl_train",
+                    )
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
+                    emit_after_optimizer_step_event(
+                        route="sdxl-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        optimizer_step_executed=True,
+                        scheduler_step_executed=True,
+                        zero_grad_called=True,
+                        extra={
+                            "flow_model": bool(getattr(args, "flow_model", False)),
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "fused_optimizer_groups": bool(args.fused_optimizer_groups),
+                        },
+                        source="sdxl_train",
+                    )
                 else:
                     # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
+                    emit_before_optimizer_step_event(
+                        route="sdxl-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        extra={
+                            "flow_model": bool(getattr(args, "flow_model", False)),
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "fused_optimizer_groups": bool(args.fused_optimizer_groups),
+                        },
+                        source="sdxl_train",
+                    )
                     lr_scheduler.step()
                     if args.fused_optimizer_groups:
                         for i in range(1, len(optimizers)):
                             lr_schedulers[i].step()
+                    emit_after_optimizer_step_event(
+                        route="sdxl-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        optimizer_step_executed=bool(accelerator.sync_gradients),
+                        scheduler_step_executed=True,
+                        zero_grad_called=bool(accelerator.sync_gradients),
+                        extra={
+                            "flow_model": bool(getattr(args, "flow_model", False)),
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "fused_optimizer_groups": bool(args.fused_optimizer_groups),
+                        },
+                        source="sdxl_train",
+                    )
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:

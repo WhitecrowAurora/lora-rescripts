@@ -58,6 +58,14 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 from library.utils import setup_logging, add_logging_arguments
+from mikazuki.plugins.training_hooks import (
+    apply_modify_loss_event,
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 setup_logging()
 import logging
@@ -1945,9 +1953,30 @@ class NetworkTrainer:
                         skip_training_step = False
                         stop_training_reason = None
 
-                        for micro_batch, sub_batch_size, loss_scale in iter_training_micro_batches(batch, micro_batch_plan):
+                        micro_batch_count = max(1, int(micro_batch_plan.split_count or 1))
+                        for micro_batch_index, (micro_batch, sub_batch_size, loss_scale) in enumerate(
+                            iter_training_micro_batches(batch, micro_batch_plan),
+                            start=1,
+                        ):
                             setattr(args, "_peak_vram_runtime_global_step", global_step)
                             self.on_step_start(args, accelerator, network, text_encoders, unet, micro_batch, weight_dtype, is_train=True)
+                            emit_before_forward_event(
+                                route="network",
+                                training_type=getattr(args, "model_train_type", ""),
+                                global_step=global_step,
+                                micro_batch_index=micro_batch_index,
+                                micro_batch_count=micro_batch_count,
+                                micro_batch_size=sub_batch_size,
+                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                extra={
+                                    "train_text_encoder": bool(train_text_encoder),
+                                    "train_unet": bool(train_unet),
+                                    "return_per_sample_loss": bool(return_per_sample_loss),
+                                    "uses_lulynx_core": lulynx_core is not None,
+                                },
+                                source="train_network",
+                            )
 
                             with attention_step_profiler.section("forward"):
                                 per_sample_losses = None
@@ -1975,7 +2004,46 @@ class NetworkTrainer:
                                     micro_loss = batch_result
                             peak_vram_diagnostics.capture("forward")
 
-                            micro_loss_value = float(micro_loss.detach().item())
+                            raw_micro_loss_value = float(micro_loss.detach().item())
+                            emit_after_loss_event(
+                                route="network",
+                                training_type=getattr(args, "model_train_type", ""),
+                                global_step=global_step,
+                                micro_batch_index=micro_batch_index,
+                                micro_batch_count=micro_batch_count,
+                                micro_batch_size=sub_batch_size,
+                                loss_value=raw_micro_loss_value,
+                                loss_scale=loss_scale,
+                                weighted_loss=weighted_loss + (raw_micro_loss_value * loss_scale),
+                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                extra={
+                                    "return_per_sample_loss": bool(return_per_sample_loss),
+                                    "uses_lulynx_core": lulynx_core is not None,
+                                    "modify_loss_runtime_supported": True,
+                                },
+                                source="train_network",
+                            )
+                            loss_mutation = apply_modify_loss_event(
+                                loss=micro_loss,
+                                route="network",
+                                training_type=getattr(args, "model_train_type", ""),
+                                global_step=global_step,
+                                micro_batch_index=micro_batch_index,
+                                micro_batch_count=micro_batch_count,
+                                micro_batch_size=sub_batch_size,
+                                loss_value=raw_micro_loss_value,
+                                loss_scale=loss_scale,
+                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                extra={
+                                    "return_per_sample_loss": bool(return_per_sample_loss),
+                                    "uses_lulynx_core": lulynx_core is not None,
+                                },
+                                source="train_network",
+                            )
+                            micro_loss = loss_mutation.loss
+                            micro_loss_value = loss_mutation.final_loss_value
                             weighted_loss += micro_loss_value * loss_scale
 
                             if safeguard is not None:
@@ -1993,7 +2061,11 @@ class NetworkTrainer:
                                     break
 
                             scaled_loss = micro_loss * loss_scale
-                            scaled_per_sample_losses = per_sample_losses * loss_scale if per_sample_losses is not None else None
+                            scaled_per_sample_losses = (
+                                per_sample_losses * loss_scale * float(loss_mutation.scale)
+                                if per_sample_losses is not None
+                                else None
+                            )
                             with attention_step_profiler.section("backward"):
                                 if lulynx_core is not None:
                                     lulynx_core.backward(
@@ -2006,6 +2078,41 @@ class NetworkTrainer:
                                 else:
                                     accelerator.backward(scaled_loss)
                             peak_vram_diagnostics.capture("backward")
+                            emit_after_backward_event(
+                                route="network",
+                                training_type=getattr(args, "model_train_type", ""),
+                                global_step=global_step,
+                                micro_batch_index=micro_batch_index,
+                                micro_batch_count=micro_batch_count,
+                                micro_batch_size=sub_batch_size,
+                                loss_value=micro_loss_value,
+                                loss_scale=loss_scale,
+                                backward_loss=micro_loss_value * float(loss_scale),
+                                weighted_loss=weighted_loss,
+                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                extra={
+                                    "return_per_sample_loss": bool(return_per_sample_loss),
+                                    "uses_lulynx_core": lulynx_core is not None,
+                                    "raw_loss": raw_micro_loss_value,
+                                    "loss_modified": bool(loss_mutation.modified),
+                                    "loss_modifier_scale": float(loss_mutation.scale),
+                                    "loss_modifier_bias": float(loss_mutation.bias),
+                                    "modify_loss_exclusive_conflict": bool(loss_mutation.dispatch.get("exclusive_conflict")),
+                                    "modify_loss_error_count": len(loss_mutation.dispatch.get("errors") or []),
+                                    **(
+                                        {"loss_modifier_reason": loss_mutation.reason}
+                                        if loss_mutation.reason
+                                        else {}
+                                    ),
+                                    **(
+                                        {"loss_modifier_metadata": loss_mutation.metadata}
+                                        if loss_mutation.metadata
+                                        else {}
+                                    ),
+                                },
+                                source="train_network",
+                            )
 
                         current_loss = weighted_loss
                         if stop_training_reason is not None:
@@ -2025,10 +2132,47 @@ class NetworkTrainer:
                                 network.update_norms()
 
                         with attention_step_profiler.section("optimizer"):
+                            emit_before_optimizer_step_event(
+                                route="network",
+                                training_type=getattr(args, "model_train_type", ""),
+                                global_step=global_step,
+                                current_loss=current_loss,
+                                optimizer=optimizer,
+                                lr_scheduler=lr_scheduler,
+                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                                extra={
+                                    "train_text_encoder": bool(train_text_encoder),
+                                    "train_unet": bool(train_unet),
+                                    "uses_lulynx_core": lulynx_core is not None,
+                                },
+                                source="train_network",
+                            )
                             optimizer.step()
                             lr_scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
                         peak_vram_diagnostics.capture("optimizer")
+                        emit_after_optimizer_step_event(
+                            route="network",
+                            training_type=getattr(args, "model_train_type", ""),
+                            global_step=global_step,
+                            current_loss=current_loss,
+                            optimizer=optimizer,
+                            lr_scheduler=lr_scheduler,
+                            gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                            sync_gradients=bool(accelerator.sync_gradients),
+                            max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                            optimizer_step_executed=True,
+                            scheduler_step_executed=True,
+                            zero_grad_called=True,
+                            extra={
+                                "train_text_encoder": bool(train_text_encoder),
+                                "train_unet": bool(train_unet),
+                                "uses_lulynx_core": lulynx_core is not None,
+                            },
+                            source="train_network",
+                        )
                 finally:
                     attention_step_profiler.end_micro_step()
 

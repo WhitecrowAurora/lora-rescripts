@@ -212,6 +212,18 @@ def _build_rope_mismatch_error(
         f"RoPE sequence length mismatch at {stage}: input_seq_len={input_seq_len}, rope_seq_len={rope_seq_len}, "
         f"tensor_format={tensor_format}, mode={get_anima_rope_mismatch_mode()}."
     )
+    if (
+        stage == "Attention.compute_qkv(source_align)"
+        and rope_seq_len > 0
+        and input_seq_len > rope_seq_len
+        and input_seq_len % rope_seq_len == 0
+    ):
+        ratio = input_seq_len // rope_seq_len
+        if 2 <= ratio <= 512:
+            message += (
+                f" Detected exact sequence ratio x{ratio}."
+                " This can indicate a LoRA/TLoRA rank-mask broadcasting issue that expanded a sequence axis unexpectedly."
+            )
     if is_anima_debug_mode_enabled():
         if q_shape is not None:
             message += f" q_shape={q_shape}."

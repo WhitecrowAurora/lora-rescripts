@@ -16,6 +16,7 @@ from mikazuki.app.api import router as api_router
 from mikazuki.app.aesthetic_labeling_api import router as aesthetic_labeling_router
 # from mikazuki.app.ipc import router as ipc_router
 from mikazuki.app.proxy import router as proxy_router
+from mikazuki.plugins.runtime import plugin_runtime
 from mikazuki.utils.devices import check_torch_gpu
 from mikazuki.utils.frontend_profiles import BUILTIN_PROFILE_ID, resolve_frontend_profile
 from mikazuki.utils.backend_status import write_backend_status
@@ -65,10 +66,19 @@ def _resolve_frontend_file(request_path: str) -> Path:
 async def app_startup():
     write_backend_status("loading", "正在加载配置、数据结构与运行时信息。")
     app_config.load_config()
+    plugin_runtime.initialize_from_config(app_config)
 
     await load_schemas()
     await load_presets()
     await asyncio.to_thread(check_torch_gpu)
+    plugin_runtime.emit_event(
+        "on_app_start",
+        {
+            "active_ui_profile": _get_requested_ui_profile_id(),
+            "plugin_developer_mode": bool(app_config["plugin_developer_mode"]),
+        },
+        source="app_startup",
+    )
     write_backend_status("ready", "后端已就绪。")
 
     if sys.platform == "win32" and os.environ.get("MIKAZUKI_DEV", "0") != "1":

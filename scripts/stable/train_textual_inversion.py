@@ -35,6 +35,13 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 from library.utils import setup_logging, add_logging_arguments
+from mikazuki.plugins.training_hooks import (
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 setup_logging()
 import logging
@@ -616,6 +623,21 @@ class TextualInversionTrainer:
                     )
 
                     # Predict the noise residual
+                    training_route = "sdxl-textual-inversion" if getattr(self, "is_sdxl", False) else "sd-textual-inversion"
+                    emit_before_forward_event(
+                        route=training_route,
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        micro_batch_index=1,
+                        micro_batch_count=1,
+                        micro_batch_size=int(latents.shape[0]),
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        extra={
+                            "is_sdxl": bool(getattr(self, "is_sdxl", False)),
+                        },
+                        source="train_textual_inversion",
+                    )
                     with accelerator.autocast():
                         noise_pred = self.call_unet(
                             args, accelerator, unet, noisy_latents, timesteps, text_encoder_conds, batch, weight_dtype
@@ -648,6 +670,23 @@ class TextualInversionTrainer:
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
                     current_loss = loss.detach().item()
+                    emit_after_loss_event(
+                        route=training_route,
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        micro_batch_index=1,
+                        micro_batch_count=1,
+                        micro_batch_size=int(latents.shape[0]),
+                        loss_value=current_loss,
+                        loss_scale=1.0,
+                        weighted_loss=current_loss,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        extra={
+                            "is_sdxl": bool(getattr(self, "is_sdxl", False)),
+                        },
+                        source="train_textual_inversion",
+                    )
                     if safeguard is not None:
                         safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
                         if safeguard_decision.reason:
@@ -659,13 +698,64 @@ class TextualInversionTrainer:
                             continue
 
                     accelerator.backward(loss)
+                    emit_after_backward_event(
+                        route=training_route,
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        micro_batch_index=1,
+                        micro_batch_count=1,
+                        micro_batch_size=int(latents.shape[0]),
+                        loss_value=current_loss,
+                        loss_scale=1.0,
+                        backward_loss=current_loss,
+                        weighted_loss=current_loss,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        extra={
+                            "is_sdxl": bool(getattr(self, "is_sdxl", False)),
+                        },
+                        source="train_textual_inversion",
+                    )
                     if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                         params_to_clip = accelerator.unwrap_model(text_encoder).get_input_embeddings().parameters()
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                    emit_before_optimizer_step_event(
+                        route=training_route,
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        extra={
+                            "is_sdxl": bool(getattr(self, "is_sdxl", False)),
+                        },
+                        source="train_textual_inversion",
+                    )
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
+                    emit_after_optimizer_step_event(
+                        route=training_route,
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        optimizer_step_executed=True,
+                        scheduler_step_executed=True,
+                        zero_grad_called=True,
+                        extra={
+                            "is_sdxl": bool(getattr(self, "is_sdxl", False)),
+                        },
+                        source="train_textual_inversion",
+                    )
 
                     # Let's make sure we don't update any embedding weights besides the newly added token
                     with torch.no_grad():

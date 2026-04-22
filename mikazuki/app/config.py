@@ -13,6 +13,7 @@ class Config:
             "last_path": "",
             "saved_params": {},
             "active_ui_profile": "builtin-legacy",
+            "plugin_developer_mode": False,
         }
         self.lock = False
 

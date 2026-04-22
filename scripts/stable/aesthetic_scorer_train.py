@@ -478,6 +478,7 @@ def main() -> None:
     cls_loss_weight = float(cfg["training"].get("cls_loss_weight", 1.0))
     cls_pos_weight_raw = cfg["training"].get("cls_pos_weight")
     cls_pos_weight = None if cls_pos_weight_raw in (None, "", "null") else float(cls_pos_weight_raw)
+    global_step = 0
 
     for epoch in range(1, epochs + 1):
         train_metrics = run_epoch(
@@ -492,7 +493,13 @@ def main() -> None:
             cls_loss_weight=cls_loss_weight,
             cls_pos_weight=cls_pos_weight,
             target_mask=target_mask,
+            route="aesthetic-scorer",
+            training_type="aesthetic-scorer",
+            source="aesthetic_scorer_train",
+            global_step_offset=global_step,
+            epoch_index=epoch,
         )
+        global_step += int(train_metrics.get("steps", 0) or 0)
         val_metrics = run_epoch(
             train=False,
             loader=val_loader,
@@ -505,6 +512,11 @@ def main() -> None:
             cls_loss_weight=cls_loss_weight,
             cls_pos_weight=cls_pos_weight,
             target_mask=target_mask,
+            route="aesthetic-scorer",
+            training_type="aesthetic-scorer",
+            source="aesthetic_scorer_train",
+            global_step_offset=global_step,
+            epoch_index=epoch,
         )
 
         history["train"].append(train_metrics)

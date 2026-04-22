@@ -55,6 +55,13 @@ from library.custom_train_functions import (
 )
 import networks.control_net_lllite_for_train as control_net_lllite_for_train
 from library.utils import setup_logging, add_logging_arguments
+from mikazuki.plugins.training_hooks import (
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 setup_logging()
 import logging
@@ -477,6 +484,17 @@ def train(args):
 
                 controlnet_image = batch["conditioning_images"].to(dtype=weight_dtype)
 
+                emit_before_forward_event(
+                    route="sdxl-controlnet-lllite",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    source="sdxl_train_control_net_lllite",
+                )
                 with accelerator.autocast():
                     # conditioning imageをControlNetに渡す / pass conditioning image to ControlNet
                     # 内部でcond_embに変換される / it will be converted to cond_emb inside
@@ -508,14 +526,71 @@ def train(args):
 
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
+                current_loss = loss.detach().item()
+                emit_after_loss_event(
+                    route="sdxl-controlnet-lllite",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    source="sdxl_train_control_net_lllite",
+                )
                 accelerator.backward(loss)
+                emit_after_backward_event(
+                    route="sdxl-controlnet-lllite",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    backward_loss=current_loss,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    source="sdxl_train_control_net_lllite",
+                )
                 if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                     params_to_clip = accelerator.unwrap_model(unet).get_trainable_params()
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                emit_before_optimizer_step_event(
+                    route="sdxl-controlnet-lllite",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    current_loss=current_loss,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                    source="sdxl_train_control_net_lllite",
+                )
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+                emit_after_optimizer_step_event(
+                    route="sdxl-controlnet-lllite",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    current_loss=current_loss,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                    optimizer_step_executed=True,
+                    scheduler_step_executed=True,
+                    zero_grad_called=True,
+                    source="sdxl_train_control_net_lllite",
+                )
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -539,7 +614,6 @@ def train(args):
                             remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                             remove_model(remove_ckpt_name)
 
-            current_loss = loss.detach().item()
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
             avr_loss: float = loss_recorder.moving_average
             logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}

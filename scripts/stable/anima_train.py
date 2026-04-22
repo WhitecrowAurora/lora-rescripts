@@ -26,6 +26,14 @@ from library import deepspeed_utils, anima_models, anima_train_utils, anima_util
 import library.train_util as train_util
 
 from library.utils import setup_logging, add_logging_arguments
+from mikazuki.plugins.training_hooks import (
+    apply_modify_loss_event,
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 setup_logging()
 import logging
@@ -780,6 +788,21 @@ def train(args):
                     with anima_step_profiler.step_section("dit_forward"):
                         noisy_model_input = noisy_model_input.unsqueeze(2)  # 4D to 5D, (B, C, 1, H, W)
                         noisy_model_input = anima_train_utils.maybe_apply_anima_channels_last(args, noisy_model_input)
+                        emit_before_forward_event(
+                            route="anima-finetune",
+                            training_type=getattr(args, "model_train_type", ""),
+                            global_step=global_step,
+                            micro_batch_index=1,
+                            micro_batch_count=1,
+                            micro_batch_size=int(latents.shape[0]),
+                            gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                            sync_gradients=bool(accelerator.sync_gradients),
+                            extra={
+                                "fused_backward_pass": bool(args.fused_backward_pass),
+                                "anima_debug_mode": bool(getattr(args, "anima_debug_mode", False)),
+                            },
+                            source="anima_train",
+                        )
                         with accelerator.autocast():
                             model_pred = dit(
                                 noisy_model_input,
@@ -811,7 +834,46 @@ def train(args):
                         loss = loss * loss_weights
                         loss = loss.mean()
 
-                    current_loss = loss.detach().item()
+                    raw_current_loss = float(loss.detach().item())
+                    emit_after_loss_event(
+                        route="anima-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        micro_batch_index=1,
+                        micro_batch_count=1,
+                        micro_batch_size=int(latents.shape[0]),
+                        loss_value=raw_current_loss,
+                        loss_scale=1.0,
+                        weighted_loss=raw_current_loss,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "anima_debug_mode": bool(getattr(args, "anima_debug_mode", False)),
+                            "modify_loss_runtime_supported": True,
+                        },
+                        source="anima_train",
+                    )
+                    loss_mutation = apply_modify_loss_event(
+                        loss=loss,
+                        route="anima-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        micro_batch_index=1,
+                        micro_batch_count=1,
+                        micro_batch_size=int(latents.shape[0]),
+                        loss_value=raw_current_loss,
+                        loss_scale=1.0,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "anima_debug_mode": bool(getattr(args, "anima_debug_mode", False)),
+                        },
+                        source="anima_train",
+                    )
+                    loss = loss_mutation.loss
+                    current_loss = loss_mutation.final_loss_value
                     if safeguard is not None:
                         safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
                         if safeguard_decision.reason:
@@ -825,6 +887,36 @@ def train(args):
 
                     with anima_step_profiler.step_section("backward"):
                         accelerator.backward(loss)
+                    emit_after_backward_event(
+                        route="anima-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        micro_batch_index=1,
+                        micro_batch_count=1,
+                        micro_batch_size=int(latents.shape[0]),
+                        loss_value=current_loss,
+                        loss_scale=1.0,
+                        backward_loss=current_loss,
+                        weighted_loss=current_loss,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "anima_debug_mode": bool(getattr(args, "anima_debug_mode", False)),
+                            "raw_loss": raw_current_loss,
+                            "loss_modified": bool(loss_mutation.modified),
+                            "loss_modifier_scale": float(loss_mutation.scale),
+                            "loss_modifier_bias": float(loss_mutation.bias),
+                            "modify_loss_exclusive_conflict": bool(loss_mutation.dispatch.get("exclusive_conflict")),
+                            "modify_loss_error_count": len(loss_mutation.dispatch.get("errors") or []),
+                            **(
+                                {"loss_modifier_reason": loss_mutation.reason}
+                                if loss_mutation.reason
+                                else {}
+                            ),
+                        },
+                        source="anima_train",
+                    )
 
                     with anima_step_profiler.step_section("optimizer_step"):
                         if not args.fused_backward_pass:
@@ -834,12 +926,69 @@ def train(args):
                                     params_to_clip.extend(m.parameters())
                                 accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                            emit_before_optimizer_step_event(
+                                route="anima-finetune",
+                                training_type=getattr(args, "model_train_type", ""),
+                                global_step=global_step,
+                                current_loss=current_loss,
+                                optimizer=optimizer,
+                                lr_scheduler=lr_scheduler,
+                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                                extra={
+                                    "fused_backward_pass": bool(args.fused_backward_pass),
+                                    "anima_debug_mode": bool(getattr(args, "anima_debug_mode", False)),
+                                },
+                                source="anima_train",
+                            )
                             optimizer.step()
                             lr_scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
+                            optimizer_step_executed = True
+                            scheduler_step_executed = True
+                            zero_grad_called = True
                         else:
                             # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
+                            emit_before_optimizer_step_event(
+                                route="anima-finetune",
+                                training_type=getattr(args, "model_train_type", ""),
+                                global_step=global_step,
+                                current_loss=current_loss,
+                                optimizer=optimizer,
+                                lr_scheduler=lr_scheduler,
+                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                                extra={
+                                    "fused_backward_pass": bool(args.fused_backward_pass),
+                                    "anima_debug_mode": bool(getattr(args, "anima_debug_mode", False)),
+                                },
+                                source="anima_train",
+                            )
                             lr_scheduler.step()
+                            optimizer_step_executed = bool(accelerator.sync_gradients)
+                            scheduler_step_executed = True
+                            zero_grad_called = bool(accelerator.sync_gradients)
+                    emit_after_optimizer_step_event(
+                        route="anima-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        optimizer_step_executed=optimizer_step_executed,
+                        scheduler_step_executed=scheduler_step_executed,
+                        zero_grad_called=zero_grad_called,
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "anima_debug_mode": bool(getattr(args, "anima_debug_mode", False)),
+                        },
+                        source="anima_train",
+                    )
             finally:
                 anima_step_profiler.end_micro_step()
 
@@ -1035,7 +1184,4 @@ if __name__ == "__main__":
         args.attn_mode = "torch"  # backward compatibility
 
     train(args)
-
-
-
 

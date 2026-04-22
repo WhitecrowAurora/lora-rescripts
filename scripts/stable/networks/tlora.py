@@ -36,12 +36,24 @@ def _normalize_schedule(value) -> str:
 
 
 def _broadcast_rank_mask(values: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-    if reference.ndim == 2:
+    if reference.ndim <= 2:
         return values
-    if reference.ndim == 3:
-        return values.unsqueeze(1)
-    if reference.ndim == 4:
-        return values.unsqueeze(-1).unsqueeze(-1)
+
+    rank_dim = int(values.shape[1])
+
+    # For Linear-style tensors, LoRA rank lives on the last axis:
+    # e.g. [B, S, R], [B, T, H, W, R].
+    if int(reference.shape[-1]) == rank_dim:
+        view_shape = [int(values.shape[0])] + [1] * (reference.ndim - 2) + [rank_dim]
+        return values.reshape(view_shape)
+
+    # For Conv-style tensors, LoRA rank is channel-first:
+    # e.g. [B, R, H, W], [B, R, T, H, W].
+    if int(reference.shape[1]) == rank_dim:
+        view_shape = [int(values.shape[0]), rank_dim] + [1] * (reference.ndim - 2)
+        return values.reshape(view_shape)
+
+    # Fallback for uncommon layouts.
     while values.ndim < reference.ndim:
         values = values.unsqueeze(-1)
     return values
@@ -154,10 +166,7 @@ class TLoRAModule(lora_network.LoRAModule):
 
         if self.rank_dropout is not None and self.training:
             mask = torch.rand((lx.size(0), self.lora_dim), device=lx.device) > self.rank_dropout
-            if len(lx.size()) == 3:
-                mask = mask.unsqueeze(1)
-            elif len(lx.size()) == 4:
-                mask = mask.unsqueeze(-1).unsqueeze(-1)
+            mask = _broadcast_rank_mask(mask, lx)
             lx = lx * mask
             scale: Union[float, torch.Tensor] = self.scale * (1.0 / (1.0 - self.rank_dropout))
         else:

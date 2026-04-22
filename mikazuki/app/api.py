@@ -110,6 +110,7 @@ from mikazuki.utils.frontend_profiles import (
     resolve_frontend_profile_id,
     uninstall_frontend_plugin,
 )
+from mikazuki.plugins.runtime import plugin_runtime
 from mikazuki.utils.tk_window import (open_directory_selector,
                                        open_file_selector)
 
@@ -1288,6 +1289,16 @@ async def create_toml_file(request: Request):
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
+    plugin_runtime.emit_event(
+        "on_config_loaded",
+        {
+            "model_train_type": str(config.get("model_train_type", "") or "").strip().lower(),
+            "config_key_count": len(config.keys()),
+            "config_keys": sorted(str(item) for item in config.keys()),
+        },
+        source="api.run",
+    )
+
     start_warnings = apply_training_ui_overrides(config)
     start_warnings.extend(build_training_resource_warnings(config))
 
@@ -1439,8 +1450,30 @@ async def create_toml_file(request: Request):
     if sample_prompt_error:
         return APIResponseFail(message=sample_prompt_error)
 
+    plugin_runtime.emit_event(
+        "on_dataset_prepared",
+        {
+            "model_train_type": model_train_type,
+            "train_data_dir": str(config.get("train_data_dir", "") or ""),
+            "direct_python_training": bool(direct_python_training),
+        },
+        source="api.run",
+    )
+
     with open(toml_file, "w", encoding="utf-8") as f:
         f.write(toml.dumps(config))
+
+    plugin_runtime.emit_event(
+        "on_train_launch",
+        {
+            "model_train_type": model_train_type,
+            "trainer_file": trainer_file,
+            "toml_file": toml_file,
+            "gpu_ids": list(gpu_ids or []),
+            "distributed_world_size": int(distributed_runtime.get("total_num_processes", 1) or 1),
+        },
+        source="api.run",
+    )
 
     result = process.run_train(toml_file, trainer_file, gpu_ids, suggest_cpu_threads)
     merge_training_result_warnings(
@@ -2373,7 +2406,123 @@ async def get_config_summary() -> APIResponse:
         "saved_param_count": len(app_config["saved_params"] or {}),
         "active_ui_profile": resolve_frontend_profile_id(app_config["active_ui_profile"]),
         "config_path": str(app_config.path),
+        "plugin_developer_mode": bool(app_config["plugin_developer_mode"]),
     })
+
+
+@router.get("/plugins/runtime")
+async def get_plugin_runtime_status() -> APIResponse:
+    plugin_runtime.ensure_runtime_ready()
+    return APIResponseSuccess(data=plugin_runtime.get_status())
+
+
+@router.post("/plugins/reload")
+async def reload_plugin_runtime() -> APIResponse:
+    summary = plugin_runtime.reload()
+    return APIResponseSuccess(data=summary)
+
+
+@router.get("/plugins/capabilities")
+async def get_plugin_capabilities() -> APIResponse:
+    return APIResponseSuccess(data={"capabilities": plugin_runtime.list_capability_catalog()})
+
+
+@router.get("/plugins/hooks")
+async def get_plugin_hooks() -> APIResponse:
+    return APIResponseSuccess(data={"hooks": plugin_runtime.list_hook_catalog()})
+
+
+@router.get("/plugins/training_protocol")
+async def get_plugin_training_protocol() -> APIResponse:
+    return APIResponseSuccess(data=plugin_runtime.get_training_event_protocol_status())
+
+
+@router.post("/plugins/developer_mode")
+async def set_plugin_developer_mode(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    enabled = parse_boolish(payload.get("enabled", False))
+    plugin_runtime.set_developer_mode(enabled)
+    app_config["plugin_developer_mode"] = enabled
+    app_config.save_config()
+    return APIResponseSuccess(
+        message=f"Plugin developer mode {'enabled' if enabled else 'disabled'}",
+        data={"plugin_developer_mode": enabled},
+    )
+
+
+@router.post("/plugins/set_enabled")
+async def set_plugin_enabled_state(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    plugin_id = str(payload.get("plugin_id", "")).strip()
+    if not plugin_id:
+        return APIResponseFail(message="plugin_id is required")
+    enabled = parse_boolish(payload.get("enabled", False))
+    updated_by = str(payload.get("updated_by", "")).strip() or "local-user"
+    try:
+        record = plugin_runtime.set_plugin_enabled(plugin_id, enabled=enabled, updated_by=updated_by)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Failed to change plugin enabled state")
+        return APIResponseFail(message="Failed to change plugin enabled state.")
+    return APIResponseSuccess(
+        message=f"Plugin {'enabled' if enabled else 'disabled'}",
+        data={"enabled_record": record},
+    )
+
+
+@router.post("/plugins/reset_enabled")
+async def reset_plugin_enabled_state(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    plugin_id = str(payload.get("plugin_id", "")).strip()
+    if not plugin_id:
+        return APIResponseFail(message="plugin_id is required")
+    updated_by = str(payload.get("updated_by", "")).strip() or "local-user"
+    try:
+        record = plugin_runtime.reset_plugin_enabled(plugin_id, updated_by=updated_by)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Failed to reset plugin enabled state")
+        return APIResponseFail(message="Failed to reset plugin enabled state.")
+    return APIResponseSuccess(
+        message="Plugin enabled state reset to manifest default",
+        data={"reset_record": record},
+    )
+
+
+@router.post("/plugins/approve")
+async def approve_plugin(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    plugin_id = str(payload.get("plugin_id", "")).strip()
+    approved_by = str(payload.get("approved_by", "")).strip() or "local-user"
+    if not plugin_id:
+        return APIResponseFail(message="plugin_id is required")
+    try:
+        record = plugin_runtime.approve_plugin(plugin_id, approved_by=approved_by)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Failed to approve plugin")
+        return APIResponseFail(message="Failed to approve plugin.")
+    return APIResponseSuccess(data={"approval": record})
+
+
+@router.post("/plugins/revoke_approval")
+async def revoke_plugin_approval(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    plugin_id = str(payload.get("plugin_id", "")).strip()
+    if not plugin_id:
+        return APIResponseFail(message="plugin_id is required")
+    removed = plugin_runtime.revoke_plugin_approval(plugin_id)
+    return APIResponseSuccess(data={"plugin_id": plugin_id, "removed": removed})
+
+
+@router.get("/plugins/audit")
+async def get_plugin_audit(limit: int = 200) -> APIResponse:
+    normalized_limit = max(1, min(int(limit or 200), 2000))
+    events = plugin_runtime.list_recent_audit(limit=normalized_limit)
+    return APIResponseSuccess(data={"events": events, "count": len(events)})
 
 
 @router.get("/ui_profiles")

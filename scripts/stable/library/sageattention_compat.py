@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import logging
+import os
 from typing import Any
 
 import torch
@@ -14,6 +15,13 @@ from mikazuki.utils.runtime_sageattention import (
     load_runtime_sageattention_version,
 )
 from mikazuki.utils.sagebwd_runtime import is_sagebwd_nvidia_runtime, probe_runtime_sagebwd
+
+try:
+    from flash_attn.flash_attn_interface import flash_attn_func as _runtime_flash_attn_func
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func as _runtime_flash_attn_varlen_func
+except Exception:
+    _runtime_flash_attn_func = None
+    _runtime_flash_attn_varlen_func = None
 
 logger = logging.getLogger(__name__)
 
@@ -79,23 +87,50 @@ def _runtime_label() -> str:
     return "SageAttention"
 
 
+@lru_cache(maxsize=1)
+def _resolve_shim_backward_backend() -> str:
+    raw_value = str(os.environ.get("LULYNX_SAGE_SHIM_BACKWARD", "") or "").strip().lower()
+    if not raw_value:
+        return "sdpa"
+    if raw_value in {"sdpa", "flash"}:
+        return raw_value
+    logger.warning(
+        "Unknown LULYNX_SAGE_SHIM_BACKWARD='%s', fallback to 'sdpa'.",
+        raw_value,
+    )
+    return "sdpa"
+
+
+def _supports_flash_backward_recompute() -> bool:
+    return callable(_runtime_flash_attn_func) and callable(_runtime_flash_attn_varlen_func)
+
+
+def _backward_backend_label(backend: str) -> str:
+    if backend == "flash":
+        return "FlashAttention2"
+    return "SDPA"
+
+
 @lru_cache(maxsize=2)
-def _warn_backward_shim_once(source: str, runtime_label: str) -> None:
+def _warn_backward_shim_once(source: str, runtime_label: str, backward_backend: str) -> None:
     runtime_source = source or "unknown"
+    backend_label = _backward_backend_label(backward_backend)
     if is_sagebwd_nvidia_runtime():
         logger.warning(
             "SageBwd NVIDIA compatibility shim is active for source '%s': "
-            "native backward is not ready, so forward uses Sage/SageBwd runtime while backward recomputes gradients with SDPA.",
+            "native backward is not ready, so forward uses Sage/SageBwd runtime while backward recomputes gradients with %s.",
             runtime_source,
+            backend_label,
         )
         return
 
     logger.warning(
         "%s training compatibility shim is active for source '%s': "
-        "forward uses %s, backward recomputes gradients with SDPA.",
+        "forward uses %s, backward recomputes gradients with %s.",
         runtime_label,
         runtime_source,
         runtime_label,
+        backend_label,
     )
 
 
@@ -307,6 +342,42 @@ def _run_sdpa_attention(
     return out
 
 
+def _run_flash_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    tensor_layout: str,
+    is_causal: bool,
+    sm_scale: float | None,
+) -> torch.Tensor:
+    if _runtime_flash_attn_func is None:
+        raise ImportError("flash_attn_func is not available")
+
+    if tensor_layout == "NHD":
+        q_flash = q
+        k_flash = k
+        v_flash = v
+    elif tensor_layout == "HND":
+        q_flash = q.permute(0, 2, 1, 3).contiguous()
+        k_flash = k.permute(0, 2, 1, 3).contiguous()
+        v_flash = v.permute(0, 2, 1, 3).contiguous()
+    else:
+        raise ValueError(f"Unsupported SageAttention tensor_layout: {tensor_layout}")
+
+    out = _runtime_flash_attn_func(
+        q_flash,
+        k_flash,
+        v_flash,
+        0.0,
+        softmax_scale=sm_scale,
+        causal=is_causal,
+    )
+    if tensor_layout == "HND":
+        out = out.permute(0, 2, 1, 3).contiguous()
+    return out
+
+
 def _run_sdpa_attention_varlen(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -354,6 +425,119 @@ def _run_sdpa_attention_varlen(
     return torch.cat(outputs, dim=0)
 
 
+def _run_flash_attention_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    is_causal: bool,
+    sm_scale: float | None,
+) -> torch.Tensor:
+    if _runtime_flash_attn_varlen_func is None:
+        raise ImportError("flash_attn_varlen_func is not available")
+    return _runtime_flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        0.0,
+        softmax_scale=sm_scale,
+        causal=is_causal,
+    )
+
+
+@lru_cache(maxsize=2)
+def _warn_flash_backward_fallback_once(reason: str) -> None:
+    logger.warning(
+        "SageAttention shim requested FlashAttention2 backward recompute, but fallback to SDPA was triggered: %s",
+        reason or "unknown reason",
+    )
+
+
+def _run_shim_backward_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    tensor_layout: str,
+    is_causal: bool,
+    sm_scale: float | None,
+) -> torch.Tensor:
+    backend = _resolve_shim_backward_backend()
+    if backend == "flash":
+        if not _supports_flash_backward_recompute():
+            _warn_flash_backward_fallback_once("flash_attn is not importable in this runtime")
+        else:
+            try:
+                return _run_flash_attention(
+                    q,
+                    k,
+                    v,
+                    tensor_layout=tensor_layout,
+                    is_causal=is_causal,
+                    sm_scale=sm_scale,
+                )
+            except Exception as exc:
+                _warn_flash_backward_fallback_once(str(exc).strip().splitlines()[0] or exc.__class__.__name__)
+    return _run_sdpa_attention(
+        q,
+        k,
+        v,
+        tensor_layout=tensor_layout,
+        is_causal=is_causal,
+        sm_scale=sm_scale,
+    )
+
+
+def _run_shim_backward_attention_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    is_causal: bool,
+    sm_scale: float | None,
+) -> torch.Tensor:
+    backend = _resolve_shim_backward_backend()
+    if backend == "flash":
+        if not _supports_flash_backward_recompute():
+            _warn_flash_backward_fallback_once("flash_attn is not importable in this runtime")
+        else:
+            try:
+                return _run_flash_attention_varlen(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    is_causal=is_causal,
+                    sm_scale=sm_scale,
+                )
+            except Exception as exc:
+                _warn_flash_backward_fallback_once(str(exc).strip().splitlines()[0] or exc.__class__.__name__)
+    return _run_sdpa_attention_varlen(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        is_causal=is_causal,
+        sm_scale=sm_scale,
+    )
+
+
 class _SageAttentionWithSdpaBackward(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -391,7 +575,7 @@ class _SageAttentionWithSdpaBackward(torch.autograd.Function):
             k_re = k.detach().requires_grad_(ctx.needs_input_grad[1])
             v_re = v.detach().requires_grad_(ctx.needs_input_grad[2])
 
-            out = _run_sdpa_attention(
+            out = _run_shim_backward_attention(
                 q_re,
                 k_re,
                 v_re,
@@ -454,12 +638,14 @@ class _SageAttentionVarlenWithSdpaBackward(torch.autograd.Function):
             k_re = k.detach().requires_grad_(ctx.needs_input_grad[1])
             v_re = v.detach().requires_grad_(ctx.needs_input_grad[2])
 
-            out = _run_sdpa_attention_varlen(
+            out = _run_shim_backward_attention_varlen(
                 q_re,
                 k_re,
                 v_re,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=ctx.max_seqlen_q,
+                max_seqlen_k=ctx.max_seqlen_k,
                 is_causal=ctx.is_causal,
                 sm_scale=ctx.sm_scale,
             )
@@ -511,7 +697,11 @@ def call_sageattention(
             runtime_kwargs=runtime_kwargs,
         )
 
-    _warn_backward_shim_once(_runtime_sageattention_source, _runtime_label())
+    _warn_backward_shim_once(
+        _runtime_sageattention_source,
+        _runtime_label(),
+        _resolve_shim_backward_backend(),
+    )
     return _SageAttentionWithSdpaBackward.apply(q, k, v, tensor_layout, is_causal, sm_scale)
 
 
@@ -561,7 +751,11 @@ def call_sageattention_varlen(
             runtime_kwargs=runtime_kwargs,
         )
 
-    _warn_backward_shim_once(_runtime_sageattention_source, _runtime_label())
+    _warn_backward_shim_once(
+        _runtime_sageattention_source,
+        _runtime_label(),
+        _resolve_shim_backward_backend(),
+    )
     return _SageAttentionVarlenWithSdpaBackward.apply(
         q,
         k,

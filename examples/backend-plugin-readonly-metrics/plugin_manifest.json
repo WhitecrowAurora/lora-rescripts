@@ -1,0 +1,36 @@
+{
+  "schema_version": "plugin-manifest-v1",
+  "id": "community.example.readonly-metrics",
+  "name": "Readonly Metrics Example",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "description": "Observe training lifecycle events and emit audit records.",
+  "capabilities": [
+    "read_runtime_stats",
+    "read_train_config",
+    "read_step_metrics"
+  ],
+  "hooks": [
+    {
+      "event": "on_app_start",
+      "handler": "on_app_start",
+      "priority": 50
+    },
+    {
+      "event": "on_config_loaded",
+      "handler": "on_config_loaded",
+      "priority": 100
+    },
+    {
+      "event": "on_train_launch",
+      "handler": "on_train_launch",
+      "priority": 100
+    },
+    {
+      "event": "on_train_complete",
+      "handler": "on_train_complete",
+      "priority": 100
+    }
+  ],
+  "enabled_by_default": true
+}

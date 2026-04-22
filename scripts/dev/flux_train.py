@@ -36,6 +36,13 @@ from library.sd3_train_utils import FlowMatchEulerDiscreteScheduler
 import library.train_util as train_util
 
 from library.utils import setup_logging, add_logging_arguments
+from mikazuki.plugins.training_hooks import (
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 setup_logging()
 import logging
@@ -644,6 +651,21 @@ def train(args):
                 if not args.apply_t5_attn_mask:
                     t5_attn_mask = None
 
+                emit_before_forward_event(
+                    route="flux-finetune",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "fused_backward_pass": bool(args.fused_backward_pass),
+                        "blockwise_fused_optimizers": bool(args.blockwise_fused_optimizers),
+                    },
+                    source="flux_train",
+                )
                 with accelerator.autocast():
                     # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model (we should not keep it but I want to keep the inputs same for the model for testing)
                     model_pred = flux(
@@ -678,9 +700,47 @@ def train(args):
                 loss_weights = batch["loss_weights"]  # 各sampleごとのweight
                 loss = loss * loss_weights
                 loss = loss.mean()
+                current_loss = loss.detach().item()
+                emit_after_loss_event(
+                    route="flux-finetune",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "fused_backward_pass": bool(args.fused_backward_pass),
+                        "blockwise_fused_optimizers": bool(args.blockwise_fused_optimizers),
+                    },
+                    source="flux_train",
+                )
 
                 # backward
                 accelerator.backward(loss)
+                emit_after_backward_event(
+                    route="flux-finetune",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    backward_loss=current_loss,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "fused_backward_pass": bool(args.fused_backward_pass),
+                        "blockwise_fused_optimizers": bool(args.blockwise_fused_optimizers),
+                    },
+                    source="flux_train",
+                )
 
                 if not (args.fused_backward_pass or args.blockwise_fused_optimizers):
                     if accelerator.sync_gradients and args.max_grad_norm != 0.0:
@@ -689,15 +749,85 @@ def train(args):
                             params_to_clip.extend(m.parameters())
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                    emit_before_optimizer_step_event(
+                        route="flux-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "blockwise_fused_optimizers": bool(args.blockwise_fused_optimizers),
+                        },
+                        source="flux_train",
+                    )
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
+                    emit_after_optimizer_step_event(
+                        route="flux-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        optimizer_step_executed=True,
+                        scheduler_step_executed=True,
+                        zero_grad_called=True,
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "blockwise_fused_optimizers": bool(args.blockwise_fused_optimizers),
+                        },
+                        source="flux_train",
+                    )
                 else:
                     # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
+                    emit_before_optimizer_step_event(
+                        route="flux-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "blockwise_fused_optimizers": bool(args.blockwise_fused_optimizers),
+                        },
+                        source="flux_train",
+                    )
                     lr_scheduler.step()
                     if args.blockwise_fused_optimizers:
                         for i in range(1, len(optimizers)):
                             lr_schedulers[i].step()
+                    emit_after_optimizer_step_event(
+                        route="flux-finetune",
+                        training_type=getattr(args, "model_train_type", ""),
+                        global_step=global_step,
+                        current_loss=current_loss,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                        sync_gradients=bool(accelerator.sync_gradients),
+                        max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                        optimizer_step_executed=bool(accelerator.sync_gradients),
+                        scheduler_step_executed=True,
+                        zero_grad_called=bool(accelerator.sync_gradients),
+                        extra={
+                            "fused_backward_pass": bool(args.fused_backward_pass),
+                            "blockwise_fused_optimizers": bool(args.blockwise_fused_optimizers),
+                        },
+                        source="flux_train",
+                    )
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -725,7 +855,6 @@ def train(args):
                         )
                 optimizer_train_fn()
 
-            current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
                 train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)

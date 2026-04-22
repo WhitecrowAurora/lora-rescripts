@@ -9,6 +9,13 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file as save_safetensors_file
 from tqdm import tqdm
+from mikazuki.plugins.training_hooks import (
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 
 
 def set_seed(seed: int) -> None:
@@ -77,6 +84,11 @@ def run_epoch(
     cls_loss_weight: float = 1.0,
     cls_pos_weight: float | None = None,
     target_mask: torch.Tensor | None = None,
+    route: str = "aesthetic-scorer",
+    training_type: str = "aesthetic-scorer",
+    source: str = "aesthetic_fusion_train_utils",
+    global_step_offset: int = 0,
+    epoch_index: int = 0,
 ) -> dict:
     if train:
         fusion_head.train()
@@ -102,7 +114,8 @@ def run_epoch(
     if cls_pos_weight is not None:
         pos_weight_tensor = torch.tensor(float(cls_pos_weight), dtype=torch.float32, device=device)
 
-    for images, targets, cls_targets, score_mask, cls_mask, _ in tqdm(loader, leave=False):
+    train_steps = 0
+    for step_index, (images, targets, cls_targets, score_mask, cls_mask, _) in enumerate(tqdm(loader, leave=False), start=1):
         targets = targets.to(device)
         target_dim = max(target_dim, int(targets.shape[-1]))
         cls_targets = cls_targets.to(device)
@@ -112,6 +125,26 @@ def run_epoch(
         cls_mask = cls_mask.to(device)
         if target_mask is not None:
             score_mask = score_mask * target_mask.view(1, -1)
+
+        current_global_step = int(global_step_offset) + step_index - 1
+        current_batch_size = int(targets.shape[0])
+        if train:
+            emit_before_forward_event(
+                route=route,
+                training_type=training_type,
+                global_step=current_global_step,
+                micro_batch_index=1,
+                micro_batch_count=1,
+                micro_batch_size=current_batch_size,
+                gradient_accumulation_steps=1,
+                sync_gradients=True,
+                extra={
+                    "epoch": int(epoch_index),
+                    "loss_name": str(loss_name),
+                    "cls_loss_weight": float(cls_loss_weight),
+                },
+                source=source,
+            )
 
         ctx_jtp = torch.no_grad() if getattr(jtp_extractor, "freeze", True) else nullcontext()
         ctx_waifu = torch.no_grad() if getattr(waifu_extractor, "freeze", True) else nullcontext()
@@ -154,9 +187,87 @@ def run_epoch(
 
         loss = score_loss + (float(cls_loss_weight) * cls_loss)
         if train:
+            current_loss = float(loss.detach().item())
+            emit_after_loss_event(
+                route=route,
+                training_type=training_type,
+                global_step=current_global_step,
+                micro_batch_index=1,
+                micro_batch_count=1,
+                micro_batch_size=current_batch_size,
+                loss_value=current_loss,
+                loss_scale=1.0,
+                weighted_loss=current_loss,
+                gradient_accumulation_steps=1,
+                sync_gradients=True,
+                extra={
+                    "epoch": int(epoch_index),
+                    "score_loss": float(score_loss.detach().item()),
+                    "cls_loss": float(cls_loss.detach().item()),
+                },
+                source=source,
+            )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            emit_after_backward_event(
+                route=route,
+                training_type=training_type,
+                global_step=current_global_step,
+                micro_batch_index=1,
+                micro_batch_count=1,
+                micro_batch_size=current_batch_size,
+                loss_value=current_loss,
+                loss_scale=1.0,
+                backward_loss=current_loss,
+                weighted_loss=current_loss,
+                gradient_accumulation_steps=1,
+                sync_gradients=True,
+                extra={
+                    "epoch": int(epoch_index),
+                    "score_loss": float(score_loss.detach().item()),
+                    "cls_loss": float(cls_loss.detach().item()),
+                },
+                source=source,
+            )
+            emit_before_optimizer_step_event(
+                route=route,
+                training_type=training_type,
+                global_step=current_global_step,
+                current_loss=current_loss,
+                optimizer=optimizer,
+                lr_scheduler=None,
+                gradient_accumulation_steps=1,
+                sync_gradients=True,
+                max_grad_norm=0.0,
+                extra={
+                    "epoch": int(epoch_index),
+                    "score_loss": float(score_loss.detach().item()),
+                    "cls_loss": float(cls_loss.detach().item()),
+                },
+                source=source,
+            )
             optimizer.step()
+            train_steps += 1
+            emit_after_optimizer_step_event(
+                route=route,
+                training_type=training_type,
+                global_step=current_global_step,
+                current_loss=current_loss,
+                optimizer=optimizer,
+                lr_scheduler=None,
+                gradient_accumulation_steps=1,
+                sync_gradients=True,
+                max_grad_norm=0.0,
+                optimizer_step_executed=True,
+                scheduler_step_executed=False,
+                zero_grad_called=False,
+                extra={
+                    "epoch": int(epoch_index),
+                    "score_loss": float(score_loss.detach().item()),
+                    "cls_loss": float(cls_loss.detach().item()),
+                },
+                source=source,
+            )
 
         batch_size = targets.shape[0]
         total_loss += float(loss.item()) * batch_size
@@ -214,6 +325,7 @@ def run_epoch(
         "per_dim_mae": per_dim_mae,
         "score_n": int(total_score_items),
         "cls_n": int(total_cls_items),
+        "steps": int(train_steps),
         **cls_stats,
     }
 

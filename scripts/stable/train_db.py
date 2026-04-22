@@ -39,6 +39,13 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 from library.utils import setup_logging, add_logging_arguments
+from mikazuki.plugins.training_hooks import (
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 import library.strategy_sd as strategy_sd
 
 setup_logging()
@@ -385,6 +392,20 @@ def train(args):
                 noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
                 # Predict the noise residual
+                emit_before_forward_event(
+                    route="sd-dreambooth",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "train_text_encoder": bool(train_text_encoder),
+                    },
+                    source="train_db",
+                )
                 with accelerator.autocast():
                     noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
@@ -413,6 +434,23 @@ def train(args):
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
                 current_loss = loss.detach().item()
+                emit_after_loss_event(
+                    route="sd-dreambooth",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "train_text_encoder": bool(train_text_encoder),
+                    },
+                    source="train_db",
+                )
                 if safeguard is not None:
                     safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
                     if safeguard_decision.reason:
@@ -424,6 +462,24 @@ def train(args):
                         continue
 
                 accelerator.backward(loss)
+                emit_after_backward_event(
+                    route="sd-dreambooth",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    micro_batch_index=1,
+                    micro_batch_count=1,
+                    micro_batch_size=int(latents.shape[0]),
+                    loss_value=current_loss,
+                    loss_scale=1.0,
+                    backward_loss=current_loss,
+                    weighted_loss=current_loss,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    extra={
+                        "train_text_encoder": bool(train_text_encoder),
+                    },
+                    source="train_db",
+                )
                 if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                     if train_text_encoder:
                         params_to_clip = itertools.chain(unet.parameters(), text_encoder.parameters())
@@ -431,9 +487,42 @@ def train(args):
                         params_to_clip = unet.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                emit_before_optimizer_step_event(
+                    route="sd-dreambooth",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    current_loss=current_loss,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                    extra={
+                        "train_text_encoder": bool(train_text_encoder),
+                    },
+                    source="train_db",
+                )
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+                emit_after_optimizer_step_event(
+                    route="sd-dreambooth",
+                    training_type=getattr(args, "model_train_type", ""),
+                    global_step=global_step,
+                    current_loss=current_loss,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                    sync_gradients=bool(accelerator.sync_gradients),
+                    max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                    optimizer_step_executed=True,
+                    scheduler_step_executed=True,
+                    zero_grad_called=True,
+                    extra={
+                        "train_text_encoder": bool(train_text_encoder),
+                    },
+                    source="train_db",
+                )
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:

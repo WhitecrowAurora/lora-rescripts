@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import math
@@ -13,6 +13,14 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from library.device_utils import clean_memory_on_device
+from mikazuki.plugins.training_hooks import (
+    apply_modify_loss_event,
+    emit_after_backward_event,
+    emit_after_loss_event,
+    emit_after_optimizer_step_event,
+    emit_before_forward_event,
+    emit_before_optimizer_step_event,
+)
 from lulynx.experimental_core import (
     PeakVramDiagnosticsRecorder,
     build_peak_vram_micro_batch_plan,
@@ -358,7 +366,27 @@ class NewbieCachedTrainer:
                             )
                             weighted_loss = 0.0
 
-                            for micro_batch, _sub_batch_size, loss_scale in iter_training_micro_batches(batch, micro_batch_plan):
+                            micro_batch_count = max(1, int(micro_batch_plan.split_count or 1))
+                            for micro_batch_index, (micro_batch, sub_batch_size, loss_scale) in enumerate(
+                                iter_training_micro_batches(batch, micro_batch_plan),
+                                start=1,
+                            ):
+                                emit_before_forward_event(
+                                    route='newbie',
+                                    training_type=getattr(self.config, 'model_train_type', ''),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    gradient_accumulation_steps=getattr(self.config, 'gradient_accumulation_steps', 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        'uses_lulynx_core': lulynx_core is not None,
+                                        'optimized_runtime': bool(use_optimized_runtime),
+                                        'block_swap_active': bool(is_swapping_blocks),
+                                    },
+                                    source='newbie_engine',
+                                )
                                 latents = micro_batch['latents'].to(accelerator.device, non_blocking=True)
                                 cap_feats = micro_batch['cap_feats'].to(accelerator.device, non_blocking=True)
                                 cap_mask = micro_batch['cap_mask'].to(accelerator.device, non_blocking=True)
@@ -377,7 +405,49 @@ class NewbieCachedTrainer:
                                 )
                                 loss = loss_dict['loss'].mean()
                                 peak_vram_diagnostics.capture('forward')
-                                weighted_loss += float(loss.detach().item()) * loss_scale
+                                raw_loss_value = float(loss.detach().item())
+                                emit_after_loss_event(
+                                    route='newbie',
+                                    training_type=getattr(self.config, 'model_train_type', ''),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    loss_value=raw_loss_value,
+                                    loss_scale=loss_scale,
+                                    weighted_loss=weighted_loss + (raw_loss_value * loss_scale),
+                                    gradient_accumulation_steps=getattr(self.config, 'gradient_accumulation_steps', 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        'uses_lulynx_core': lulynx_core is not None,
+                                        'optimized_runtime': bool(use_optimized_runtime),
+                                        'block_swap_active': bool(is_swapping_blocks),
+                                        'modify_loss_runtime_supported': True,
+                                    },
+                                    source='newbie_engine',
+                                )
+                                loss_mutation = apply_modify_loss_event(
+                                    loss=loss,
+                                    route='newbie',
+                                    training_type=getattr(self.config, 'model_train_type', ''),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    loss_value=raw_loss_value,
+                                    loss_scale=loss_scale,
+                                    gradient_accumulation_steps=getattr(self.config, 'gradient_accumulation_steps', 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        'uses_lulynx_core': lulynx_core is not None,
+                                        'optimized_runtime': bool(use_optimized_runtime),
+                                        'block_swap_active': bool(is_swapping_blocks),
+                                    },
+                                    source='newbie_engine',
+                                )
+                                loss = loss_mutation.loss
+                                loss_value = loss_mutation.final_loss_value
+                                weighted_loss += loss_value * loss_scale
                                 scaled_loss = loss * loss_scale
                                 if lulynx_core is not None:
                                     lulynx_core.backward(
@@ -390,15 +460,83 @@ class NewbieCachedTrainer:
                                 else:
                                     accelerator.backward(scaled_loss)
                                 peak_vram_diagnostics.capture('backward')
+                                emit_after_backward_event(
+                                    route='newbie',
+                                    training_type=getattr(self.config, 'model_train_type', ''),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    loss_value=loss_value,
+                                    loss_scale=loss_scale,
+                                    backward_loss=loss_value * float(loss_scale),
+                                    weighted_loss=weighted_loss,
+                                    gradient_accumulation_steps=getattr(self.config, 'gradient_accumulation_steps', 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        'uses_lulynx_core': lulynx_core is not None,
+                                        'optimized_runtime': bool(use_optimized_runtime),
+                                        'block_swap_active': bool(is_swapping_blocks),
+                                        'raw_loss': raw_loss_value,
+                                        'loss_modified': bool(loss_mutation.modified),
+                                        'loss_modifier_scale': float(loss_mutation.scale),
+                                        'loss_modifier_bias': float(loss_mutation.bias),
+                                        'modify_loss_exclusive_conflict': bool(loss_mutation.dispatch.get('exclusive_conflict')),
+                                        'modify_loss_error_count': len(loss_mutation.dispatch.get('errors') or []),
+                                        **(
+                                            {'loss_modifier_reason': loss_mutation.reason}
+                                            if loss_mutation.reason
+                                            else {}
+                                        ),
+                                    },
+                                    source='newbie_engine',
+                                )
                                 if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
                                     move_newbie_trainable_params_to_device(unwrapped_model, accelerator.device)
 
                             if accelerator.sync_gradients and getattr(self.config, 'max_grad_norm', 1.0) not in (0, 0.0, None):
                                 accelerator.clip_grad_norm_(model.parameters(), float(getattr(self.config, 'max_grad_norm', 1.0)))
+                            emit_before_optimizer_step_event(
+                                route='newbie',
+                                training_type=getattr(self.config, 'model_train_type', ''),
+                                global_step=global_step,
+                                current_loss=weighted_loss,
+                                optimizer=optimizer,
+                                lr_scheduler=scheduler,
+                                gradient_accumulation_steps=getattr(self.config, 'gradient_accumulation_steps', 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                max_grad_norm=getattr(self.config, 'max_grad_norm', 0.0),
+                                extra={
+                                    'uses_lulynx_core': lulynx_core is not None,
+                                    'optimized_runtime': bool(use_optimized_runtime),
+                                    'block_swap_active': bool(is_swapping_blocks),
+                                },
+                                source='newbie_engine',
+                            )
                             optimizer.step()
                             scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
                             peak_vram_diagnostics.capture('optimizer')
+                            emit_after_optimizer_step_event(
+                                route='newbie',
+                                training_type=getattr(self.config, 'model_train_type', ''),
+                                global_step=global_step,
+                                current_loss=weighted_loss,
+                                optimizer=optimizer,
+                                lr_scheduler=scheduler,
+                                gradient_accumulation_steps=getattr(self.config, 'gradient_accumulation_steps', 1),
+                                sync_gradients=bool(accelerator.sync_gradients),
+                                max_grad_norm=getattr(self.config, 'max_grad_norm', 0.0),
+                                optimizer_step_executed=True,
+                                scheduler_step_executed=True,
+                                zero_grad_called=True,
+                                extra={
+                                    'uses_lulynx_core': lulynx_core is not None,
+                                    'optimized_runtime': bool(use_optimized_runtime),
+                                    'block_swap_active': bool(is_swapping_blocks),
+                                },
+                                source='newbie_engine',
+                            )
                             current_loss = weighted_loss
                         break
                     except RuntimeError as exc:
