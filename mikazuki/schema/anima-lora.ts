@@ -209,6 +209,8 @@ Schema.intersect([
             text_encoder_batch_size: Schema.number().min(1).description("文本编码器缓存批量大小"),
             disable_mmap_load_safetensors: Schema.boolean().default(false).description("禁用 safetensors 的 mmap 加载"),
             blocks_to_swap: Schema.number().min(1).description("在 CPU/GPU 间交换的 Transformer block 数量，用于进一步省显存"),
+            experimental_attention_profile_enabled: Schema.boolean().default(false).description("步骤耗时窗口统计开关。默认关闭，仅在诊断训练速度/瓶颈时建议开启"),
+            experimental_attention_profile_window: Schema.number().min(1).default(50).description("步骤耗时窗口统计间隔（每 N 个优化步输出一次聚合耗时摘要）"),
             cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：梯度检查点时将部分张量卸载到 CPU"),
         }, ["xformers", "sdpa"])
     ).description("速度优化选项"),

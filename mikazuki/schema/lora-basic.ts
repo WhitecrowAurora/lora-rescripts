@@ -82,7 +82,10 @@ Schema.intersect([
         mixed_precision: Schema.union(["no", "fp16", "bf16"]).default("fp16").description("混合精度, RTX30系列以后也可以指定`bf16`"),
         no_half_vae: Schema.boolean().description("不使用半精度 VAE，当出现 NaN detected in latents 报错时使用"),
         xformers: Schema.boolean().default(true).description("启用 xformers"),
-        cache_latents: Schema.boolean().default(true).description("缓存图像 latent, 缓存 VAE 输出以减少 VRAM 使用")
+        cache_latents: Schema.boolean().default(true).description("缓存图像 latent, 缓存 VAE 输出以减少 VRAM 使用"),
+        latent_cache_disk_format: Schema.union(["safetensors", "npz"]).default("safetensors").description("latent 磁盘缓存格式。默认 safetensors；若已有旧缓存会自动兼容读取 npz"),
+        experimental_attention_profile_enabled: Schema.boolean().default(false).description("步骤耗时窗口统计开关。默认关闭，仅在诊断训练速度/瓶颈时建议开启"),
+        experimental_attention_profile_window: Schema.number().min(1).default(50).description("步骤耗时窗口统计间隔（每 N 个优化步输出一次聚合耗时摘要）")
     }).description("速度优化选项"),
 
     SHARED_SCHEMAS.THERMAL_MANAGEMENT,

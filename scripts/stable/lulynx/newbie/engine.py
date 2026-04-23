@@ -23,8 +23,11 @@ from mikazuki.plugins.training_hooks import (
 )
 from lulynx.experimental_core import (
     PeakVramDiagnosticsRecorder,
+    AutoVramProtectionController,
+    AutoVramProtectionRuntimeContext,
     build_peak_vram_micro_batch_plan,
     create_lulynx_core,
+    is_device_oom_error,
     iter_training_micro_batches,
     normalize_lulynx_args,
 )
@@ -126,8 +129,7 @@ class NewbieCachedTrainer:
 
     @staticmethod
     def _is_cuda_oom_error(exc: Exception) -> bool:
-        message = str(exc or '').lower()
-        return 'out of memory' in message or 'cuda error: out of memory' in message
+        return is_device_oom_error(exc)
 
     def train(self) -> NewbieTrainResult:
         lulynx_args = argparse.Namespace(
@@ -214,6 +216,8 @@ class NewbieCachedTrainer:
             accelerator.init_trackers('newbie_lora_train')
 
         unwrapped_model = accelerator.unwrap_model(model)
+        if use_optimized_runtime:
+            setattr(unwrapped_model, '_max_swappable_blocks', get_newbie_max_swappable_blocks(unwrapped_model))
         start_step = load_newbie_checkpoint(
             self.config.output_dir,
             unwrapped_model,
@@ -238,6 +242,31 @@ class NewbieCachedTrainer:
             self.config,
             route_label='newbie',
             device=accelerator.device,
+        )
+        runtime_flags = {
+            'use_optimized_runtime': bool(use_optimized_runtime),
+            'is_swapping_blocks': bool(is_swapping_blocks),
+        }
+
+        def _on_newbie_auto_vram_level_applied(_level) -> None:
+            nonlocal is_swapping_blocks
+            is_swapping_blocks = bool(
+                runtime_flags['use_optimized_runtime']
+                and int(getattr(self.config, 'blocks_to_swap', 0) or 0) > 0
+            )
+            runtime_flags['is_swapping_blocks'] = is_swapping_blocks
+            if adaptive_controller is not None:
+                adaptive_controller.current_blocks = int(getattr(self.config, 'blocks_to_swap', 0) or 0)
+
+        auto_vram_controller = AutoVramProtectionController(
+            self.config,
+            route_kind='newbie',
+            route_label='Newbie LoRA',
+            runtime=AutoVramProtectionRuntimeContext(
+                device=accelerator.device,
+                model=unwrapped_model if use_optimized_runtime else None,
+                on_level_applied=_on_newbie_auto_vram_level_applied,
+            ),
         )
 
         startup_guard_release_step = max(0, int(getattr(self.config, 'peak_vram_startup_guard_steps', 0) or 0))
@@ -351,8 +380,13 @@ class NewbieCachedTrainer:
                     break
                 batch_retry = 0
                 current_loss = last_loss
+                training_step_wall_seconds = 0.0
+                auto_vram_controller.begin_step(global_step + 1)
                 while True:
+                    use_optimized_runtime = bool(runtime_flags['use_optimized_runtime'])
+                    is_swapping_blocks = bool(runtime_flags['is_swapping_blocks'])
                     try:
+                        attempt_started_at = perf_counter()
                         if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
                             unwrapped_model.prepare_block_swap_before_forward()
 
@@ -538,8 +572,16 @@ class NewbieCachedTrainer:
                                 source='newbie_engine',
                             )
                             current_loss = weighted_loss
+                            training_step_wall_seconds = perf_counter() - attempt_started_at
                         break
                     except RuntimeError as exc:
+                        if auto_vram_controller.maybe_retry_after_oom(exc, retry_count=batch_retry, step=global_step + 1):
+                            optimizer.zero_grad(set_to_none=True)
+                            clean_memory_on_device(accelerator.device)
+                            batch_retry += 1
+                            continue
+                        if auto_vram_controller.enabled:
+                            raise
                         if (
                             not use_optimized_runtime
                             or not self._is_cuda_oom_error(exc)
@@ -567,7 +609,8 @@ class NewbieCachedTrainer:
                                     f'Original reconfigure error: {reconfigure_exc}'
                                 ) from reconfigure_exc
                             self.config.blocks_to_swap = next_blocks
-                            if adaptive_controller is not None:
+                            runtime_flags['is_swapping_blocks'] = next_blocks > 0
+                            if adaptive_controller is not None and not auto_vram_controller.is_adjusted():
                                 adaptive_controller.current_blocks = next_blocks
                             if accelerator.is_main_process:
                                 print(
@@ -586,6 +629,7 @@ class NewbieCachedTrainer:
                                 self.config.blocks_to_swap = 0
                                 if adaptive_controller is not None:
                                     adaptive_controller.current_blocks = 0
+                            runtime_flags['is_swapping_blocks'] = False
                             if accelerator.is_main_process:
                                 print('[newbie-train] safe fallback retried current batch with cpu_offload_checkpointing enabled.')
                             batch_retry += 1
@@ -615,7 +659,16 @@ class NewbieCachedTrainer:
                             lr=f"{float(current_lr):.2e}",
                             epoch=f"{epoch + 1}/{max_train_epochs}",
                         )
-                    if not startup_guard_release_done and global_step >= startup_guard_release_step:
+                    auto_vram_controller.observe_step_success(
+                        step=global_step,
+                        step_wall_seconds=training_step_wall_seconds,
+                    )
+                    current_auto_level = int(getattr(self.config, '_peak_vram_auto_protection_current_level', 0) or 0)
+                    if (
+                        not startup_guard_release_done
+                        and current_auto_level <= 0
+                        and global_step >= startup_guard_release_step
+                    ):
                         current_blocks = int(getattr(unwrapped_model, 'blocks_to_swap', 0) or 0)
                         if startup_guard_release_blocks != current_blocks:
                             try:
@@ -636,7 +689,7 @@ class NewbieCachedTrainer:
                                     )
                         startup_guard_release_done = True
 
-                    if adaptive_controller is not None:
+                    if adaptive_controller is not None and not auto_vram_controller.is_adjusted():
                         adaptive_note = adaptive_controller.on_optimizer_step(
                             step=global_step,
                             model=unwrapped_model,
@@ -667,6 +720,8 @@ class NewbieCachedTrainer:
                         _save_periodic_artifacts(global_step, f"every_{save_every_steps}_steps", epoch)
                     if stop_training_requested:
                         break
+                else:
+                    auto_vram_controller.end_step()
 
             resume_micro_step = 0
             completed_epochs = epoch + 1

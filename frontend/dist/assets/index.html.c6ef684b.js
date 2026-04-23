@@ -25,9 +25,9 @@ const C = s(
   null,
   -1
 );
-const E = s("p", null, "v1.4.8 Beta38", -1);
+const E = s("p", null, "v1.4.9 Beta39", -1);
 const h = r(
-  `<p align="center"><strong>Fork from</strong> 秋葉 <a href="https://github.com/Akegarasu/lora-scripts" target="_blank" rel="noopener noreferrer">aaaki/lora-scripts</a></p><p align="center"><strong>Modify By</strong> <a href="https://github.com/WhitecrowAurora/lora-rescripts" target="_blank" rel="noopener noreferrer">Lulynx</a></p><h3 id="更新日志" tabindex="-1"><a class="header-anchor" href="#更新日志" aria-hidden="true">#</a> 更新日志</h3><h4 id="v1-4-8-beta38" tabindex="-1"><a class="header-anchor" href="#v1-4-8-beta38" aria-hidden="true">#</a> v1.4.8 Beta38</h4><ul><li>latent 磁盘缓存新增 <code>safetensors</code> 支持</li><li>补齐新 UI 所需的后端 API</li><li>修复 Anima 在 SageAttention 下使用梯度检查点时的训练崩溃问题</li><li>改进 Anima / TLoRA 运行时兼容性</li><li>改进 FlashAttention 运行时安装稳健性</li></ul>`,
+  `<p align="center"><strong>Fork from</strong> 秋葉 <a href="https://github.com/Akegarasu/lora-scripts" target="_blank" rel="noopener noreferrer">aaaki/lora-scripts</a></p><p align="center"><strong>Modify By</strong> <a href="https://github.com/WhitecrowAurora/lora-rescripts" target="_blank" rel="noopener noreferrer">Lulynx</a></p><h3 id="更新日志" tabindex="-1"><a class="header-anchor" href="#更新日志" aria-hidden="true">#</a> 更新日志</h3><h4 id="v1-4-9-beta39" tabindex="-1"><a class="header-anchor" href="#v1-4-9-beta39" aria-hidden="true">#</a> v1.4.9 Beta39</h4><ul><li>新增步骤耗时窗口统计开关（默认关闭）</li><li>新增统计窗口步数配置（仅在开启后显示）</li><li>补齐 SDXL / Anima / Newbie 的后端速度优化配置入口</li><li>修复新 UI 中统计项显示联动问题</li><li>统一新旧 UI 的统计开关行为</li><li>同步更新 WebUI 版本与首页更新日志</li></ul>`,
   5
 );
 

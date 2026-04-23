@@ -189,6 +189,8 @@ Schema.intersect([
             flashattn: Schema.boolean().default(false).description("启用 FlashAttention 2（实验性，需要 FlashAttention 运行时）"),
             cross_attn_fused_kv: Schema.boolean().default(false).description("启用 SDXL cross-attn 的 fused K/V projection 实验开关"),
             sdpa: Schema.boolean().default(true).description("启用 sdpa"),
+            experimental_attention_profile_enabled: Schema.boolean().default(false).description("步骤耗时窗口统计开关。默认关闭，仅在诊断训练速度/瓶颈时建议开启"),
+            experimental_attention_profile_window: Schema.number().min(1).default(50).description("步骤耗时窗口统计间隔（每 N 个优化步输出一次聚合耗时摘要）"),
             cache_text_encoder_outputs: Schema.boolean().default(true).description("缓存文本编码器的输出，减少显存使用。使用时需要关闭 shuffle_caption"),
             cache_text_encoder_outputs_to_disk: Schema.boolean().default(false).description("缓存文本编码器的输出到磁盘"),
         })

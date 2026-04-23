@@ -150,7 +150,10 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         release_config = getattr(args, "_peak_vram_startup_guard_release_config", None)
         release_step = int(getattr(args, "peak_vram_startup_guard_steps", 0) or 0)
         current_step = int(getattr(args, "_peak_vram_runtime_global_step", 0) or 0)
+        current_auto_level = int(getattr(args, "_peak_vram_auto_protection_current_level", 0) or 0)
         if not isinstance(release_config, dict) or release_step <= 0 or current_step < release_step:
+            return
+        if current_auto_level > 0:
             return
 
         target_unet = accelerator.unwrap_model(unet)

@@ -279,6 +279,9 @@ class SdxlTextEncodingStrategy(TextEncodingStrategy):
 
         weights_list = [weights.to(hidden_states1.device) for weights in weights_list]
 
+        previous_mean_1 = hidden_states1.float().mean(dim=[-2, -1]).to(hidden_states1.dtype)
+        previous_mean_2 = hidden_states2.float().mean(dim=[-2, -1]).to(hidden_states2.dtype)
+
         # apply weights
         if weights_list[0].shape[1] == 1:  # no max_token_length
             # weights: ((b, 1, 77), (b, 1, 77)), hidden_states: (b, 77, 768), (b, 77, 768)
@@ -291,6 +294,12 @@ class SdxlTextEncodingStrategy(TextEncodingStrategy):
                     hidden_states[:, i * 75 + 1 : i * 75 + 76] = hidden_states[:, i * 75 + 1 : i * 75 + 76] * weight[
                         :, i, 1:-1
                     ].unsqueeze(-1)
+
+        current_mean_1 = hidden_states1.float().mean(dim=[-2, -1]).to(hidden_states1.dtype)
+        current_mean_2 = hidden_states2.float().mean(dim=[-2, -1]).to(hidden_states2.dtype)
+
+        hidden_states1 = hidden_states1 * (previous_mean_1 / current_mean_1).unsqueeze(-1).unsqueeze(-1)
+        hidden_states2 = hidden_states2 * (previous_mean_2 / current_mean_2).unsqueeze(-1).unsqueeze(-1)
 
         return [hidden_states1, hidden_states2, pool2]
 

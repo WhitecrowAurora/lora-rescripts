@@ -205,6 +205,7 @@ def _apply_peak_vram_control_to_newbie_config(
     raw_micro_batch_size = _lookup_config_value(raw, "peak_vram_micro_batch_size", default=None)
     raw_diagnostics_enabled = _lookup_config_value(raw, "peak_vram_diagnostics_enabled", default=None)
     raw_diagnostics_interval = _lookup_config_value(raw, "peak_vram_diagnostics_interval", default=None)
+    raw_auto_protection_enabled = _lookup_config_value(raw, "peak_vram_auto_protection_enabled", default=None)
 
     explicit_peak_vram_child_requests = {
         "target_effective_batch": _value_is_present(raw_target_effective_batch)
@@ -216,6 +217,7 @@ def _apply_peak_vram_control_to_newbie_config(
         ),
         "micro_batch": _parse_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size),
         "diagnostics": _parse_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval),
+        "auto_protection": _parse_bool(raw_auto_protection_enabled, False),
     }
     if explicit_peak_vram_control_enabled is False and any(explicit_peak_vram_child_requests.values()):
         warnings.append("显存峰值控制已显式关闭，已忽略其子项设置。")
@@ -227,6 +229,7 @@ def _apply_peak_vram_control_to_newbie_config(
         raw_micro_batch_size = None
         raw_diagnostics_enabled = None
         raw_diagnostics_interval = None
+        raw_auto_protection_enabled = None
 
     has_target_request = _value_is_present(raw_target_effective_batch) and _parse_int(raw_target_effective_batch, 0, minimum=0) > 0
     has_guard_request = (
@@ -243,9 +246,10 @@ def _apply_peak_vram_control_to_newbie_config(
 
     has_micro_batch_request = _parse_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size)
     has_diagnostics_request = _parse_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
+    has_auto_protection_request = _parse_bool(raw_auto_protection_enabled, False)
     if explicit_peak_vram_control_enabled is None:
         config.peak_vram_control_enabled = bool(
-            config.peak_vram_control_enabled or has_micro_batch_request or has_diagnostics_request
+            config.peak_vram_control_enabled or has_micro_batch_request or has_diagnostics_request or has_auto_protection_request
         )
     config.peak_vram_micro_batch_enabled = config.peak_vram_control_enabled and (
         _parse_bool(raw_micro_batch_enabled, False)
@@ -256,6 +260,7 @@ def _apply_peak_vram_control_to_newbie_config(
         _parse_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
     )
     config.peak_vram_diagnostics_interval = _parse_int(raw_diagnostics_interval, 25, minimum=1)
+    config.peak_vram_auto_protection_enabled = config.peak_vram_control_enabled and _parse_bool(raw_auto_protection_enabled, False)
 
     config.peak_vram_target_effective_batch = _parse_int(raw_target_effective_batch, 0, minimum=0)
     if config.peak_vram_target_effective_batch > 0:
@@ -382,6 +387,7 @@ class NewbieRuntimeConfig:
     peak_vram_micro_batch_size: int = 1
     peak_vram_diagnostics_enabled: bool = False
     peak_vram_diagnostics_interval: int = 25
+    peak_vram_auto_protection_enabled: bool = False
 
     @property
     def model_resolution(self) -> int:
@@ -419,7 +425,8 @@ class NewbieRuntimeConfig:
                 f"(realized={self.peak_vram_effective_batch_realized or self.effective_batch_size}), "
                 f"startup_guard={guard_label}, "
                 f"micro_batch={(self.peak_vram_micro_batch_size if self.peak_vram_micro_batch_enabled else 'off')}, "
-                f"diagnostics={('every_' + str(self.peak_vram_diagnostics_interval) + '_steps') if self.peak_vram_diagnostics_enabled else 'off'}"
+                f"diagnostics={('every_' + str(self.peak_vram_diagnostics_interval) + '_steps') if self.peak_vram_diagnostics_enabled else 'off'}, "
+                f"auto_protection={'on' if self.peak_vram_auto_protection_enabled else 'off'}"
             )
         lines.extend(
             [

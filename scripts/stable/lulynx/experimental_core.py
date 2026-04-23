@@ -5,11 +5,14 @@ import importlib
 import json
 import logging
 import math
+import random
 import re
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 
 from lulynx.lisa import LulynxLisaScheduler
@@ -158,6 +161,11 @@ def _get_device_memory_stats(device: Optional[torch.device]) -> Optional[Dict[st
         "allocated_ratio": allocated / total,
         "max_reserved_ratio": max_reserved / total,
     }
+
+
+def is_device_oom_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return "out of memory" in message or "cuda error: out of memory" in message
 
 
 def _sync_scheduler_lrs(optimizer, lr_scheduler) -> None:
@@ -328,6 +336,7 @@ def add_lulynx_experimental_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--peak_vram_micro_batch_size", type=int, default=None)
     group.add_argument("--peak_vram_diagnostics_enabled", action="store_true", default=None)
     group.add_argument("--peak_vram_diagnostics_interval", type=int, default=None)
+    group.add_argument("--peak_vram_auto_protection_enabled", action="store_true", default=None)
 
     group.add_argument("--enable_block_weights", action="store_true", default=None)
     group.add_argument("--down_lr_weight", type=str, default=None)
@@ -480,6 +489,7 @@ def _apply_peak_vram_control(args: argparse.Namespace, route_label: str, route_k
     raw_micro_batch_size = getattr(args, "peak_vram_micro_batch_size", None)
     raw_diagnostics_enabled = getattr(args, "peak_vram_diagnostics_enabled", None)
     raw_diagnostics_interval = getattr(args, "peak_vram_diagnostics_interval", None)
+    raw_auto_protection_enabled = getattr(args, "peak_vram_auto_protection_enabled", None)
 
     explicit_peak_vram_child_requests = {
         "target_effective_batch": _value_is_present(raw_target_effective_batch) and _to_int(raw_target_effective_batch, 0) > 0,
@@ -490,6 +500,7 @@ def _apply_peak_vram_control(args: argparse.Namespace, route_label: str, route_k
         ),
         "micro_batch": _to_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size),
         "diagnostics": _to_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval),
+        "auto_protection": _to_bool(raw_auto_protection_enabled, False),
     }
     if explicit_peak_vram_control_enabled is False and any(explicit_peak_vram_child_requests.values()):
         logger.info(
@@ -504,6 +515,7 @@ def _apply_peak_vram_control(args: argparse.Namespace, route_label: str, route_k
         raw_micro_batch_size = None
         raw_diagnostics_enabled = None
         raw_diagnostics_interval = None
+        raw_auto_protection_enabled = None
 
     has_target_request = _value_is_present(raw_target_effective_batch) and _to_int(raw_target_effective_batch, 0) > 0
     has_guard_request = (
@@ -535,8 +547,14 @@ def _apply_peak_vram_control(args: argparse.Namespace, route_label: str, route_k
 
     has_micro_batch_request = _to_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size)
     has_diagnostics_request = _to_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
+    has_auto_protection_request = _to_bool(raw_auto_protection_enabled, False)
     if explicit_peak_vram_control_enabled is None:
-        args.peak_vram_control_enabled = bool(args.peak_vram_control_enabled or has_micro_batch_request or has_diagnostics_request)
+        args.peak_vram_control_enabled = bool(
+            args.peak_vram_control_enabled
+            or has_micro_batch_request
+            or has_diagnostics_request
+            or has_auto_protection_request
+        )
     args.peak_vram_micro_batch_enabled = args.peak_vram_control_enabled and (
         _to_bool(raw_micro_batch_enabled, False)
         or (_value_is_present(raw_micro_batch_size) and _to_int(raw_micro_batch_size, 0) > 0)
@@ -546,6 +564,7 @@ def _apply_peak_vram_control(args: argparse.Namespace, route_label: str, route_k
         _to_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
     )
     args.peak_vram_diagnostics_interval = max(1, _to_int(raw_diagnostics_interval, 25))
+    args.peak_vram_auto_protection_enabled = args.peak_vram_control_enabled and _to_bool(raw_auto_protection_enabled, False)
 
     args.peak_vram_startup_guard_enabled = args.peak_vram_control_enabled and _to_bool(raw_startup_guard_enabled, False)
     requested_mode = str(raw_startup_guard_mode or "auto").strip().lower() or "auto"
@@ -633,7 +652,476 @@ def _apply_peak_vram_control(args: argparse.Namespace, route_label: str, route_k
                 if args.peak_vram_diagnostics_enabled
                 else ", diagnostics=off"
             )
+            + (", auto_protection=on" if args.peak_vram_auto_protection_enabled else ", auto_protection=off")
         )
+
+
+@dataclass
+class TrainingStepRngSnapshot:
+    python_state: Any
+    numpy_state: Any
+    torch_state: torch.Tensor
+    cuda_states: Optional[List[torch.Tensor]] = None
+    xpu_states: Optional[List[torch.Tensor]] = None
+
+
+@dataclass
+class AutoVramProtectionRuntimeContext:
+    device: Optional[torch.device]
+    model: Any = None
+    on_level_applied: Any = None
+
+
+@dataclass
+class AutoVramProtectionLevel:
+    label: str
+    micro_batch_enabled: bool
+    micro_batch_size: int
+    sdxl_fixed_block_swap: Optional[Dict[str, Any]] = None
+    blocks_to_swap: Optional[int] = None
+    cpu_offload_checkpointing: Optional[bool] = None
+
+
+def _capture_training_step_rng_snapshot(device: Optional[torch.device]) -> TrainingStepRngSnapshot:
+    cuda_states = None
+    xpu_states = None
+    if device is not None and device.type == "cuda" and torch.cuda.is_available():
+        cuda_states = [state.clone() for state in torch.cuda.get_rng_state_all()]
+    elif device is not None and device.type == "xpu" and hasattr(torch, "xpu") and torch.xpu.is_available():
+        xpu_states = [state.clone() for state in torch.xpu.get_rng_state_all()]
+    return TrainingStepRngSnapshot(
+        python_state=random.getstate(),
+        numpy_state=np.random.get_state(),
+        torch_state=torch.get_rng_state().clone(),
+        cuda_states=cuda_states,
+        xpu_states=xpu_states,
+    )
+
+
+def _restore_training_step_rng_snapshot(device: Optional[torch.device], snapshot: Optional[TrainingStepRngSnapshot]) -> None:
+    if snapshot is None:
+        return
+    random.setstate(snapshot.python_state)
+    np.random.set_state(snapshot.numpy_state)
+    torch.set_rng_state(snapshot.torch_state)
+    if device is not None and device.type == "cuda" and torch.cuda.is_available() and snapshot.cuda_states is not None:
+        torch.cuda.set_rng_state_all(snapshot.cuda_states)
+    elif device is not None and device.type == "xpu" and hasattr(torch, "xpu") and torch.xpu.is_available() and snapshot.xpu_states is not None:
+        torch.xpu.set_rng_state_all(snapshot.xpu_states)
+
+
+def _resolve_micro_batch_runtime_settings(config_or_args: Any) -> tuple[int, bool, int]:
+    train_batch_size = max(1, _to_int(getattr(config_or_args, "train_batch_size", None), 1))
+    micro_batch_enabled = _to_bool(getattr(config_or_args, "peak_vram_micro_batch_enabled", None), False)
+    requested_micro_batch_size = max(1, _to_int(getattr(config_or_args, "peak_vram_micro_batch_size", None), train_batch_size))
+    effective_micro_batch_size = min(train_batch_size, requested_micro_batch_size) if micro_batch_enabled else train_batch_size
+    return train_batch_size, micro_batch_enabled, effective_micro_batch_size
+
+
+def _build_auto_micro_batch_candidates(base_micro_batch_size: int) -> List[int]:
+    candidates: List[int] = []
+    for divisor in (2, 3, 4):
+        candidate = max(1, int(math.ceil(float(base_micro_batch_size) / float(divisor))))
+        if candidate < base_micro_batch_size and candidate not in candidates:
+            candidates.append(candidate)
+    if base_micro_batch_size > 1 and 1 not in candidates:
+        candidates.append(1)
+    return candidates
+
+
+def _auto_vram_level_signature(level: AutoVramProtectionLevel) -> tuple[Any, ...]:
+    swap = level.sdxl_fixed_block_swap or {}
+    return (
+        bool(level.micro_batch_enabled),
+        int(level.micro_batch_size),
+        None if level.blocks_to_swap is None else int(level.blocks_to_swap),
+        None if level.cpu_offload_checkpointing is None else bool(level.cpu_offload_checkpointing),
+        bool(swap.get("enabled")) if swap else None,
+        bool(swap.get("swap_input_blocks")) if swap else None,
+        bool(swap.get("swap_middle_block")) if swap else None,
+        bool(swap.get("swap_output_blocks")) if swap else None,
+        bool(swap.get("offload_after_backward")) if swap else None,
+        None if not swap else round(float(swap.get("vram_threshold_ratio", 0.0) or 0.0), 6),
+    )
+
+
+def _append_auto_vram_level(levels: List[AutoVramProtectionLevel], level: AutoVramProtectionLevel) -> None:
+    signature = _auto_vram_level_signature(level)
+    if any(_auto_vram_level_signature(existing) == signature for existing in levels):
+        return
+    levels.append(level)
+
+
+def _build_auto_vram_protection_levels(
+    config_or_args: Any,
+    *,
+    route_kind: str,
+    runtime: Optional[AutoVramProtectionRuntimeContext] = None,
+) -> List[AutoVramProtectionLevel]:
+    train_batch_size, base_micro_batch_enabled, base_micro_batch_size = _resolve_micro_batch_runtime_settings(config_or_args)
+    levels: List[AutoVramProtectionLevel] = [
+        AutoVramProtectionLevel(
+            label="baseline",
+            micro_batch_enabled=base_micro_batch_enabled,
+            micro_batch_size=base_micro_batch_size,
+            sdxl_fixed_block_swap=_capture_sdxl_fixed_block_swap_config(config_or_args) if route_kind == "sdxl" else None,
+            blocks_to_swap=max(0, _to_int(getattr(config_or_args, "blocks_to_swap", None), 0))
+            if route_kind in {"anima", "newbie"}
+            else None,
+            cpu_offload_checkpointing=_to_bool(getattr(config_or_args, "cpu_offload_checkpointing", None), False)
+            if route_kind in {"anima", "newbie"}
+            else None,
+        )
+    ]
+
+    for candidate_size in _build_auto_micro_batch_candidates(base_micro_batch_size):
+        _append_auto_vram_level(
+            levels,
+            AutoVramProtectionLevel(
+                label=f"micro_batch={candidate_size}",
+                micro_batch_enabled=True,
+                micro_batch_size=candidate_size,
+                sdxl_fixed_block_swap=dict(levels[-1].sdxl_fixed_block_swap or {}) if route_kind == "sdxl" else None,
+                blocks_to_swap=levels[-1].blocks_to_swap if route_kind in {"anima", "newbie"} else None,
+                cpu_offload_checkpointing=levels[-1].cpu_offload_checkpointing if route_kind in {"anima", "newbie"} else None,
+            ),
+        )
+
+    strictest_micro_batch_level = levels[-1]
+
+    if route_kind == "sdxl":
+        baseline_swap = dict(strictest_micro_batch_level.sdxl_fixed_block_swap or _capture_sdxl_fixed_block_swap_config(config_or_args))
+        balanced_swap = dict(baseline_swap)
+        balanced_swap["enabled"] = True
+        balanced_swap["swap_middle_block"] = True
+        balanced_swap["swap_output_blocks"] = True
+        balanced_swap["offload_after_backward"] = True
+        if not baseline_swap.get("enabled"):
+            balanced_swap["vram_threshold_ratio"] = 0.70
+        else:
+            balanced_swap["vram_threshold_ratio"] = min(
+                float(baseline_swap.get("vram_threshold_ratio", 0.70) or 0.70),
+                0.70,
+            )
+        _append_auto_vram_level(
+            levels,
+            AutoVramProtectionLevel(
+                label=f"{strictest_micro_batch_level.label}+swap=middle/output",
+                micro_batch_enabled=strictest_micro_batch_level.micro_batch_enabled,
+                micro_batch_size=strictest_micro_batch_level.micro_batch_size,
+                sdxl_fixed_block_swap=balanced_swap,
+            ),
+        )
+        aggressive_swap = dict(balanced_swap)
+        aggressive_swap["swap_input_blocks"] = True
+        aggressive_swap["vram_threshold_ratio"] = 0.0
+        _append_auto_vram_level(
+            levels,
+            AutoVramProtectionLevel(
+                label=f"{strictest_micro_batch_level.label}+swap=input/middle/output",
+                micro_batch_enabled=strictest_micro_batch_level.micro_batch_enabled,
+                micro_batch_size=strictest_micro_batch_level.micro_batch_size,
+                sdxl_fixed_block_swap=aggressive_swap,
+            ),
+        )
+    elif route_kind == "anima":
+        base_blocks = max(0, _to_int(getattr(config_or_args, "blocks_to_swap", None), 0))
+        max_blocks = base_blocks
+        if runtime is not None and runtime.model is not None:
+            max_blocks = max(max_blocks, max(0, int(getattr(runtime.model, "num_blocks", 0) or 0) - 2))
+        for target_blocks in (
+            max(base_blocks, min(4, max_blocks)),
+            max(base_blocks, min(6, max_blocks)),
+        ):
+            if target_blocks <= base_blocks or target_blocks <= 0:
+                continue
+            _append_auto_vram_level(
+                levels,
+                AutoVramProtectionLevel(
+                    label=f"{strictest_micro_batch_level.label}+blocks_to_swap={target_blocks}",
+                    micro_batch_enabled=strictest_micro_batch_level.micro_batch_enabled,
+                    micro_batch_size=strictest_micro_batch_level.micro_batch_size,
+                    blocks_to_swap=target_blocks,
+                    cpu_offload_checkpointing=_to_bool(getattr(config_or_args, "cpu_offload_checkpointing", None), False),
+                ),
+            )
+        can_enable_cpu_offload = (
+            _to_bool(getattr(config_or_args, "gradient_checkpointing", None), False)
+            and not _to_bool(getattr(config_or_args, "cpu_offload_checkpointing", None), False)
+            and not _to_bool(getattr(config_or_args, "unsloth_offload_checkpointing", None), False)
+        )
+        if can_enable_cpu_offload:
+            _append_auto_vram_level(
+                levels,
+                AutoVramProtectionLevel(
+                    label=f"{strictest_micro_batch_level.label}+cpu_offload_checkpointing",
+                    micro_batch_enabled=strictest_micro_batch_level.micro_batch_enabled,
+                    micro_batch_size=strictest_micro_batch_level.micro_batch_size,
+                    blocks_to_swap=0,
+                    cpu_offload_checkpointing=True,
+                ),
+            )
+    elif route_kind == "newbie":
+        supports_block_swap = bool(runtime is not None and runtime.model is not None and hasattr(runtime.model, "reconfigure_block_swap"))
+        supports_cpu_offload = bool(runtime is not None and runtime.model is not None and hasattr(runtime.model, "enable_gradient_checkpointing"))
+        base_blocks = max(0, _to_int(getattr(config_or_args, "blocks_to_swap", None), 0))
+        max_blocks = base_blocks
+        if supports_block_swap and runtime is not None and runtime.model is not None:
+            max_blocks = max(max_blocks, _to_int(getattr(runtime.model, "_max_swappable_blocks", None), base_blocks))
+        current_blocks = base_blocks
+        while supports_block_swap and max_blocks > 0:
+            next_blocks = min(max_blocks, max(current_blocks + 2, 2))
+            if next_blocks <= current_blocks:
+                break
+            _append_auto_vram_level(
+                levels,
+                AutoVramProtectionLevel(
+                    label=f"{strictest_micro_batch_level.label}+blocks_to_swap={next_blocks}",
+                    micro_batch_enabled=strictest_micro_batch_level.micro_batch_enabled,
+                    micro_batch_size=strictest_micro_batch_level.micro_batch_size,
+                    blocks_to_swap=next_blocks,
+                    cpu_offload_checkpointing=_to_bool(getattr(config_or_args, "cpu_offload_checkpointing", None), False),
+                ),
+            )
+            current_blocks = next_blocks
+            if current_blocks >= max_blocks:
+                break
+        if supports_cpu_offload and not _to_bool(getattr(config_or_args, "cpu_offload_checkpointing", None), False):
+            _append_auto_vram_level(
+                levels,
+                AutoVramProtectionLevel(
+                    label=f"{strictest_micro_batch_level.label}+cpu_offload_checkpointing",
+                    micro_batch_enabled=strictest_micro_batch_level.micro_batch_enabled,
+                    micro_batch_size=strictest_micro_batch_level.micro_batch_size,
+                    blocks_to_swap=0,
+                    cpu_offload_checkpointing=True,
+                ),
+            )
+    elif train_batch_size > 1:
+        _append_auto_vram_level(
+            levels,
+            AutoVramProtectionLevel(
+                label=f"micro_batch={strictest_micro_batch_level.micro_batch_size}",
+                micro_batch_enabled=strictest_micro_batch_level.micro_batch_enabled,
+                micro_batch_size=strictest_micro_batch_level.micro_batch_size,
+            ),
+        )
+
+    return levels
+
+
+class AutoVramProtectionController:
+    def __init__(
+        self,
+        config_or_args: Any,
+        *,
+        route_kind: str,
+        route_label: str,
+        runtime: Optional[AutoVramProtectionRuntimeContext] = None,
+    ) -> None:
+        self.config_or_args = config_or_args
+        self.route_kind = route_kind
+        self.route_label = route_label
+        self.runtime = runtime or AutoVramProtectionRuntimeContext(device=None)
+        self.device = self.runtime.device
+        self._baseline_gradient_checkpointing = _to_bool(getattr(config_or_args, "gradient_checkpointing", None), False)
+        self.enabled = bool(
+            _to_bool(getattr(config_or_args, "peak_vram_auto_protection_enabled", None), False)
+            and _to_bool(getattr(config_or_args, "peak_vram_control_enabled", None), False)
+        )
+        self.max_retry_count = 3
+        self.soft_trigger_count = 2
+        self.soft_slowdown_ratio = 2.5
+        self.soft_high_reserved_ratio = 0.94
+        self.restore_reserved_ratio = 0.88
+        self.restore_steps = 30
+        self._active_step: Optional[int] = None
+        self._active_step_rng: Optional[TrainingStepRngSnapshot] = None
+        self._recent_step_wall_seconds: deque[float] = deque(maxlen=6)
+        self._consecutive_soft_signals = 0
+        self._stable_steps = 0
+        self._last_adjustment_step = 0
+        self.levels = _build_auto_vram_protection_levels(config_or_args, route_kind=route_kind, runtime=runtime)
+        self.current_level = 0
+        setattr(self.config_or_args, "_peak_vram_auto_protection_current_level", 0)
+        setattr(self.config_or_args, "_peak_vram_auto_protection_active", False)
+        if self.enabled and len(self.levels) > 1:
+            summary = " -> ".join(f"L{idx}:{level.label}" for idx, level in enumerate(self.levels))
+            logger.info("%s auto VRAM protection enabled: %s", self.route_label, summary)
+        elif self.enabled:
+            logger.info(
+                "%s auto VRAM protection requested, but no stronger fallback levels were generated. "
+                "The controller will stay idle for this route.",
+                self.route_label,
+            )
+            self.enabled = False
+
+    def is_adjusted(self) -> bool:
+        return bool(self.enabled and self.current_level > 0)
+
+    def begin_step(self, step: int) -> None:
+        if not self.enabled:
+            return
+        if self._active_step == int(step) and self._active_step_rng is not None:
+            return
+        self._active_step = int(step)
+        self._active_step_rng = _capture_training_step_rng_snapshot(self.device)
+
+    def end_step(self) -> None:
+        self._active_step = None
+        self._active_step_rng = None
+
+    def _set_micro_batch_level(self, level: AutoVramProtectionLevel) -> None:
+        train_batch_size = max(1, _to_int(getattr(self.config_or_args, "train_batch_size", None), 1))
+        effective_micro_batch = max(1, min(train_batch_size, int(level.micro_batch_size)))
+        self.config_or_args.peak_vram_micro_batch_enabled = bool(level.micro_batch_enabled and effective_micro_batch < train_batch_size)
+        self.config_or_args.peak_vram_micro_batch_size = effective_micro_batch
+
+    def _apply_sdxl_level(self, level: AutoVramProtectionLevel) -> None:
+        if level.sdxl_fixed_block_swap is not None:
+            _apply_sdxl_fixed_block_swap_config(self.config_or_args, level.sdxl_fixed_block_swap)
+
+    def _apply_block_swap_level(self, level: AutoVramProtectionLevel) -> None:
+        target_blocks = max(0, int(level.blocks_to_swap or 0))
+        current_blocks = max(0, _to_int(getattr(self.config_or_args, "blocks_to_swap", None), 0))
+        self.config_or_args.blocks_to_swap = target_blocks
+        model = self.runtime.model
+        if model is None or target_blocks == current_blocks:
+            return
+        if hasattr(model, "reconfigure_block_swap"):
+            model.reconfigure_block_swap(target_blocks, self.device)
+        elif target_blocks > 0 and hasattr(model, "enable_block_swap"):
+            model.enable_block_swap(target_blocks, self.device)
+        elif target_blocks == 0 and hasattr(model, "disable_block_swap"):
+            model.disable_block_swap()
+
+    def _apply_cpu_offload_level(self, level: AutoVramProtectionLevel) -> None:
+        target_cpu_offload = bool(level.cpu_offload_checkpointing)
+        current_cpu_offload = _to_bool(getattr(self.config_or_args, "cpu_offload_checkpointing", None), False)
+        if target_cpu_offload == current_cpu_offload:
+            return
+        self.config_or_args.cpu_offload_checkpointing = target_cpu_offload
+        model = self.runtime.model
+        if target_cpu_offload:
+            self.config_or_args.gradient_checkpointing = True
+            if getattr(self.config_or_args, "blocks_to_swap", None) not in (None, 0):
+                self.config_or_args.blocks_to_swap = 0
+            if model is not None:
+                if hasattr(model, "disable_block_swap"):
+                    model.disable_block_swap()
+                if hasattr(model, "enable_gradient_checkpointing"):
+                    try:
+                        model.enable_gradient_checkpointing(cpu_offload=True)
+                    except TypeError:
+                        model.enable_gradient_checkpointing()
+            return
+
+        self.config_or_args.gradient_checkpointing = bool(self._baseline_gradient_checkpointing)
+        if model is None:
+            return
+        if self._baseline_gradient_checkpointing:
+            if hasattr(model, "enable_gradient_checkpointing"):
+                try:
+                    model.enable_gradient_checkpointing(cpu_offload=False)
+                except TypeError:
+                    model.enable_gradient_checkpointing()
+            elif hasattr(model, "gradient_checkpointing_enable"):
+                model.gradient_checkpointing_enable()
+        elif hasattr(model, "disable_gradient_checkpointing"):
+            model.disable_gradient_checkpointing()
+
+    def _apply_level(self, level_index: int, *, reason: str, step: int) -> bool:
+        if not self.enabled:
+            return False
+        level_index = max(0, min(int(level_index), len(self.levels) - 1))
+        if level_index == self.current_level:
+            return False
+        level = self.levels[level_index]
+        self._set_micro_batch_level(level)
+        if self.route_kind == "sdxl":
+            self._apply_sdxl_level(level)
+        elif self.route_kind in {"anima", "newbie"}:
+            self._apply_cpu_offload_level(level)
+            self._apply_block_swap_level(level)
+        if callable(getattr(self.runtime, "on_level_applied", None)):
+            try:
+                self.runtime.on_level_applied(level)
+            except Exception as exc:
+                logger.warning("%s auto VRAM protection level callback failed: %s", self.route_label, exc)
+        _clean_device_cache(self.device)
+        self.current_level = level_index
+        self._recent_step_wall_seconds.clear()
+        self._consecutive_soft_signals = 0
+        self._stable_steps = 0
+        self._last_adjustment_step = int(step)
+        setattr(self.config_or_args, "_peak_vram_auto_protection_current_level", self.current_level)
+        setattr(self.config_or_args, "_peak_vram_auto_protection_active", self.current_level > 0)
+        logger.warning(
+            "%s auto VRAM protection switched to L%d (%s) at step %s due to %s. "
+            "If the next 30 optimizer steps stay stable, the controller will try to restore one level.",
+            self.route_label,
+            self.current_level,
+            level.label,
+            step,
+            reason,
+        )
+        logger.warning(
+            "%s 自动显存保护已切换到 L%d（%s），触发原因=%s，step=%s。"
+            "若后续 30 个优化 step 保持稳定，将自动尝试恢复 1 档；如后台有高显存占用程序，请尽量先清理。",
+            self.route_label,
+            self.current_level,
+            level.label,
+            reason,
+            step,
+        )
+        return True
+
+    def maybe_retry_after_oom(self, exc: Exception, *, retry_count: int, step: int) -> bool:
+        if not self.enabled or not is_device_oom_error(exc):
+            self.end_step()
+            return False
+        if retry_count >= self.max_retry_count or self.current_level >= len(self.levels) - 1:
+            self.end_step()
+            return False
+        _restore_training_step_rng_snapshot(self.device, self._active_step_rng)
+        return self._apply_level(self.current_level + 1, reason="oom", step=step)
+
+    def observe_step_success(self, *, step: int, step_wall_seconds: float) -> None:
+        if not self.enabled:
+            self.end_step()
+            return
+        stats = _get_device_memory_stats(self.device) or {}
+        reserved_ratio = float(stats.get("reserved_ratio", 0.0))
+        slowdown_reference = 0.0
+        if len(self._recent_step_wall_seconds) >= 2:
+            ordered = sorted(self._recent_step_wall_seconds)
+            slowdown_reference = ordered[len(ordered) // 2]
+        soft_signal = bool(
+            slowdown_reference > 0
+            and step_wall_seconds >= slowdown_reference * self.soft_slowdown_ratio
+            and reserved_ratio >= self.soft_high_reserved_ratio
+        )
+        if soft_signal:
+            self._consecutive_soft_signals += 1
+        else:
+            self._consecutive_soft_signals = 0
+        self._recent_step_wall_seconds.append(float(step_wall_seconds))
+
+        if self.current_level < len(self.levels) - 1 and self._consecutive_soft_signals >= self.soft_trigger_count:
+            self._apply_level(self.current_level + 1, reason="soft-pressure", step=step)
+            self.end_step()
+            return
+
+        if self.current_level > 0 and reserved_ratio <= self.restore_reserved_ratio:
+            self._stable_steps += 1
+            if self._stable_steps >= self.restore_steps and step > self._last_adjustment_step:
+                self._apply_level(self.current_level - 1, reason="stabilized", step=step)
+        elif self.current_level > 0:
+            self._stable_steps = 0
+
+        self.end_step()
+
+
 def normalize_lulynx_args(args: argparse.Namespace, route_label: str, route_kind: str) -> None:
 
     args.lulynx_route_label = route_label

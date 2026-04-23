@@ -77,6 +77,8 @@ Schema.intersect([
         blocks_to_swap: Schema.number().min(0).default(0).description("交换到 CPU 的 block 数量。0 表示关闭"),
         newbie_auto_swap_release: Schema.boolean().default(false).description("自动 swap 释放。开启后会在显存占用持续偏低时逐步减少 blocks_to_swap，以回收一部分训练速度"),
         cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：checkpointing 时把部分张量卸载到 CPU"),
+        experimental_attention_profile_enabled: Schema.boolean().default(false).description("步骤耗时窗口统计开关。默认关闭，仅在诊断训练速度/瓶颈时建议开启"),
+        experimental_attention_profile_window: Schema.number().min(1).default(50).description("步骤耗时窗口统计间隔（每 N 个优化步输出一次聚合耗时摘要）"),
         pytorch_cuda_expandable_segments: Schema.boolean().default(true).description("启用 PyTorch CUDA expandable_segments 以降低碎片化 OOM"),
         newbie_safe_fallback: Schema.boolean().default(true).description("OOM 时自动尝试更保守的 Newbie 安全回退"),
         trust_remote_code: Schema.boolean().default(true).description("允许 transformers / diffusers 加载远程自定义代码"),

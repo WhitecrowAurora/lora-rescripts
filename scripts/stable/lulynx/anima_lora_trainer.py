@@ -50,6 +50,8 @@ from mikazuki.plugins.training_hooks import (
 import train_network
 from lulynx.experimental_core import (
     PeakVramDiagnosticsRecorder,
+    AutoVramProtectionController,
+    AutoVramProtectionRuntimeContext,
     build_peak_vram_micro_batch_plan,
     create_lulynx_core,
     iter_training_micro_batches,
@@ -1313,6 +1315,19 @@ class AnimaNetworkTrainer:
             getattr(args, "lulynx_route_label", "Anima LoRA"),
             accelerator.device,
         )
+        def _on_anima_auto_vram_level_applied(_level) -> None:
+            self.is_swapping_blocks = int(getattr(args, "blocks_to_swap", 0) or 0) > 0
+
+        auto_vram_controller = AutoVramProtectionController(
+            args,
+            route_kind="anima",
+            route_label=getattr(args, "lulynx_route_label", "Anima LoRA"),
+            runtime=AutoVramProtectionRuntimeContext(
+                device=accelerator.device,
+                model=accelerator.unwrap_model(dit),
+                on_level_applied=_on_anima_auto_vram_level_applied,
+            ),
+        )
         if self.is_swapping_blocks:
             accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
         peak_vram_startup_guard_release_blocks = getattr(args, "_peak_vram_startup_guard_release_blocks", None)
@@ -1350,200 +1365,229 @@ class AnimaNetworkTrainer:
                 nan_check_step = epoch * len(train_dataloader) + step + 1
                 run_nan_check = anima_train_utils.should_run_anima_nan_check(args, nan_check_step)
                 lulynx_step_logs = {}
-                anima_step_profiler.begin_micro_step()
-                try:
-                    with accelerator.accumulate(training_model):
-                        return_per_sample_loss = lulynx_core is not None and lulynx_core.requires_per_sample_losses()
-                        micro_batch_plan = build_peak_vram_micro_batch_plan(args, batch)
-                        if return_per_sample_loss and micro_batch_plan.requires_split:
-                            if not getattr(args, "_peak_vram_pcgrad_micro_batch_warned", False):
-                                logger.warning(
-                                    "Peak VRAM micro-batch splitting is currently not combined with Lulynx PCGrad on Anima. "
-                                    "Falling back to full-batch backward for the current step."
-                                )
-                                args._peak_vram_pcgrad_micro_batch_warned = True
-                            micro_batch_plan.enabled = False
-                            micro_batch_plan.micro_batch_size = micro_batch_plan.actual_batch_size
-                            micro_batch_plan.split_count = 1
-
-                        peak_vram_diagnostics.start_step(
-                            global_step + 1,
-                            batch_size=micro_batch_plan.actual_batch_size,
-                            micro_batch_size=micro_batch_plan.micro_batch_size,
-                            split_count=micro_batch_plan.split_count,
-                        )
-                        weighted_loss = 0.0
-                        skip_training_step = False
-                        stop_training_reason = None
-
-                        micro_batch_count = max(1, int(micro_batch_plan.split_count or 1))
-                        for micro_batch_index, (micro_batch, sub_batch_size, loss_scale) in enumerate(
-                            iter_training_micro_batches(batch, micro_batch_plan),
-                            start=1,
-                        ):
-                            per_sample_losses = None
-                            emit_before_forward_event(
-                                route="anima",
-                                training_type=getattr(args, "model_train_type", ""),
-                                global_step=global_step,
-                                micro_batch_index=micro_batch_index,
-                                micro_batch_count=micro_batch_count,
-                                micro_batch_size=sub_batch_size,
-                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
-                                sync_gradients=bool(accelerator.sync_gradients),
-                                extra={
-                                    "train_text_encoder": bool(train_text_encoder),
-                                    "uses_lulynx_core": lulynx_core is not None,
-                                    "run_nan_check": bool(run_nan_check),
-                                },
-                                source="anima_lora_trainer",
-                            )
-                            batch_result = self.process_batch(
-                                micro_batch,
-                                text_encoders,
-                                dit,
-                                network,
-                                vae,
-                                noise_scheduler,
-                                vae_dtype,
-                                weight_dtype,
-                                accelerator,
-                                args,
-                                text_encoding_strategy,
-                                tokenize_strategy,
-                                train_text_encoder=train_text_encoder,
-                                profiler=anima_step_profiler,
-                                use_non_blocking=use_non_blocking,
-                                run_nan_check=run_nan_check,
-                                return_per_sample_loss=return_per_sample_loss,
-                            )
-                            if return_per_sample_loss:
-                                micro_loss, per_sample_losses = batch_result
-                            else:
-                                micro_loss = batch_result
-                            peak_vram_diagnostics.capture("forward")
-
-                            raw_micro_loss_value = float(micro_loss.detach().item())
-                            emit_after_loss_event(
-                                route="anima",
-                                training_type=getattr(args, "model_train_type", ""),
-                                global_step=global_step,
-                                micro_batch_index=micro_batch_index,
-                                micro_batch_count=micro_batch_count,
-                                micro_batch_size=sub_batch_size,
-                                loss_value=raw_micro_loss_value,
-                                loss_scale=loss_scale,
-                                weighted_loss=weighted_loss + (raw_micro_loss_value * loss_scale),
-                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
-                                sync_gradients=bool(accelerator.sync_gradients),
-                                extra={
-                                    "train_text_encoder": bool(train_text_encoder),
-                                    "uses_lulynx_core": lulynx_core is not None,
-                                    "run_nan_check": bool(run_nan_check),
-                                    "modify_loss_runtime_supported": True,
-                                },
-                                source="anima_lora_trainer",
-                            )
-                            loss_mutation = apply_modify_loss_event(
-                                loss=micro_loss,
-                                route="anima",
-                                training_type=getattr(args, "model_train_type", ""),
-                                global_step=global_step,
-                                micro_batch_index=micro_batch_index,
-                                micro_batch_count=micro_batch_count,
-                                micro_batch_size=sub_batch_size,
-                                loss_value=raw_micro_loss_value,
-                                loss_scale=loss_scale,
-                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
-                                sync_gradients=bool(accelerator.sync_gradients),
-                                extra={
-                                    "train_text_encoder": bool(train_text_encoder),
-                                    "uses_lulynx_core": lulynx_core is not None,
-                                    "run_nan_check": bool(run_nan_check),
-                                },
-                                source="anima_lora_trainer",
-                            )
-                            micro_loss = loss_mutation.loss
-                            micro_loss_value = loss_mutation.final_loss_value
-                            weighted_loss += micro_loss_value * loss_scale
-                            if safeguard is not None:
-                                safeguard_decision = safeguard.inspect_loss(micro_loss_value, global_step + 1, optimizer)
-                                if safeguard_decision.reason:
-                                    logger.warning(safeguard_decision.reason)
-                                if safeguard_decision.stop_training:
-                                    optimizer.zero_grad(set_to_none=True)
-                                    stop_training_reason = safeguard_decision.reason
-                                    break
-                                if safeguard_decision.skip_step:
-                                    optimizer.zero_grad(set_to_none=True)
-                                    anima_step_profiler.discard_current_step()
-                                    skip_training_step = True
-                                    break
-
-                            scaled_loss = micro_loss * loss_scale
-                            scaled_per_sample_losses = (
-                                per_sample_losses * loss_scale * float(loss_mutation.scale)
-                                if per_sample_losses is not None
-                                else None
-                            )
-                            with anima_step_profiler.step_section("backward"):
-                                if lulynx_core is not None:
-                                    lulynx_core.backward(
-                                        loss=scaled_loss,
-                                        accelerator=accelerator,
-                                        optimizer=optimizer,
-                                        network=accelerator.unwrap_model(network),
-                                        per_sample_losses=scaled_per_sample_losses,
+                batch_retry = 0
+                skip_training_step = False
+                training_step_wall_seconds = 0.0
+                auto_vram_controller.begin_step(global_step + 1)
+                while True:
+                    anima_step_profiler.begin_micro_step()
+                    try:
+                        attempt_started_at = time.perf_counter()
+                        if self.is_swapping_blocks:
+                            accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
+                        with accelerator.accumulate(training_model):
+                            return_per_sample_loss = lulynx_core is not None and lulynx_core.requires_per_sample_losses()
+                            micro_batch_plan = build_peak_vram_micro_batch_plan(args, batch)
+                            if return_per_sample_loss and micro_batch_plan.requires_split:
+                                if not getattr(args, "_peak_vram_pcgrad_micro_batch_warned", False):
+                                    logger.warning(
+                                        "Peak VRAM micro-batch splitting is currently not combined with Lulynx PCGrad on Anima. "
+                                        "Falling back to full-batch backward for the current step."
                                     )
-                                else:
-                                    accelerator.backward(scaled_loss)
-                            peak_vram_diagnostics.capture("backward")
-                            emit_after_backward_event(
-                                route="anima",
-                                training_type=getattr(args, "model_train_type", ""),
-                                global_step=global_step,
-                                micro_batch_index=micro_batch_index,
-                                micro_batch_count=micro_batch_count,
-                                micro_batch_size=sub_batch_size,
-                                loss_value=micro_loss_value,
-                                loss_scale=loss_scale,
-                                backward_loss=micro_loss_value * float(loss_scale),
-                                weighted_loss=weighted_loss,
-                                gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
-                                sync_gradients=bool(accelerator.sync_gradients),
-                                extra={
-                                    "train_text_encoder": bool(train_text_encoder),
-                                    "uses_lulynx_core": lulynx_core is not None,
-                                    "run_nan_check": bool(run_nan_check),
-                                    "raw_loss": raw_micro_loss_value,
-                                    "loss_modified": bool(loss_mutation.modified),
-                                    "loss_modifier_scale": float(loss_mutation.scale),
-                                    "loss_modifier_bias": float(loss_mutation.bias),
-                                    "modify_loss_exclusive_conflict": bool(loss_mutation.dispatch.get("exclusive_conflict")),
-                                    "modify_loss_error_count": len(loss_mutation.dispatch.get("errors") or []),
-                                    **(
-                                        {"loss_modifier_reason": loss_mutation.reason}
-                                        if loss_mutation.reason
-                                        else {}
-                                    ),
-                                },
-                                source="anima_lora_trainer",
+                                    args._peak_vram_pcgrad_micro_batch_warned = True
+                                micro_batch_plan.enabled = False
+                                micro_batch_plan.micro_batch_size = micro_batch_plan.actual_batch_size
+                                micro_batch_plan.split_count = 1
+
+                            peak_vram_diagnostics.start_step(
+                                global_step + 1,
+                                batch_size=micro_batch_plan.actual_batch_size,
+                                micro_batch_size=micro_batch_plan.micro_batch_size,
+                                split_count=micro_batch_plan.split_count,
                             )
+                            weighted_loss = 0.0
+                            skip_training_step = False
+                            stop_training_reason = None
 
-                        current_loss = weighted_loss
-                        if stop_training_reason is not None:
-                            raise RuntimeError(stop_training_reason)
-                        if skip_training_step:
-                            continue
+                            micro_batch_count = max(1, int(micro_batch_plan.split_count or 1))
+                            for micro_batch_index, (micro_batch, sub_batch_size, loss_scale) in enumerate(
+                                iter_training_micro_batches(batch, micro_batch_plan),
+                                start=1,
+                            ):
+                                per_sample_losses = None
+                                emit_before_forward_event(
+                                    route="anima",
+                                    training_type=getattr(args, "model_train_type", ""),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        "train_text_encoder": bool(train_text_encoder),
+                                        "uses_lulynx_core": lulynx_core is not None,
+                                        "run_nan_check": bool(run_nan_check),
+                                    },
+                                    source="anima_lora_trainer",
+                                )
+                                batch_result = self.process_batch(
+                                    micro_batch,
+                                    text_encoders,
+                                    dit,
+                                    network,
+                                    vae,
+                                    noise_scheduler,
+                                    vae_dtype,
+                                    weight_dtype,
+                                    accelerator,
+                                    args,
+                                    text_encoding_strategy,
+                                    tokenize_strategy,
+                                    train_text_encoder=train_text_encoder,
+                                    profiler=anima_step_profiler,
+                                    use_non_blocking=use_non_blocking,
+                                    run_nan_check=run_nan_check,
+                                    return_per_sample_loss=return_per_sample_loss,
+                                )
+                                if return_per_sample_loss:
+                                    micro_loss, per_sample_losses = batch_result
+                                else:
+                                    micro_loss = batch_result
+                                peak_vram_diagnostics.capture("forward")
 
-                        with anima_step_profiler.step_section("optimizer_step"):
-                            if accelerator.sync_gradients:
-                                self.all_reduce_network(accelerator, network)
-                                if args.max_grad_norm != 0.0:
-                                    params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                                raw_micro_loss_value = float(micro_loss.detach().item())
+                                emit_after_loss_event(
+                                    route="anima",
+                                    training_type=getattr(args, "model_train_type", ""),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    loss_value=raw_micro_loss_value,
+                                    loss_scale=loss_scale,
+                                    weighted_loss=weighted_loss + (raw_micro_loss_value * loss_scale),
+                                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        "train_text_encoder": bool(train_text_encoder),
+                                        "uses_lulynx_core": lulynx_core is not None,
+                                        "run_nan_check": bool(run_nan_check),
+                                        "modify_loss_runtime_supported": True,
+                                    },
+                                    source="anima_lora_trainer",
+                                )
+                                loss_mutation = apply_modify_loss_event(
+                                    loss=micro_loss,
+                                    route="anima",
+                                    training_type=getattr(args, "model_train_type", ""),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    loss_value=raw_micro_loss_value,
+                                    loss_scale=loss_scale,
+                                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        "train_text_encoder": bool(train_text_encoder),
+                                        "uses_lulynx_core": lulynx_core is not None,
+                                        "run_nan_check": bool(run_nan_check),
+                                    },
+                                    source="anima_lora_trainer",
+                                )
+                                micro_loss = loss_mutation.loss
+                                micro_loss_value = loss_mutation.final_loss_value
+                                weighted_loss += micro_loss_value * loss_scale
+                                if safeguard is not None:
+                                    safeguard_decision = safeguard.inspect_loss(micro_loss_value, global_step + 1, optimizer)
+                                    if safeguard_decision.reason:
+                                        logger.warning(safeguard_decision.reason)
+                                    if safeguard_decision.stop_training:
+                                        optimizer.zero_grad(set_to_none=True)
+                                        stop_training_reason = safeguard_decision.reason
+                                        break
+                                    if safeguard_decision.skip_step:
+                                        optimizer.zero_grad(set_to_none=True)
+                                        anima_step_profiler.discard_current_step()
+                                        skip_training_step = True
+                                        break
 
-                            emit_before_optimizer_step_event(
+                                scaled_loss = micro_loss * loss_scale
+                                scaled_per_sample_losses = (
+                                    per_sample_losses * loss_scale * float(loss_mutation.scale)
+                                    if per_sample_losses is not None
+                                    else None
+                                )
+                                with anima_step_profiler.step_section("backward"):
+                                    if lulynx_core is not None:
+                                        lulynx_core.backward(
+                                            loss=scaled_loss,
+                                            accelerator=accelerator,
+                                            optimizer=optimizer,
+                                            network=accelerator.unwrap_model(network),
+                                            per_sample_losses=scaled_per_sample_losses,
+                                        )
+                                    else:
+                                        accelerator.backward(scaled_loss)
+                                peak_vram_diagnostics.capture("backward")
+                                emit_after_backward_event(
+                                    route="anima",
+                                    training_type=getattr(args, "model_train_type", ""),
+                                    global_step=global_step,
+                                    micro_batch_index=micro_batch_index,
+                                    micro_batch_count=micro_batch_count,
+                                    micro_batch_size=sub_batch_size,
+                                    loss_value=micro_loss_value,
+                                    loss_scale=loss_scale,
+                                    backward_loss=micro_loss_value * float(loss_scale),
+                                    weighted_loss=weighted_loss,
+                                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    extra={
+                                        "train_text_encoder": bool(train_text_encoder),
+                                        "uses_lulynx_core": lulynx_core is not None,
+                                        "run_nan_check": bool(run_nan_check),
+                                        "raw_loss": raw_micro_loss_value,
+                                        "loss_modified": bool(loss_mutation.modified),
+                                        "loss_modifier_scale": float(loss_mutation.scale),
+                                        "loss_modifier_bias": float(loss_mutation.bias),
+                                        "modify_loss_exclusive_conflict": bool(loss_mutation.dispatch.get("exclusive_conflict")),
+                                        "modify_loss_error_count": len(loss_mutation.dispatch.get("errors") or []),
+                                        **(
+                                            {"loss_modifier_reason": loss_mutation.reason}
+                                            if loss_mutation.reason
+                                            else {}
+                                        ),
+                                    },
+                                    source="anima_lora_trainer",
+                                )
+
+                            current_loss = weighted_loss
+                            if stop_training_reason is not None:
+                                raise RuntimeError(stop_training_reason)
+                            if skip_training_step:
+                                training_step_wall_seconds = time.perf_counter() - attempt_started_at
+                                break
+
+                            with anima_step_profiler.step_section("optimizer_step"):
+                                if accelerator.sync_gradients:
+                                    self.all_reduce_network(accelerator, network)
+                                    if args.max_grad_norm != 0.0:
+                                        params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                                        accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                                emit_before_optimizer_step_event(
+                                    route="anima",
+                                    training_type=getattr(args, "model_train_type", ""),
+                                    global_step=global_step,
+                                    current_loss=current_loss,
+                                    optimizer=optimizer,
+                                    lr_scheduler=lr_scheduler,
+                                    gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+                                    sync_gradients=bool(accelerator.sync_gradients),
+                                    max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                                    extra={
+                                        "train_text_encoder": bool(train_text_encoder),
+                                        "uses_lulynx_core": lulynx_core is not None,
+                                    },
+                                    source="anima_lora_trainer",
+                                )
+                                optimizer.step()
+                                lr_scheduler.step()
+                                optimizer.zero_grad(set_to_none=True)
+                            peak_vram_diagnostics.capture("optimizer")
+                            emit_after_optimizer_step_event(
                                 route="anima",
                                 training_type=getattr(args, "model_train_type", ""),
                                 global_step=global_step,
@@ -1553,38 +1597,31 @@ class AnimaNetworkTrainer:
                                 gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
                                 sync_gradients=bool(accelerator.sync_gradients),
                                 max_grad_norm=getattr(args, "max_grad_norm", 0.0),
+                                optimizer_step_executed=True,
+                                scheduler_step_executed=True,
+                                zero_grad_called=True,
                                 extra={
                                     "train_text_encoder": bool(train_text_encoder),
                                     "uses_lulynx_core": lulynx_core is not None,
                                 },
                                 source="anima_lora_trainer",
                             )
-                            optimizer.step()
-                            lr_scheduler.step()
+                            training_step_wall_seconds = time.perf_counter() - attempt_started_at
+                            break
+                    except RuntimeError as exc:
+                        if auto_vram_controller.maybe_retry_after_oom(exc, retry_count=batch_retry, step=global_step + 1):
                             optimizer.zero_grad(set_to_none=True)
-                        peak_vram_diagnostics.capture("optimizer")
-                        emit_after_optimizer_step_event(
-                            route="anima",
-                            training_type=getattr(args, "model_train_type", ""),
-                            global_step=global_step,
-                            current_loss=current_loss,
-                            optimizer=optimizer,
-                            lr_scheduler=lr_scheduler,
-                            gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
-                            sync_gradients=bool(accelerator.sync_gradients),
-                            max_grad_norm=getattr(args, "max_grad_norm", 0.0),
-                            optimizer_step_executed=True,
-                            scheduler_step_executed=True,
-                            zero_grad_called=True,
-                            extra={
-                                "train_text_encoder": bool(train_text_encoder),
-                                "uses_lulynx_core": lulynx_core is not None,
-                            },
-                            source="anima_lora_trainer",
-                        )
-                finally:
-                    anima_step_profiler.end_micro_step()
+                            anima_step_profiler.discard_current_step()
+                            clean_memory_on_device(accelerator.device)
+                            batch_retry += 1
+                            continue
+                        raise
+                    finally:
+                        anima_step_profiler.end_micro_step()
 
+                if skip_training_step:
+                    auto_vram_controller.end_step()
+                    continue
                 keys_scaled, mean_norm, maximum_norm = None, None, None
                 max_mean_logs = {}
                 if args.scale_weight_norms:
@@ -1600,6 +1637,10 @@ class AnimaNetworkTrainer:
                     global_step += 1
                     if ema_model is not None:
                         ema_model.update(global_step)
+                    auto_vram_controller.observe_step_success(
+                        step=global_step,
+                        step_wall_seconds=training_step_wall_seconds,
+                    )
 
                     optimizer_eval_fn()
                     with anima_step_profiler.step_section("preview", wall_only=True):
@@ -1634,7 +1675,12 @@ class AnimaNetworkTrainer:
                                     remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                     remove_model(remove_ckpt_name)
                     optimizer_train_fn()
-                    if not peak_vram_startup_guard_release_done and global_step >= peak_vram_startup_guard_release_step:
+                    current_auto_level = int(getattr(args, "_peak_vram_auto_protection_current_level", 0) or 0)
+                    if (
+                        not peak_vram_startup_guard_release_done
+                        and current_auto_level <= 0
+                        and global_step >= peak_vram_startup_guard_release_step
+                    ):
                         current_blocks = int(getattr(args, "blocks_to_swap", 0) or 0)
                         target_blocks = int(peak_vram_startup_guard_release_blocks or 0)
                         if current_blocks != target_blocks:
@@ -1668,6 +1714,8 @@ class AnimaNetworkTrainer:
                     peak_vram_logs, peak_vram_message = peak_vram_diagnostics.finish_step()
                     if peak_vram_message and accelerator.is_main_process:
                         print(peak_vram_message)
+                else:
+                    auto_vram_controller.end_step()
 
                 if safeguard is not None:
                     safeguard.record_loss(current_loss)

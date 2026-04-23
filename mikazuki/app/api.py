@@ -350,6 +350,14 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
         except IOError:
             log.error(f"读取 {sample_prompt_file} 文件失败")
 
+    def _normalize_single_preview_prompt_text(value) -> str:
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [" ".join(line.split()) for line in text.split("\n") if line.strip()]
+        return " ".join(lines)
+
+    positive_prompts = _normalize_single_preview_prompt_text(positive_prompts)
+    negative_prompts = _normalize_single_preview_prompt_text(negative_prompts)
+
     sample_prompt = f'{positive_prompts} --n {negative_prompts}  --w {sample_width} --h {sample_height} --l {sample_cfg}  --s {sample_steps}'
     normalized_seed = _normalize_preview_seed_value(sample_seed)
     if normalized_seed is not None:
