@@ -20,10 +20,10 @@ Schema.intersect([
         logit_std: Schema.number().step(0.01).description("logit_normal 权重策略的标准差"),
         mode_scale: Schema.number().step(0.01).description("mode 权重策略的缩放系数"),
         attn_mode: Schema.union(["", "torch", "xformers", "sageattn", "flash"]).default("").description("Attention 实现。留空时按当前运行时自动选择；在 FlashAttention 运行时下，Anima 会优先尝试 FlashAttention 2。"),
-        split_attn: Schema.boolean().default(false).description("拆分 attention 计算以降低显存占用，但通常会牺牲一定训练速度。显存充足时一般建议关闭。"),
+        split_attn: Schema.boolean().default(false).description("拆分 attention 计算以降低显存占用的兜底项，但通常会牺牲一定训练速度。显存充足、能正常跑时一般建议关闭"),
         vae_chunk_size: Schema.number().min(2).description("VAE 编码/解码分块大小（需为偶数）"),
         vae_disable_cache: Schema.boolean().default(false).description("禁用内部 VAE 缓存机制"),
-        unsloth_offload_checkpointing: Schema.boolean().default(false).description("使用更快的 CPU RAM activation offload（不能与 blocks_to_swap / cpu_offload_checkpointing 同时使用）"),
+        unsloth_offload_checkpointing: Schema.boolean().default(false).description("使用更快的 CPU RAM activation offload（不能与 blocks_to_swap / cpu_offload_checkpointing 同时使用）。属于显存兜底项，只在确实不够显存时再开"),
     }).description("Anima 专用参数"),
 
     Schema.object(
@@ -146,7 +146,7 @@ Schema.intersect([
         SHARED_SCHEMAS.NETWORK_OPTION_BASEWEIGHT,
     ]),
 
-    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_ANIMA,
+    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_ANIMA.description("Lulynx 实验核心"),
     Schema.intersect([
         Schema.object({
             enable_preview: Schema.boolean().default(false).description("启用训练预览图"),
@@ -208,10 +208,10 @@ Schema.intersect([
             cache_text_encoder_outputs_to_disk: Schema.boolean().default(true).description("缓存文本编码器的输出到磁盘"),
             text_encoder_batch_size: Schema.number().min(1).description("文本编码器缓存批量大小"),
             disable_mmap_load_safetensors: Schema.boolean().default(false).description("禁用 safetensors 的 mmap 加载"),
-            blocks_to_swap: Schema.number().min(1).description("在 CPU/GPU 间交换的 Transformer block 数量，用于进一步省显存"),
+            blocks_to_swap: Schema.number().min(1).description("在 CPU/GPU 间交换的 Transformer block 数量，用于进一步省显存。数值越大通常越慢；能正常跑就不要开"),
             experimental_attention_profile_enabled: Schema.boolean().default(false).description("步骤耗时窗口统计开关。默认关闭，仅在诊断训练速度/瓶颈时建议开启"),
             experimental_attention_profile_window: Schema.number().min(1).default(50).description("步骤耗时窗口统计间隔（每 N 个优化步输出一次聚合耗时摘要）"),
-            cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：梯度检查点时将部分张量卸载到 CPU"),
+            cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性显存兜底项：梯度检查点时将部分张量卸载到 CPU。通常会更慢，只在确实需要省显存时再开"),
         }, ["xformers", "sdpa"])
     ).description("速度优化选项"),
 

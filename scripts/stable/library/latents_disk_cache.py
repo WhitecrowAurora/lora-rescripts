@@ -35,14 +35,36 @@ def resolve_latents_cache_root(absolute_path: str, dataset_root: Optional[str] =
     return os.path.abspath(os.path.dirname(absolute_path))
 
 
-def build_latents_cache_image_key(absolute_path: str, cache_root: str) -> str:
+def build_latents_cache_image_key(
+    absolute_path: str,
+    cache_root: str,
+    *,
+    image_size: Optional[tuple[int, int]] = None,
+    bucket_reso: Optional[tuple[int, int]] = None,
+    flip_aug: Optional[bool] = None,
+    alpha_mask: Optional[bool] = None,
+) -> str:
     absolute_path = os.path.abspath(absolute_path)
     cache_root = os.path.abspath(cache_root)
     try:
         relative_path = os.path.relpath(absolute_path, cache_root)
     except ValueError:
         relative_path = absolute_path
-    return relative_path.replace("\\", "/")
+    normalized_path = relative_path.replace("\\", "/")
+
+    variant_parts = []
+    if image_size is not None and len(image_size) >= 2:
+        variant_parts.append(f"orig={int(image_size[0])}x{int(image_size[1])}")
+    if bucket_reso is not None and len(bucket_reso) >= 2:
+        variant_parts.append(f"bucket={int(bucket_reso[0])}x{int(bucket_reso[1])}")
+    if flip_aug is not None:
+        variant_parts.append(f"flip={1 if flip_aug else 0}")
+    if alpha_mask is not None:
+        variant_parts.append(f"alpha={1 if alpha_mask else 0}")
+
+    if not variant_parts:
+        return normalized_path
+    return normalized_path + "#" + "#".join(variant_parts)
 
 
 def build_safetensors_cache_dir(cache_root: str, namespace: str) -> str:

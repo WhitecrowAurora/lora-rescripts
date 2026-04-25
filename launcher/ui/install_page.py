@@ -9,7 +9,7 @@ import customtkinter as ctk
 from launcher.assets import style as S
 from launcher.config import RUNTIMES, RUNTIME_MAP
 from launcher.core.runtime_detector import RuntimeStatus
-from launcher.i18n import t
+from launcher.i18n import get_language, t
 from launcher.ui.icons import StatusDot
 
 
@@ -34,19 +34,21 @@ class InstallPage(ctk.CTkFrame):
         header.grid(row=0, column=0, padx=S.INNER_PAD, pady=(S.INNER_PAD, 8), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
+        self._title_label = ctk.CTkLabel(
             header, text=t("install_page_title"),
             font=S.FONT_H2, text_color=S.TEXT_WHITE, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self._title_label.grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(
+        self._refresh_btn = ctk.CTkButton(
             header, text=t("btn_refresh"), font=S.FONT_TINY,
-            width=80, height=28, corner_radius=10,
+            width=80, height=28, corner_radius=S.BUTTON_CORNER_RADIUS,
             fg_color=S.BG_INPUT, hover_color=S.ACCENT_DIM,
             border_width=1, border_color=S.BORDER_SUBTLE,
             text_color=S.TEXT_SECONDARY,
             command=self._on_refresh,
-        ).grid(row=0, column=1, padx=(8, 0))
+        )
+        self._refresh_btn.grid(row=0, column=1, padx=(8, 0))
 
         # Note
         self._note_label = ctk.CTkLabel(
@@ -58,16 +60,22 @@ class InstallPage(ctk.CTkFrame):
 
         # Scrollable list
         self._list_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self._list_frame.grid(row=2, column=0, padx=8, pady=4, sticky="nsew")
+        self._list_frame.grid(row=2, column=0, padx=S.INNER_PAD, pady=4, sticky="nsew")
         self._list_frame.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
 
         self._install_items: list[dict] = []
+        self._empty_label: ctk.CTkLabel | None = None
+        self._last_statuses: Dict[str, RuntimeStatus] = {}
 
     def update_runtimes(self, statuses: Dict[str, RuntimeStatus]) -> None:
+        self._last_statuses = dict(statuses)
         for item in self._install_items:
             item["frame"].destroy()
         self._install_items.clear()
+        if self._empty_label:
+            self._empty_label.destroy()
+            self._empty_label = None
 
         row = 0
         for rt in RUNTIMES:
@@ -75,7 +83,7 @@ class InstallPage(ctk.CTkFrame):
             if status and status.installed:
                 continue
 
-            is_zh = t("app_title") == "SD-reScripts 启动器"
+            is_zh = get_language() == "zh"
             name = rt.name_zh if is_zh else rt.name_en
             is_partial = status and (status.python_exists or status.env_dir)
             status_text = t("status_partial") if is_partial else t("status_missing")
@@ -87,7 +95,7 @@ class InstallPage(ctk.CTkFrame):
                 self._list_frame, fg_color=S.SHADOW_CARD,
                 corner_radius=S.CARD_CORNER_RADIUS + 2,
             )
-            shadow.grid(row=row, column=0, padx=4, pady=3, sticky="ew")
+            shadow.grid(row=row, column=0, padx=S.CARD_GAP // 2, pady=S.CARD_GAP // 2, sticky="ew")
             shadow.grid_columnconfigure(1, weight=1)
 
             frame = ctk.CTkFrame(
@@ -113,15 +121,15 @@ class InstallPage(ctk.CTkFrame):
                 ctk.CTkLabel(
                     frame, text=t("experimental_badge"),
                     font=S.FONT_BADGE, text_color=S.ORANGE,
-                    fg_color=S.ORANGE_DIM, corner_radius=8, padx=6, pady=2,
+                    fg_color=S.ORANGE_DIM, corner_radius=S.BADGE_CORNER_RADIUS, padx=6, pady=2,
                 ).grid(row=0, column=2, padx=(0, 4))
 
             # Install button
             install_btn = ctk.CTkButton(
                 frame, text=t("btn_install"), font=S.FONT_BUTTON_SMALL,
-                width=70, height=30, corner_radius=10,
-                fg_color=S.ACCENT, hover_color=S.ACCENT_HOVER,
-                text_color="#ffffff",
+                width=70, height=30, corner_radius=S.BUTTON_CORNER_RADIUS,
+                fg_color=S.ACCENT_DIM, hover_color=S.ACCENT,
+                text_color=S.ACCENT,
                 command=lambda rt_id=rt.id: self._handle_install(rt_id),
             )
             install_btn.grid(row=0, column=3, padx=(0, 14), pady=10)
@@ -134,11 +142,12 @@ class InstallPage(ctk.CTkFrame):
             row += 1
 
         if not self._install_items:
-            ctk.CTkLabel(
+            self._empty_label = ctk.CTkLabel(
                 self._list_frame,
                 text=t("status_installed"),
                 font=S.FONT_H3, text_color=S.GREEN,
-            ).grid(row=0, column=0, padx=20, pady=40)
+            )
+            self._empty_label.grid(row=0, column=0, padx=20, pady=40)
 
     def _handle_install(self, runtime_id: str) -> None:
         if self._installing:
@@ -160,11 +169,15 @@ class InstallPage(ctk.CTkFrame):
                 else:
                     btn.configure(
                         text=t("btn_install"),
-                        fg_color=S.ACCENT,
-                        text_color="#ffffff",
+                        fg_color=S.ACCENT_DIM,
+                        text_color=S.ACCENT,
                         state="normal",
                     )
                 break
 
     def refresh_labels(self) -> None:
+        self._title_label.configure(text=t("install_page_title"))
+        self._refresh_btn.configure(text=t("btn_refresh"))
         self._note_label.configure(text=t("install_prerequisites"))
+        if self._last_statuses:
+            self.update_runtimes(self._last_statuses)

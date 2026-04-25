@@ -47,12 +47,18 @@ class App(ctk.CTk):
         lang = self._settings.get("language") or detect_system_language()
         set_language(lang)
 
+        # Initialize theme
+        theme = self._settings.get("theme", "light")
+        S.set_theme(theme)
+
         # Runtime state
         self._statuses: Dict[str, RuntimeStatus] = {}
         self._selected_runtime: Optional[str] = self._settings.get("last_runtime")
         self._process: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
         self._installing = False
+        self._closing = False
+        self._settings_sync_after_id: Optional[str] = None
 
         # Window setup
         S.apply_theme()
@@ -78,7 +84,9 @@ class App(ctk.CTk):
             self,
             on_page_select=self._on_page_select,
             on_language_toggle=self._on_language_toggle,
+            on_theme_toggle=self._on_theme_toggle,
             current_lang=get_language(),
+            current_theme=S.get_theme(),
         )
         self._sidebar.grid(row=0, column=0, sticky="ns")
 
@@ -91,6 +99,23 @@ class App(ctk.CTk):
         # Pages
         self._pages: dict[str, ctk.CTkFrame] = {}
         self._current_page = "launch"
+        self._create_pages()
+
+        # Load settings into UI
+        self._load_settings()
+        self._advanced_page.set_on_change(self._on_settings_change)
+
+        # Show launch page
+        self._show_page("launch")
+
+        # Detect runtimes on startup
+        self.after(100, self._on_refresh)
+
+    def _create_pages(self) -> None:
+        """Create (or recreate) all page widgets. Destroys existing ones first."""
+        for page in self._pages.values():
+            page.destroy()
+        self._pages.clear()
 
         self._launch_page = LaunchPage(
             self._content,
@@ -109,7 +134,6 @@ class App(ctk.CTk):
         self._pages["runtime"] = self._runtime_page
 
         self._advanced_page = AdvancedPage(self._content)
-        self._advanced_page.set_on_change(self._on_settings_change)
         self._pages["advanced"] = self._advanced_page
 
         self._install_page = InstallPage(
@@ -131,22 +155,20 @@ class App(ctk.CTk):
         self._about_page = AboutPage(self._content)
         self._pages["about"] = self._about_page
 
-        # Load settings into UI
-        self._load_settings()
-
-        # Show launch page
-        self._show_page("launch")
-
-        # Detect runtimes on startup
-        self.after(100, self._on_refresh)
-
     def _show_page(self, page_id: str) -> None:
         for pid, page in self._pages.items():
-            page.grid_forget()
+            try:
+                if page.winfo_exists():
+                    page.grid_forget()
+            except Exception:
+                pass
         page = self._pages.get(page_id)
         if page:
-            page.grid(row=0, column=0, sticky="nsew")
-            self._current_page = page_id
+            try:
+                page.grid(row=0, column=0, sticky="nsew")
+                self._current_page = page_id
+            except Exception:
+                pass
 
     def _on_page_select(self, page_id: str) -> None:
         self._show_page(page_id)
@@ -165,6 +187,32 @@ class App(ctk.CTk):
         self._extension_page.refresh_labels()
         self._console_page.refresh_labels()
         self._about_page.refresh_labels()
+        self._update_launch_page()
+
+    def _on_theme_toggle(self) -> None:
+        new_theme = "dark" if S.get_theme() == "light" else "light"
+        S.set_theme(new_theme)
+        S.apply_theme()
+        self.configure(fg_color=S.BG_APP)
+        self._content.configure(fg_color=S.BG_PAGE)
+        self._sidebar.apply_theme()
+
+        # Save console text before destroying pages
+        console_text = self._console_page.get_text()
+
+        # Destroy and recreate all pages so every widget picks up new colors
+        current_page = self._current_page
+        self._create_pages()
+        self._load_settings()
+        self._advanced_page.set_on_change(self._on_settings_change)
+        self._runtime_page.update_runtimes(self._statuses, self._selected_runtime)
+        self._install_page.update_runtimes(self._statuses)
+        self._extension_page.refresh()
+        self._update_launch_page()
+        self._console_page.restore_text(console_text)
+
+        self._show_page(current_page)
+        self._settings.set("theme", new_theme)
 
     def _on_runtime_select(self, runtime_id: str) -> None:
         status = self._statuses.get(runtime_id)
@@ -192,7 +240,7 @@ class App(ctk.CTk):
         self._launch_page.update_connection_info(
             self._advanced_page.host or DEFAULT_HOST,
             self._advanced_page.port or DEFAULT_PORT,
-            "Safe" if self._advanced_page.safe_mode else "Normal",
+            self._advanced_page.safe_mode,
         )
 
     def _load_settings(self) -> None:
@@ -208,22 +256,93 @@ class App(ctk.CTk):
         self._advanced_page.dev_mode = self._settings.get("dev_mode", False)
 
     def _save_settings(self) -> None:
-        self._settings.set("attention_policy", self._advanced_page.attention_policy)
-        self._settings.set("safe_mode", self._advanced_page.safe_mode)
-        self._settings.set("cn_mirror", self._advanced_page.cn_mirror)
-        self._settings.set("host", self._advanced_page.host)
-        self._settings.set("port", self._advanced_page.port)
-        self._settings.set("listen", self._advanced_page.listen)
-        self._settings.set("disable_tensorboard", self._advanced_page.disable_tensorboard)
-        self._settings.set("disable_tageditor", self._advanced_page.disable_tageditor)
-        self._settings.set("disable_auto_mirror", self._advanced_page.disable_auto_mirror)
-        self._settings.set("dev_mode", self._advanced_page.dev_mode)
+        payload = {
+            "attention_policy": self._advanced_page.attention_policy,
+            "safe_mode": self._advanced_page.safe_mode,
+            "cn_mirror": self._advanced_page.cn_mirror,
+            "host": self._advanced_page.host,
+            "port": self._advanced_page.port,
+            "listen": self._advanced_page.listen,
+            "disable_tensorboard": self._advanced_page.disable_tensorboard,
+            "disable_tageditor": self._advanced_page.disable_tageditor,
+            "disable_auto_mirror": self._advanced_page.disable_auto_mirror,
+            "dev_mode": self._advanced_page.dev_mode,
+        }
         if self._selected_runtime:
-            self._settings.set("last_runtime", self._selected_runtime)
+            payload["last_runtime"] = self._selected_runtime
+        self._settings.update_many(payload)
 
     def _on_settings_change(self) -> None:
+        if self._closing:
+            return
+        if self._settings_sync_after_id:
+            try:
+                self.after_cancel(self._settings_sync_after_id)
+            except Exception:
+                pass
+        self._settings_sync_after_id = self.after(250, self._flush_settings_change)
+
+    def _flush_settings_change(self) -> None:
+        self._settings_sync_after_id = None
+        if self._closing:
+            return
         self._save_settings()
         self._update_launch_page()
+
+    def _safe_after(self, delay_ms: int, callback, *args) -> None:
+        if self._closing:
+            return
+        try:
+            if self.winfo_exists():
+                self.after(delay_ms, callback, *args)
+        except Exception:
+            pass
+
+    def _terminate_process(self, log_to_console: bool = True, timeout: float = 3.0) -> None:
+        process = self._process
+        if not process:
+            return
+
+        try:
+            if process.poll() is not None:
+                return
+        except Exception:
+            return
+
+        try:
+            process.terminate()
+            if log_to_console:
+                self._safe_after(0, self._console_page.append_line, "> Sending terminate signal...")
+            process.wait(timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            if log_to_console:
+                self._safe_after(0, self._console_page.append_line, "> Process did not exit in time, forcing shutdown...")
+        except Exception as e:
+            if log_to_console:
+                self._safe_after(0, self._console_page.append_line, f"> Error stopping: {e}")
+            return
+
+        try:
+            if process.poll() is None:
+                if process.stdout:
+                    try:
+                        process.stdout.close()
+                    except Exception:
+                        pass
+                if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True,
+                        check=False,
+                        text=True,
+                    )
+                else:
+                    process.kill()
+                process.wait(timeout=2.0)
+        except Exception as e:
+            if log_to_console:
+                self._safe_after(0, self._console_page.append_line, f"> Error forcing stop: {e}")
 
     def _on_launch(self) -> None:
         if self._process is not None:
@@ -253,7 +372,7 @@ class App(ctk.CTk):
             dev_mode=self._advanced_page.dev_mode,
         )
 
-        self._save_settings()
+        self._flush_settings_change()
         self._launch_page.set_running(True)
         self._launch_page.set_status(t("launching"), S.ACCENT)
 
@@ -288,12 +407,12 @@ class App(ctk.CTk):
             for line in self._process.stdout:
                 decoded = line.decode("utf-8", errors="replace").rstrip("\n\r")
                 if decoded:
-                    self.after(0, self._console_page.append_line, decoded)
+                    self._safe_after(0, self._console_page.append_line, decoded)
         except Exception:
             pass
         finally:
             code = self._process.wait() if self._process else -1
-            self.after(0, self._on_process_exit, code)
+            self._safe_after(0, self._on_process_exit, code)
 
     def _on_process_exit(self, code: int) -> None:
         self._process = None
@@ -305,11 +424,8 @@ class App(ctk.CTk):
 
     def _on_stop(self) -> None:
         if self._process:
-            try:
-                self._process.terminate()
-                self._console_page.append_line("> Sending terminate signal...")
-            except Exception as e:
-                self._console_page.append_line(f"> Error stopping: {e}")
+            thread = threading.Thread(target=self._terminate_process, daemon=True)
+            thread.start()
 
     def _on_install_runtime(self, runtime_id: str) -> None:
         if self._installing:
@@ -332,9 +448,9 @@ class App(ctk.CTk):
                 runtime_def=runtime_def,
                 cn_mirror=cn_mirror,
                 repo_root=self._repo_root,
-                log_callback=lambda line: self.after(0, self._console_page.append_line, line),
+                log_callback=lambda line: self._safe_after(0, self._console_page.append_line, line),
             )
-            self.after(0, self._on_install_done, runtime_id, success)
+            self._safe_after(0, self._on_install_done, runtime_id, success)
 
         thread = threading.Thread(target=_run_install, daemon=True)
         thread.start()
@@ -353,5 +469,13 @@ class App(ctk.CTk):
             self._console_page.append_line(f"> {name} installation failed.")
 
     def _on_close(self) -> None:
+        self._closing = True
+        if self._settings_sync_after_id:
+            try:
+                self.after_cancel(self._settings_sync_after_id)
+            except Exception:
+                pass
+            self._settings_sync_after_id = None
         self._save_settings()
+        self._terminate_process(log_to_console=False, timeout=1.5)
         self.destroy()

@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+APP_VERSION = "v1.4.8"
+
+
 def get_repo_root() -> Path:
     """Resolve the project repo root.
 

@@ -106,6 +106,7 @@ class ControlNetSubsetParams(BaseSubsetParams):
 @dataclass
 class BaseDatasetParams:
     resolution: Optional[Tuple[int, int]] = None
+    skip_image_resolution: Optional[Tuple[int, int]] = None
     network_multiplier: float = 1.0
     debug_dataset: bool = False
     validation_seed: Optional[int] = None
@@ -256,6 +257,7 @@ class ConfigSanitizer:
         "validation_seed": int,
         "validation_split": float,
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
+        "skip_image_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "network_multiplier": float,
         "resize_interpolation": str,
     }
@@ -270,6 +272,7 @@ class ConfigSanitizer:
     ARGPARSE_NULLABLE_OPTNAMES = [
         "face_crop_aug_range",
         "resolution",
+        "skip_image_resolution",
     ]
     # prepare map because option name may differ among argparse and user config
     ARGPARSE_OPTNAME_TO_CONFIG_OPTNAME = {
@@ -547,6 +550,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                 [{dataset_type} {i}]
                   batch_size: {dataset.batch_size}
                   resolution: {(dataset.width, dataset.height)}
+                  skip_image_resolution: {getattr(dataset, "skip_image_resolution", None)}
                   resize_interpolation: {dataset.resize_interpolation}
                   enable_bucket: {dataset.enable_bucket}
             """)

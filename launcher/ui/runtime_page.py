@@ -9,7 +9,7 @@ import customtkinter as ctk
 from launcher.assets import style as S
 from launcher.config import RUNTIMES, RUNTIME_MAP, RuntimeDef
 from launcher.core.runtime_detector import RuntimeStatus
-from launcher.i18n import t
+from launcher.i18n import get_language, t
 from launcher.ui.animations import HoverAnimator, StatusPulse, SlideIn
 from launcher.ui.icons import StatusDot
 
@@ -60,7 +60,7 @@ class RuntimeCard(ctk.CTkFrame):
             self._pulse.start()
 
         # Name
-        is_zh = t("app_title") == "SD-reScripts 启动器"
+        is_zh = get_language() == "zh"
         name = runtime_def.name_zh if is_zh else runtime_def.name_en
         self._name_label = ctk.CTkLabel(
             self, text=name, font=S.FONT_BODY_CJK_BOLD,
@@ -86,16 +86,16 @@ class RuntimeCard(ctk.CTkFrame):
         self._badge = ctk.CTkLabel(
             right_frame, text=status_text,
             font=S.FONT_BADGE, text_color=dot_color,
-            fg_color=badge_bg, corner_radius=8,
+            fg_color=badge_bg, corner_radius=S.BADGE_CORNER_RADIUS,
             padx=10, pady=3,
         )
         self._badge.pack(pady=(0, 4))
 
-        # Install button for non-installed
+            # Install button for non-installed
         if not status.installed:
             self._action_btn = ctk.CTkButton(
                 right_frame, text=t("btn_install"), font=S.FONT_BUTTON_SMALL,
-                width=56, height=24, corner_radius=8,
+                width=56, height=24, corner_radius=S.BADGE_CORNER_RADIUS,
                 fg_color=S.ACCENT_DIM, hover_color=S.ACCENT,
                 text_color=S.ACCENT,
                 command=lambda: self._on_install(self._runtime_def.id),
@@ -158,8 +158,10 @@ class RuntimeCard(ctk.CTkFrame):
     def destroy(self):
         if self._pulse:
             self._pulse.stop()
-        self._shadow.destroy()
-        super().destroy()
+        try:
+            self._shadow.destroy()
+        except Exception:
+            pass
 
 
 class RuntimePage(ctk.CTkScrollableFrame):
@@ -179,6 +181,7 @@ class RuntimePage(ctk.CTkScrollableFrame):
         self._selected_runtime: Optional[str] = None
         self._cards: list[RuntimeCard] = []
         self._category_labels: dict[str, ctk.CTkLabel] = {}
+        self._last_statuses: Dict[str, RuntimeStatus] = {}
 
         self.grid_columnconfigure(0, weight=1)
 
@@ -187,19 +190,21 @@ class RuntimePage(ctk.CTkScrollableFrame):
         header.grid(row=0, column=0, padx=S.INNER_PAD, pady=(S.INNER_PAD, 8), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
+        self._title_label = ctk.CTkLabel(
             header, text=t("runtime_selection"),
             font=S.FONT_H2, text_color=S.TEXT_WHITE, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self._title_label.grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(
+        self._refresh_btn = ctk.CTkButton(
             header, text=t("btn_refresh"), font=S.FONT_TINY,
             width=80, height=28, corner_radius=10,
             fg_color=S.BG_INPUT, hover_color=S.ACCENT_DIM,
             border_width=1, border_color=S.BORDER_SUBTLE,
             text_color=S.TEXT_SECONDARY,
             command=self._on_refresh,
-        ).grid(row=0, column=1, padx=(8, 0))
+        )
+        self._refresh_btn.grid(row=0, column=1, padx=(8, 0))
 
         self._content_row = 1
 
@@ -208,6 +213,7 @@ class RuntimePage(ctk.CTkScrollableFrame):
         statuses: Dict[str, RuntimeStatus],
         selected: Optional[str] = None,
     ) -> None:
+        self._last_statuses = dict(statuses)
         for card in self._cards:
             card.destroy()
         self._cards.clear()
@@ -237,7 +243,7 @@ class RuntimePage(ctk.CTkScrollableFrame):
             row += 1
 
             grid_frame = ctk.CTkFrame(self, fg_color="transparent")
-            grid_frame.grid(row=row, column=0, padx=0, pady=(0, 4), sticky="ew")
+            grid_frame.grid(row=row, column=0, padx=S.INNER_PAD, pady=(0, 4), sticky="ew")
             grid_frame.grid_columnconfigure((0, 1), weight=1)
             row += 1
 
@@ -256,7 +262,7 @@ class RuntimePage(ctk.CTkScrollableFrame):
                 )
                 col = i % 2
                 card_grid_row = i // 2
-                card.shadow.grid(row=card_grid_row, column=col, padx=6, pady=4, sticky="ew")
+                card.shadow.grid(row=card_grid_row, column=col, padx=S.CARD_GAP // 2, pady=S.CARD_GAP // 2, sticky="ew")
 
                 # Slide-in animation with stagger
                 anim = SlideIn(card.shadow, direction="left", offset=20, steps=8, interval=14)
@@ -266,5 +272,9 @@ class RuntimePage(ctk.CTkScrollableFrame):
                 self._cards.append(card)
 
     def refresh_labels(self) -> None:
+        self._title_label.configure(text=t("runtime_selection"))
+        self._refresh_btn.configure(text=t("btn_refresh"))
         for cat, label in self._category_labels.items():
             label.configure(text=t(f"category_{cat}"))
+        if self._last_statuses:
+            self.update_runtimes(self._last_statuses, self._selected_runtime)

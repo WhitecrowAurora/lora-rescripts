@@ -1,0 +1,17 @@
+{
+  "language": "zh",
+  "last_runtime": "sageattention2",
+  "safe_mode": false,
+  "cn_mirror": false,
+  "attention_policy": "default",
+  "host": "127.0.0.1",
+  "port": 28000,
+  "listen": false,
+  "disable_tensorboard": false,
+  "disable_tageditor": false,
+  "disable_auto_mirror": false,
+  "dev_mode": false,
+  "theme": "dark",
+  "window_width": null,
+  "window_height": null
+}

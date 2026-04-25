@@ -1531,6 +1531,7 @@ class NetworkTrainer:
                     "num_train_images": dataset.num_train_images,  # includes repeating
                     "num_reg_images": dataset.num_reg_images,
                     "resolution": (dataset.width, dataset.height),
+                    "skip_image_resolution": getattr(dataset, "skip_image_resolution", None),
                     "enable_bucket": bool(dataset.enable_bucket),
                     "min_bucket_reso": dataset.min_bucket_reso,
                     "max_bucket_reso": dataset.max_bucket_reso,
@@ -1632,6 +1633,7 @@ class NetworkTrainer:
                     "ss_batch_size_per_device": args.train_batch_size,
                     "ss_total_batch_size": total_batch_size,
                     "ss_resolution": args.resolution,
+                    "ss_skip_image_resolution": getattr(args, "skip_image_resolution", None),
                     "ss_color_aug": bool(args.color_aug),
                     "ss_flip_aug": bool(args.flip_aug),
                     "ss_random_crop": bool(args.random_crop),

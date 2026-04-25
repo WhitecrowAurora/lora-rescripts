@@ -66,8 +66,8 @@ class FadeIn:
         anim.start()
     """
 
-    def __init__(self, widget: ctk.CTkFrame, from_color: str = "#0f0f1a",
-                 to_color: str = "#1e1e3a", steps: int = 12, interval: int = 16):
+    def __init__(self, widget: ctk.CTkFrame, from_color: str = "#f0eef5",
+                 to_color: str = "#ffffff", steps: int = 12, interval: int = 16):
         self._widget = widget
         self._from = from_color
         self._to = to_color
@@ -116,7 +116,7 @@ class PulseAnimation:
     """
 
     def __init__(self, widget, attr: str = "fg_color",
-                 color1: str = "#6c8cff", color2: str = "#8aa4ff",
+                 color1: str = "#8b7cf6", color2: str = "#a78bfa",
                  steps: int = 20, interval: int = 30):
         self._widget = widget
         self._attr = attr
@@ -186,8 +186,8 @@ class StatusPulse:
         pulse.stop()
     """
 
-    def __init__(self, widget, color: str = "#4ade80",
-                 dim_color: str = "#2a5a3a", steps: int = 15, interval: int = 40):
+    def __init__(self, widget, color: str = "#6bcf8e",
+                 dim_color: str = "#e0f5e8", steps: int = 15, interval: int = 40):
         self._widget = widget
         self._color = color
         self._dim = dim_color
@@ -261,9 +261,9 @@ class HoverAnimator:
         frame.bind("<Leave>", animator.on_leave)
     """
 
-    def __init__(self, widget: ctk.CTkFrame, normal: str = "#1e1e3a",
-                 hover: str = "#262650", border_normal: str = "#2a2a50",
-                 border_hover: str = "#333360", steps: int = 6, interval: int = 12):
+    def __init__(self, widget: ctk.CTkFrame, normal: str = "#ffffff",
+                 hover: str = "#f8f6fc", border_normal: str = "#e4e0f0",
+                 border_hover: str = "#d8d4ea", steps: int = 6, interval: int = 12):
         self._widget = widget
         self._normal = normal
         self._hover = hover

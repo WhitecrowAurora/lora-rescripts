@@ -3,14 +3,16 @@
 import sys
 import os
 
-# Add the project root to sys.path so that `launcher.xxx` imports work
+# When running as a PyInstaller bundle, _MEIPASS points to the temp extract dir.
+# Otherwise, add the project root so that `launcher.xxx` imports work
 # whether we run from the project root or from the launcher/ directory.
-_launcher_dir = os.path.dirname(os.path.abspath(__file__))
-_project_root = os.path.dirname(_launcher_dir)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
-if _launcher_dir not in sys.path:
-    sys.path.insert(0, _launcher_dir)
+if getattr(sys, 'frozen', False):
+    _root = os.path.dirname(sys.executable)
+else:
+    _launcher_dir = os.path.dirname(os.path.abspath(__file__))
+    _root = os.path.dirname(_launcher_dir)
+if _root not in sys.path:
+    sys.path.insert(0, _root)
 
 
 def main():

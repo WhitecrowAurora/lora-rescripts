@@ -5,10 +5,30 @@ from __future__ import annotations
 import json
 import ctypes
 import locale
+import sys
+import os
 from pathlib import Path
 from typing import Dict, Optional
 
-_LANG_DIR = Path(__file__).parent / "i18n"
+
+def _resolve_lang_dir() -> Path:
+    """Find the i18n/ directory — works both in normal mode and PyInstaller bundle."""
+    if getattr(sys, 'frozen', False):
+        base = Path(sys._MEIPASS) / "launcher"
+    else:
+        base = Path(__file__).parent
+    candidate = base / "i18n"
+    if candidate.is_dir():
+        return candidate
+    # Fallback: try sibling of executable
+    exe_dir = Path(os.path.dirname(sys.executable))
+    fallback = exe_dir / "launcher" / "i18n"
+    if fallback.is_dir():
+        return fallback
+    return candidate
+
+
+_LANG_DIR = _resolve_lang_dir()
 _TRANSLATIONS: Dict[str, Dict[str, str]] = {}
 _current_lang: str = "zh"
 

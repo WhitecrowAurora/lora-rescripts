@@ -153,7 +153,7 @@
             }),
             Schema.object({}),
         ]),
-    ]).description("Lulynx 实验核心")
+    ])
 
     const LULYNX_EXPERIMENTAL_CORE_ANIMA = Schema.intersect([
         LULYNX_EXPERIMENTAL_CORE_COMMON,
@@ -168,20 +168,20 @@
             }),
             Schema.object({}),
         ]),
-    ]).description("Lulynx 实验核心")
+    ])
 
     const PEAK_VRAM_CONTROL = Schema.intersect([
         Schema.object({
-            peak_vram_control_enabled: Schema.boolean().default(false).description("启用显存峰值控制。提供目标等效 batch、启动峰值保护、micro-batch 拆分与轻量显存诊断这些更稳妥的峰值调节入口"),
-        }).description("显存峰值控制"),
+            peak_vram_control_enabled: Schema.boolean().default(false).description("显存峰值控制兜底开关。主要用于已经接近 OOM、启动峰值容易炸、或后台/驱动占用波动较大时救场。能正常跑就不要开，也不要把下面所有兜底项一起全开"),
+        }).description("显存峰值控制（兜底）"),
         Schema.union([
             Schema.object({
                 peak_vram_control_enabled: Schema.const(true).required(),
-                peak_vram_target_effective_batch: Schema.number().min(0).default(0).description("目标等效 batch。填写 0 表示关闭；填写后会优先通过梯度累积去逼近该等效 batch，而不是直接抬高单步 batch"),
-                peak_vram_startup_guard_enabled: Schema.boolean().default(false).description("启动峰值保护。训练开始前若干步会先套用更保守的省显存策略，跨过启动峰值后再回到常规配置（推荐高 batch 开启）"),
-                peak_vram_micro_batch_enabled: Schema.boolean().default(false).description("启用 micro-batch 拆分执行。会把当前 batch 拆成更小的前后向子批次，降低单次前后向峰值显存"),
-                peak_vram_diagnostics_enabled: Schema.boolean().default(false).description("启用轻量显存诊断。训练中会按设定间隔输出 step_start / forward / backward / optimizer 的显存峰值"),
-                peak_vram_auto_protection_enabled: Schema.boolean().default(false).description("启用动态显存自动保护。遇到真实 OOM 会自动降一档保护并重试当前 step，稳定一段时间后再逐档恢复"),
+                peak_vram_target_effective_batch: Schema.number().min(0).default(0).description("目标等效 batch。填写 0 表示关闭；填写后会优先通过梯度累积去逼近该等效 batch，而不是直接抬高单步 batch。通常先调这个，再考虑更重的兜底项"),
+                peak_vram_startup_guard_enabled: Schema.boolean().default(false).description("启动峰值保护。仅在训练前几步容易爆显存时建议开启；正常稳定训练建议关闭"),
+                peak_vram_micro_batch_enabled: Schema.boolean().default(false).description("启用 micro-batch 拆分执行。很强的保命项，但通常会明显降低速度；只有单步 batch 接近 OOM 时再开"),
+                peak_vram_diagnostics_enabled: Schema.boolean().default(false).description("启用轻量显存诊断。仅用于排查问题或测速定位，默认不建议常开"),
+                peak_vram_auto_protection_enabled: Schema.boolean().default(false).description("启用动态显存自动保护。仅在显存波动、偶发 OOM、或后台抢显存时建议开启；能稳定训练就可关闭以减少额外干预"),
             }),
             Schema.object({}),
         ]),
@@ -189,7 +189,7 @@
             Schema.object({
                 peak_vram_control_enabled: Schema.const(true).required(),
                 peak_vram_micro_batch_enabled: Schema.const(true).required(),
-                peak_vram_micro_batch_size: Schema.number().min(1).default(1).description("每个 micro-batch 的实际前后向 batch 大小。例如 train_batch_size=8、这里填 2，则运行时会按 2+2+2+2 拆分"),
+                peak_vram_micro_batch_size: Schema.number().min(1).default(1).description("每个 micro-batch 的实际前后向 batch 大小。例如 train_batch_size=8、这里填 2，则运行时会按 2+2+2+2 拆分。数值越小越稳，通常也越慢"),
             }),
             Schema.object({}),
         ]),
@@ -197,7 +197,7 @@
             Schema.object({
                 peak_vram_control_enabled: Schema.const(true).required(),
                 peak_vram_diagnostics_enabled: Schema.const(true).required(),
-                peak_vram_diagnostics_interval: Schema.number().min(1).default(25).description("每 N 个优化 step 输出一次显存诊断"),
+                peak_vram_diagnostics_interval: Schema.number().min(1).default(25).description("每 N 个优化 step 输出一次显存诊断。仅诊断时再开，平时建议关闭"),
             }),
             Schema.object({}),
         ]),
@@ -205,8 +205,8 @@
             Schema.object({
                 peak_vram_control_enabled: Schema.const(true).required(),
                 peak_vram_startup_guard_enabled: Schema.const(true).required(),
-                peak_vram_startup_guard_mode: Schema.union(["auto", "balanced", "aggressive"]).default("auto").description("启动峰值保护强度。`auto` 会按当前分辨率、batch 与路线自动估计；`balanced` 更偏平衡；`aggressive` 更偏省显存"),
-                peak_vram_startup_guard_steps: Schema.number().min(0).default(24).description("启动峰值保护持续多少个优化 step。`0` 表示整段训练都保留该保护策略，不自动回落"),
+                peak_vram_startup_guard_mode: Schema.union(["auto", "balanced", "aggressive"]).default("auto").description("启动峰值保护强度。`auto` 会按当前分辨率、batch 与路线自动估计；`balanced` 更偏平衡；`aggressive` 更偏省显存但通常也更慢"),
+                peak_vram_startup_guard_steps: Schema.number().min(0).default(24).description("启动峰值保护持续多少个优化 step。`0` 表示整段训练都保留该保护策略，不自动回落。一般不建议为了求稳长期常开"),
             }),
             Schema.object({}),
         ]),
@@ -276,7 +276,7 @@
                 cache_text_encoder_outputs_to_disk: Schema.boolean().description("缓存文本编码器的输出到磁盘"),
                 persistent_data_loader_workers: Schema.boolean().default(true).description("保留加载训练集的worker，减少每个 epoch 之间的停顿。"),
                 vae_batch_size: Schema.number().min(1).description("vae 编码批量大小"),
-                cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：梯度检查点时将部分张量卸载到 CPU，节省显存"),
+                cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性显存兜底项：梯度检查点时将部分张量卸载到 CPU。通常会更慢，只在确实需要省显存时再开"),
                 pytorch_cuda_expandable_segments: Schema.boolean().default(true).description("训练前自动设置 `PYTORCH_ALLOC_CONF=expandable_segments:True`，缓解显存碎片导致的 OOM。一般对速度影响很小；如需排查兼容性或自行管理 allocator，可关闭"),
             }
         },

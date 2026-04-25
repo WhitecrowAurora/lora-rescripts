@@ -91,4 +91,6 @@ NAV_ICONS = {
     "console": ">",
     "about": "i",
     "language": "Aa",
+    "theme_light": "☀",
+    "theme_dark": "☾",
 }

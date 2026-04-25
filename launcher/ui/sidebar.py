@@ -7,6 +7,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from launcher.assets import style as S
+from launcher.config import APP_VERSION
 from launcher.i18n import t
 from launcher.ui.animations import HoverAnimator, lerp_color
 from launcher.ui.icons import IconBadge, NAV_ICONS
@@ -46,7 +47,7 @@ class SidebarButton(ctk.CTkFrame):
         super().__init__(
             master,
             height=S.SIDEBAR_ITEM_HEIGHT,
-            corner_radius=12,
+            corner_radius=S.SIDEBAR_BUTTON_RADIUS,
             fg_color=S.BG_SIDEBAR_ACTIVE if active else S.BG_SIDEBAR,
         )
         self._on_click = on_click
@@ -57,7 +58,7 @@ class SidebarButton(ctk.CTkFrame):
 
         # Icon badge — pastel clay look
         icon_bg = S.ACCENT if active else S.ACCENT_DIM
-        icon_fg = "#ffffff" if active else S.ACCENT
+        icon_fg = S.WHITE if active else S.ACCENT
         self._icon = IconBadge(
             self, symbol=icon_symbol, size=30,
             bg_color=icon_bg, text_color=icon_fg, font_size=11,
@@ -106,6 +107,11 @@ class SidebarButton(ctk.CTkFrame):
                 pass
             self._hover_anim._progress = 0.0
             self._hover_anim._after_id = None
+        # Update hover animator colors to current theme
+        self._hover_anim._normal = S.BG_SIDEBAR
+        self._hover_anim._hover = S.BG_SIDEBAR_HOVER
+        self._hover_anim._border_normal = S.BG_SIDEBAR
+        self._hover_anim._border_hover = S.BG_SIDEBAR_HOVER
         self._accent_bar.configure(fg_color=S.ACCENT if active else "transparent")
         self._update_style()
 
@@ -115,7 +121,7 @@ class SidebarButton(ctk.CTkFrame):
     def _update_style(self) -> None:
         if self._active:
             self.configure(fg_color=S.BG_SIDEBAR_ACTIVE)
-            self._icon.configure_style(bg_color=S.ACCENT, text_color="#ffffff")
+            self._icon.configure_style(bg_color=S.ACCENT, text_color=S.WHITE)
             self._text_label.configure(text_color=S.TEXT_WHITE, font=S.FONT_SIDEBAR_ACTIVE)
             # Force end hover state
             if self._hover_anim:
@@ -150,7 +156,9 @@ class Sidebar(ctk.CTkFrame):
         master,
         on_page_select: Callable[[str], None],
         on_language_toggle: Callable[[], None],
+        on_theme_toggle: Callable[[], None],
         current_lang: str = "zh",
+        current_theme: str = "light",
     ):
         super().__init__(
             master,
@@ -162,8 +170,10 @@ class Sidebar(ctk.CTkFrame):
         self.grid_rowconfigure(99, weight=1)
         self._on_page_select = on_page_select
         self._on_language_toggle = on_language_toggle
+        self._on_theme_toggle = on_theme_toggle
         self._current_page = "launch"
         self._current_lang = current_lang
+        self._current_theme = current_theme
 
         # Brand header
         brand_frame = ctk.CTkFrame(self, fg_color="transparent", height=56)
@@ -181,7 +191,7 @@ class Sidebar(ctk.CTkFrame):
 
         self._version_label = ctk.CTkLabel(
             brand_frame,
-            text="v1.4.8",
+            text=APP_VERSION,
             font=S.FONT_TINY,
             text_color=S.TEXT_DIM,
             anchor="w",
@@ -189,9 +199,10 @@ class Sidebar(ctk.CTkFrame):
         self._version_label.pack(side="left", padx=(8, 0), pady=(6, 0))
 
         # Separator
-        ctk.CTkFrame(
+        self._separator = ctk.CTkFrame(
             self, height=1, fg_color=S.BORDER_SUBTLE,
-        ).grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        )
+        self._separator.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
 
         # Primary nav items
         self._buttons: dict[str, SidebarButton] = {}
@@ -207,6 +218,17 @@ class Sidebar(ctk.CTkFrame):
             btn.grid(row=i + 2, column=0, padx=S.SIDEBAR_ITEM_PAD, pady=2, sticky="ew")
             self._buttons[item.page_id] = btn
 
+        # Theme toggle button
+        theme_symbol = NAV_ICONS["theme_dark"] if self._current_theme == "light" else NAV_ICONS["theme_light"]
+        self._theme_btn = SidebarButton(
+            self,
+            icon_symbol=theme_symbol,
+            text=self._theme_display(),
+            on_click=self._handle_theme_click,
+            page_id="theme_toggle",
+        )
+        self._theme_btn.grid(row=100, column=0, padx=S.SIDEBAR_ITEM_PAD, pady=(4, 2), sticky="ew")
+
         # Language toggle
         self._lang_btn = SidebarButton(
             self,
@@ -215,10 +237,13 @@ class Sidebar(ctk.CTkFrame):
             on_click=self._handle_lang_click,
             page_id="language",
         )
-        self._lang_btn.grid(row=100, column=0, padx=S.SIDEBAR_ITEM_PAD, pady=(4, S.SIDEBAR_BOTTOM_PAD), sticky="ew")
+        self._lang_btn.grid(row=101, column=0, padx=S.SIDEBAR_ITEM_PAD, pady=(2, S.SIDEBAR_BOTTOM_PAD), sticky="ew")
 
     def _lang_display(self) -> str:
         return "中文 / EN" if self._current_lang == "zh" else "EN / 中文"
+
+    def _theme_display(self) -> str:
+        return t("theme_dark") if self._current_theme == "light" else t("theme_light")
 
     def _handle_click(self, page_id: str) -> None:
         if page_id == self._current_page:
@@ -233,11 +258,43 @@ class Sidebar(ctk.CTkFrame):
         self._lang_btn.update_text(self._lang_display())
         self._on_language_toggle()
 
+    def _handle_theme_click(self, page_id: str) -> None:
+        self._current_theme = "dark" if self._current_theme == "light" else "light"
+        # Update button appearance
+        theme_symbol = NAV_ICONS["theme_dark"] if self._current_theme == "light" else NAV_ICONS["theme_light"]
+        self._theme_btn._icon.configure_style(text_color=S.ACCENT)
+        self._on_theme_toggle()
+
+    def apply_theme(self) -> None:
+        """Reconfigure sidebar colors for the current theme."""
+        self.configure(fg_color=S.BG_SIDEBAR)
+        self._brand_label.configure(text_color=S.TEXT_WHITE)
+        self._version_label.configure(text_color=S.TEXT_DIM)
+        self._separator.configure(fg_color=S.BORDER_SUBTLE)
+
+        # Rebuild all nav buttons with new theme colors
+        for pid, btn in self._buttons.items():
+            btn.set_active(pid == self._current_page)
+
+        # Update theme toggle button icon and style
+        theme_symbol = NAV_ICONS["theme_dark"] if self._current_theme == "light" else NAV_ICONS["theme_light"]
+        self._theme_btn._icon._symbol.configure(text=theme_symbol)
+        self._theme_btn._icon.configure_style(bg_color=S.ACCENT_DIM, text_color=S.ACCENT)
+        self._theme_btn.update_text(self._theme_display())
+        self._theme_btn.set_active(False)
+        self._theme_btn.configure(fg_color=S.BG_SIDEBAR)
+
+        # Update language button
+        self._lang_btn._icon.configure_style(bg_color=S.ACCENT_DIM, text_color=S.ACCENT)
+        self._lang_btn.set_active(False)
+        self._lang_btn.configure(fg_color=S.BG_SIDEBAR)
+
     def refresh_labels(self) -> None:
         for item in NAV_ITEMS:
             if item.page_id in self._buttons:
                 self._buttons[item.page_id].update_text(t(item.label_key))
         self._lang_btn.update_text(self._lang_display())
+        self._theme_btn.update_text(self._theme_display())
 
     def set_active_page(self, page_id: str) -> None:
         self._current_page = page_id

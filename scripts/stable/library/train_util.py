@@ -1059,6 +1059,7 @@ class BaseDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         resolution: Optional[Tuple[int, int]],
+        skip_image_resolution: Optional[Tuple[int, int]],
         network_multiplier: float,
         debug_dataset: bool,
         resize_interpolation: Optional[str] = None,
@@ -1067,6 +1068,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
         # width/height is used when enable_bucket==False
         self.width, self.height = (None, None) if resolution is None else resolution
+        self.skip_image_resolution = None if skip_image_resolution is None else tuple(skip_image_resolution)
         self.network_multiplier = network_multiplier
         self.debug_dataset = debug_dataset
 
@@ -1115,11 +1117,75 @@ class BaseDataset(torch.utils.data.Dataset):
         self.tokenize_strategy = None
         self.text_encoder_output_caching_strategy = None
         self.latents_caching_strategy = None
+        self._skip_image_resolution_applied = False
 
     def set_current_strategies(self):
         self.tokenize_strategy = TokenizeStrategy.get_strategy()
         self.text_encoder_output_caching_strategy = TextEncoderOutputsCachingStrategy.get_strategy()
         self.latents_caching_strategy = LatentsCachingStrategy.get_strategy()
+
+    def _refresh_registered_image_counts(self):
+        for subset in self.subsets:
+            subset.img_count = 0
+
+        self.num_train_images = 0
+        self.num_reg_images = 0
+
+        for image_key, image_info in self.image_data.items():
+            subset = self.image_to_subset.get(image_key)
+            if subset is None:
+                continue
+
+            subset.img_count += 1
+            if getattr(subset, "is_reg", False):
+                self.num_reg_images += image_info.num_repeats
+            else:
+                self.num_train_images += image_info.num_repeats
+
+    def apply_skip_image_resolution_filter(self):
+        if self.skip_image_resolution is None or self._skip_image_resolution_applied:
+            return
+
+        min_width, min_height = self.skip_image_resolution
+        min_area = min_width * min_height
+        skipped_images = 0
+        skipped_train_repeats = 0
+        skipped_reg_repeats = 0
+
+        for image_key, image_info in list(self.image_data.items()):
+            image_size = image_info.image_size
+            if image_size is None:
+                continue
+
+            image_width, image_height = image_size
+            if image_width is None or image_height is None or image_width <= 0 or image_height <= 0:
+                continue
+
+            if image_width * image_height > min_area:
+                continue
+
+            subset = self.image_to_subset.pop(image_key, None)
+            self.image_data.pop(image_key, None)
+            skipped_images += 1
+            if getattr(subset, "is_reg", False):
+                skipped_reg_repeats += image_info.num_repeats
+            else:
+                skipped_train_repeats += image_info.num_repeats
+
+        self._skip_image_resolution_applied = True
+
+        if skipped_images == 0:
+            logger.info(
+                f"skip_image_resolution is enabled: images with original area <= {min_width}x{min_height} ({min_area}) will be skipped if found"
+            )
+            return
+
+        self._refresh_registered_image_counts()
+        logger.warning(
+            f"skip_image_resolution filtered {skipped_images} images with original area <= {min_width}x{min_height} ({min_area})"
+            f" / 跳过了 {skipped_images} 张原始面积小于等于阈值的图像"
+            f" / skipped repeats: train={skipped_train_repeats}, reg={skipped_reg_repeats}"
+        )
 
     def adjust_min_max_bucket_reso_by_steps(
         self, resolution: Tuple[int, int], min_bucket_reso: int, max_bucket_reso: int, bucket_reso_steps: int
@@ -1409,7 +1475,31 @@ class BaseDataset(torch.utils.data.Dataset):
             input_ids = torch.stack(iids_list)  # 3,77
         return input_ids
 
+    def _build_registered_image_key(
+        self, base_image_key: str, image_size: Optional[Tuple[int, int]], duplicate_index: int = 0
+    ) -> str:
+        resolved_key = str(base_image_key)
+        if image_size is not None and len(image_size) >= 2:
+            resolved_key = f"{resolved_key}#orig={int(image_size[0])}x{int(image_size[1])}"
+        if duplicate_index > 0:
+            resolved_key = f"{resolved_key}#dup={duplicate_index}"
+        return resolved_key
+
     def register_image(self, info: ImageInfo, subset: BaseSubset):
+        base_image_key = str(info.image_key)
+        resolved_image_key = self._build_registered_image_key(base_image_key, info.image_size)
+        duplicate_index = 0
+        while resolved_image_key in self.image_data:
+            duplicate_index += 1
+            resolved_image_key = self._build_registered_image_key(base_image_key, info.image_size, duplicate_index)
+
+        if resolved_image_key != info.image_key:
+            logger.info(
+                f"resolved duplicated image key: {info.image_key} -> {resolved_image_key}"
+                f" / 已为重复图像生成稳定内部键"
+            )
+            info.image_key = resolved_image_key
+
         self.image_data[info.image_key] = info
         self.image_to_subset[info.image_key] = subset
 
@@ -1422,6 +1512,8 @@ class BaseDataset(torch.utils.data.Dataset):
         for info in tqdm(self.image_data.values()):
             if info.image_size is None:
                 info.image_size = self.get_image_size(info.absolute_path)
+
+        self.apply_skip_image_resolution_filter()
 
         # # run in parallel
         # max_workers = min(os.cpu_count(), len(self.image_data))  # TODO consider multi-gpu (processes)
@@ -2524,6 +2616,7 @@ class DreamBoothDataset(BaseDataset):
         is_training_dataset: bool,
         batch_size: int,
         resolution,
+        skip_image_resolution: Optional[Tuple[int, int]],
         network_multiplier: float,
         enable_bucket: bool,
         min_bucket_reso: int,
@@ -2538,7 +2631,7 @@ class DreamBoothDataset(BaseDataset):
         validation_seed: Optional[int],
         resize_interpolation: Optional[str],
     ) -> None:
-        super().__init__(resolution, network_multiplier, debug_dataset, resize_interpolation)
+        super().__init__(resolution, skip_image_resolution, network_multiplier, debug_dataset, resize_interpolation)
 
         assert resolution is not None, f"resolution is required / resolution（解像度）指定は必須です / 必须指定 resolution（分辨率）"
 
@@ -2837,6 +2930,7 @@ class FineTuningDataset(BaseDataset):
         subsets: Sequence[FineTuningSubset],
         batch_size: int,
         resolution,
+        skip_image_resolution: Optional[Tuple[int, int]],
         network_multiplier: float,
         enable_bucket: bool,
         min_bucket_reso: int,
@@ -2850,7 +2944,7 @@ class FineTuningDataset(BaseDataset):
         validation_split: float,
         resize_interpolation: Optional[str],
     ) -> None:
-        super().__init__(resolution, network_multiplier, debug_dataset, resize_interpolation)
+        super().__init__(resolution, skip_image_resolution, network_multiplier, debug_dataset, resize_interpolation)
 
         self.batch_size = batch_size
         self.size = min(self.width, self.height)  # 短いほう
@@ -2897,25 +2991,32 @@ class FineTuningDataset(BaseDataset):
                     logger.info(f"loading existing JSOL metadata: {subset.metadata_file}")
                     # optional JSONL format
                     # {"image_path": "/path/to/image1.jpg", "caption": "A caption for image1", "image_size": [width, height]}
-                    metadata = {}
+                    metadata_entries = []
                     with open(subset.metadata_file, "rt", encoding="utf-8") as f:
                         for line in f:
+                            if not line.strip():
+                                continue
                             line_md = json.loads(line)
-                            image_md = {"caption": line_md.get("caption", "")}
+                            image_md = {"image_key": line_md["image_path"], "caption": line_md.get("caption", "")}
                             if "image_size" in line_md:
                                 image_md["image_size"] = line_md["image_size"]
                             if "tags" in line_md:
                                 image_md["tags"] = line_md["tags"]
-                            metadata[line_md["image_path"]] = image_md
+                            metadata_entries.append(image_md)
                 else:
                     # standard JSON format
                     logger.info(f"loading existing metadata: {subset.metadata_file}")
                     with open(subset.metadata_file, "rt", encoding="utf-8") as f:
                         metadata = json.load(f)
+                    metadata_entries = []
+                    for image_key, image_md in metadata.items():
+                        normalized_md = dict(image_md or {})
+                        normalized_md["image_key"] = image_key
+                        metadata_entries.append(normalized_md)
             else:
                 raise ValueError(f"no metadata / メタデータファイルがありません / 未找到元数据文件: {subset.metadata_file}")
 
-            if len(metadata) < 1:
+            if len(metadata_entries) < 1:
                 logger.warning(
                     f"ignore subset with '{subset.metadata_file}': no image entries found / 画像に関するデータが見つからないためサブセットを無視します / 元数据中未找到图像条目，已忽略该子集"
                 )
@@ -2925,7 +3026,8 @@ class FineTuningDataset(BaseDataset):
             image_dirs = set()
             if subset.image_dir is not None:
                 image_dirs.add(subset.image_dir)
-            for image_key in metadata.keys():
+            for metadata_entry in metadata_entries:
+                image_key = metadata_entry["image_key"]
                 if not os.path.isabs(image_key):
                     assert (
                         subset.image_dir is not None
@@ -2934,24 +3036,25 @@ class FineTuningDataset(BaseDataset):
                 else:
                     abs_path = image_key
                     image_dirs.add(os.path.dirname(abs_path))
-                metadata[image_key]["abs_path"] = abs_path
+                metadata_entry["abs_path"] = abs_path
 
             # Enumerate existing npz files
             strategy = LatentsCachingStrategy.get_strategy()
             npz_paths = []
-            for image_dir in image_dirs:
-                npz_paths.extend(glob.glob(os.path.join(image_dir, "*" + strategy.cache_suffix)))
-            npz_paths = sorted(npz_paths, key=lambda item: len(os.path.basename(item)), reverse=True)  # longer paths first
+            if strategy is not None:
+                for image_dir in image_dirs:
+                    npz_paths.extend(glob.glob(os.path.join(image_dir, "*" + strategy.cache_suffix)))
+                npz_paths = sorted(npz_paths, key=lambda item: len(os.path.basename(item)), reverse=True)  # longer paths first
 
             # Match image filename longer to shorter because some images share same prefix
-            image_keys_sorted_by_length_desc = sorted(metadata.keys(), key=len, reverse=True)
+            metadata_entries_sorted = sorted(metadata_entries, key=lambda item: len(item["image_key"]), reverse=True)
 
             # Collect tags and sizes
             tags_list = []
             size_set_from_metadata = 0
             size_set_from_cache_filename = 0
-            for image_key in image_keys_sorted_by_length_desc:
-                img_md = metadata[image_key]
+            for img_md in metadata_entries_sorted:
+                image_key = img_md["image_key"]
                 caption = img_md.get("caption")
                 tags = img_md.get("tags")
                 image_size = img_md.get("image_size")
@@ -3012,15 +3115,15 @@ class FineTuningDataset(BaseDataset):
 
             if size_set_from_cache_filename > 0:
                 logger.info(
-                    f"set image size from cache files: {size_set_from_cache_filename}/{len(image_keys_sorted_by_length_desc)}"
+                    f"set image size from cache files: {size_set_from_cache_filename}/{len(metadata_entries_sorted)}"
                 )
             if size_set_from_metadata > 0:
-                logger.info(f"set image size from metadata: {size_set_from_metadata}/{len(image_keys_sorted_by_length_desc)}")
-            self.num_train_images += len(metadata) * subset.num_repeats
+                logger.info(f"set image size from metadata: {size_set_from_metadata}/{len(metadata_entries_sorted)}")
+            self.num_train_images += len(metadata_entries) * subset.num_repeats
 
             # TODO do not record tag freq when no tag
             self.set_tag_frequency(os.path.basename(subset.metadata_file), tags_list)
-            subset.img_count = len(metadata)
+            subset.img_count = len(metadata_entries)
             self.subsets.append(subset)
 
 
@@ -3030,6 +3133,7 @@ class ControlNetDataset(BaseDataset):
         subsets: Sequence[ControlNetSubset],
         batch_size: int,
         resolution,
+        skip_image_resolution: Optional[Tuple[int, int]],
         network_multiplier: float,
         enable_bucket: bool,
         min_bucket_reso: int,
@@ -3043,7 +3147,7 @@ class ControlNetDataset(BaseDataset):
         validation_seed: Optional[int],
         resize_interpolation: Optional[str] = None,
     ) -> None:
-        super().__init__(resolution, network_multiplier, debug_dataset, resize_interpolation)
+        super().__init__(resolution, skip_image_resolution, network_multiplier, debug_dataset, resize_interpolation)
 
         db_subsets = []
         for subset in subsets:
@@ -3087,6 +3191,7 @@ class ControlNetDataset(BaseDataset):
             True,
             batch_size,
             resolution,
+            skip_image_resolution,
             network_multiplier,
             enable_bucket,
             min_bucket_reso,
@@ -3158,6 +3263,9 @@ class ControlNetDataset(BaseDataset):
 
     def make_buckets(self):
         self.dreambooth_dataset_delegate.make_buckets()
+        self.image_data = self.dreambooth_dataset_delegate.image_data
+        self.num_train_images = self.dreambooth_dataset_delegate.num_train_images
+        self.num_reg_images = self.dreambooth_dataset_delegate.num_reg_images
         self.bucket_manager = self.dreambooth_dataset_delegate.bucket_manager
         self.buckets_indices = self.dreambooth_dataset_delegate.buckets_indices
 
@@ -5748,6 +5856,12 @@ def add_dataset_arguments(
         help="resolution in training ('size' or 'width,height') / 学習時の画像解像度（'サイズ'指定、または'幅,高さ'指定）",
     )
     parser.add_argument(
+        "--skip_image_resolution",
+        type=str,
+        default=None,
+        help="skip images whose original area is equal to or smaller than this resolution ('size' or 'width,height') / 跳过原始面积小于等于该分辨率的图像（'尺寸' 或 '宽,高'）",
+    )
+    parser.add_argument(
         "--cache_latents",
         action="store_true",
         help="cache latents to main memory to reduce VRAM usage (augmentations must be disabled) / VRAM削減のためにlatentをメインメモリにcacheする（augmentationは使用不可） ",
@@ -6836,14 +6950,28 @@ def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
     if hasattr(args, "caption_tag_dropout_target_count"):
         args.caption_tag_dropout_target_count = max(1, int(args.caption_tag_dropout_target_count or 1))
 
-    # assert args.resolution is not None, f"resolution is required / resolution（解像度）を指定してください"
-    if args.resolution is not None:
-        args.resolution = tuple([int(r) for r in args.resolution.split(",")])
-        if len(args.resolution) == 1:
-            args.resolution = (args.resolution[0], args.resolution[0])
+    def _parse_scalar_or_twodim_resolution_arg(raw_value, arg_name: str):
+        if raw_value is None:
+            return None
+
+        if isinstance(raw_value, (tuple, list)):
+            parsed = tuple(int(r) for r in raw_value)
+        else:
+            parsed = tuple(int(r) for r in str(raw_value).split(","))
+
+        if len(parsed) == 1:
+            parsed = (parsed[0], parsed[0])
         assert (
-            len(args.resolution) == 2
-        ), f"resolution must be 'size' or 'width,height' / resolution（解像度）は'サイズ'または'幅','高さ'で指定してください / resolution 需填写为“size”或“width,height”: {args.resolution}"
+            len(parsed) == 2
+        ), f"{arg_name} must be 'size' or 'width,height' / {arg_name}（解像度）は'サイズ'または'幅','高さ'で指定してください / {arg_name} 需填写为“size”或“width,height”: {parsed}"
+        return parsed
+
+    # assert args.resolution is not None, f"resolution is required / resolution（解像度）を指定してください"
+    args.resolution = _parse_scalar_or_twodim_resolution_arg(args.resolution, "resolution")
+    if hasattr(args, "skip_image_resolution"):
+        args.skip_image_resolution = _parse_scalar_or_twodim_resolution_arg(
+            args.skip_image_resolution, "skip_image_resolution"
+        )
 
     if args.face_crop_aug_range is not None:
         args.face_crop_aug_range = tuple([float(r) for r in args.face_crop_aug_range.split(",")])

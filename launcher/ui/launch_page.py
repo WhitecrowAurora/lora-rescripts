@@ -9,7 +9,7 @@ import customtkinter as ctk
 from launcher.assets import style as S
 from launcher.config import RUNTIME_MAP
 from launcher.core.runtime_detector import RuntimeStatus
-from launcher.i18n import t
+from launcher.i18n import get_language, t
 from launcher.ui.animations import PulseAnimation, StatusPulse
 from launcher.ui.icons import StatusDot
 
@@ -32,6 +32,9 @@ class LaunchPage(ctk.CTkFrame):
         self._selected_runtime: Optional[str] = None
         self._selected_runtime_status: Optional[RuntimeStatus] = None
         self._pulse: Optional[PulseAnimation] = None
+        self._connection_host = "127.0.0.1"
+        self._connection_port = 28000
+        self._safe_mode = False
 
         self.grid_columnconfigure(0, weight=1)
 
@@ -74,25 +77,43 @@ class LaunchPage(ctk.CTkFrame):
         info_row.grid(row=1, column=0, padx=S.INNER_PAD, pady=4, sticky="ew")
         info_row.grid_columnconfigure((0, 1, 2), weight=1)
 
-        self._info_cards: dict[str, ctk.CTkLabel] = {}
-        for i, (key, default) in enumerate([("host", "127.0.0.1"), ("port", "28000"), ("mode", "--")]):
+        self._info_cards: dict[str, dict] = {}
+        self._mini_shadows: list[ctk.CTkFrame] = []
+        self._mini_cards: list[ctk.CTkFrame] = []
+        info_specs = [
+            ("host", "host", "127.0.0.1"),
+            ("port", "port", "28000"),
+            ("mode", "mode", t("mode_normal")),
+        ]
+        for i, (key, title_key, default) in enumerate(info_specs):
+            # Shadow frame for mini card
+            mini_shadow = ctk.CTkFrame(
+                info_row, fg_color=S.SHADOW_CARD,
+                corner_radius=S.CARD_MINI_RADIUS + 2,
+            )
+            mini_shadow.grid(row=0, column=i, padx=4, pady=4, sticky="ew")
+            mini_shadow.grid_columnconfigure(0, weight=1)
+            self._mini_shadows.append(mini_shadow)
+
             card = ctk.CTkFrame(
-                info_row, fg_color=S.BG_CARD, corner_radius=14,
+                mini_shadow, fg_color=S.BG_CARD, corner_radius=S.CARD_MINI_RADIUS,
                 border_width=1, border_color=S.BORDER_SUBTLE, height=64,
             )
-            card.grid(row=0, column=i, padx=4, pady=4, sticky="ew")
+            card.pack(padx=2, pady=2, fill="both", expand=True)
             card.grid_columnconfigure(0, weight=1)
             card.grid_propagate(True)
+            self._mini_cards.append(card)
 
-            ctk.CTkLabel(
-                card, text=key.upper(), font=S.FONT_TINY, text_color=S.TEXT_DIM,
-            ).grid(row=0, column=0, padx=14, pady=(10, 2))
+            title = ctk.CTkLabel(
+                card, text=t(title_key), font=S.FONT_TINY, text_color=S.TEXT_DIM,
+            )
+            title.grid(row=0, column=0, padx=S.CARD_INNER_PAD, pady=(10, 2))
 
             lbl = ctk.CTkLabel(
                 card, text=default, font=S.FONT_BODY_BOLD, text_color=S.TEXT_PRIMARY,
             )
-            lbl.grid(row=1, column=0, padx=14, pady=(0, 10))
-            self._info_cards[key] = lbl
+            lbl.grid(row=1, column=0, padx=S.CARD_INNER_PAD, pady=(0, 10))
+            self._info_cards[key] = {"title": title, "value": lbl}
 
         # --- Launch button (capsule shape) ---
         self._launch_btn = ctk.CTkButton(
@@ -101,7 +122,7 @@ class LaunchPage(ctk.CTkFrame):
             font=S.LAUNCH_BUTTON_FONT,
             fg_color=S.ACCENT,
             hover_color=S.ACCENT_HOVER,
-            text_color="#ffffff",
+            text_color=S.WHITE,
             height=S.LAUNCH_BUTTON_HEIGHT,
             corner_radius=S.LAUNCH_BUTTON_CORNER_RADIUS,
             command=self._handle_launch,
@@ -136,7 +157,7 @@ class LaunchPage(ctk.CTkFrame):
 
         if runtime_id and runtime_id in RUNTIME_MAP:
             rt = RUNTIME_MAP[runtime_id]
-            is_zh = t("app_title") == "SD-reScripts 启动器"
+            is_zh = get_language() == "zh"
             name = rt.name_zh if is_zh else rt.name_en
             self._runtime_name.configure(text=name)
         else:
@@ -170,10 +191,13 @@ class LaunchPage(ctk.CTkFrame):
 
         self._update_hint()
 
-    def update_connection_info(self, host: str, port: int, mode: str) -> None:
-        self._info_cards["host"].configure(text=host)
-        self._info_cards["port"].configure(text=str(port))
-        self._info_cards["mode"].configure(text=mode)
+    def update_connection_info(self, host: str, port: int, safe_mode: bool) -> None:
+        self._connection_host = host
+        self._connection_port = port
+        self._safe_mode = safe_mode
+        self._info_cards["host"]["value"].configure(text=host)
+        self._info_cards["port"]["value"].configure(text=str(port))
+        self._info_cards["mode"]["value"].configure(text=t("mode_safe") if safe_mode else t("mode_normal"))
 
     def set_running(self, running: bool) -> None:
         self._is_running = running
@@ -186,7 +210,7 @@ class LaunchPage(ctk.CTkFrame):
             self._launch_btn.configure(
                 text=t("stop"),
                 fg_color=S.RED,
-                hover_color="#e06060",
+                hover_color=S.RED_HOVER,
                 command=self._on_stop,
             )
             self._status_label.configure(text=t("status_running"), text_color=S.GREEN)
@@ -219,9 +243,14 @@ class LaunchPage(ctk.CTkFrame):
 
     def refresh_labels(self) -> None:
         self._launch_btn.configure(text=t("btn_launch") if not self._is_running else t("stop"))
+        self._info_cards["host"]["title"].configure(text=t("host"))
+        self._info_cards["port"]["title"].configure(text=t("port"))
+        self._info_cards["mode"]["title"].configure(text=t("mode"))
         if self._selected_runtime and self._selected_runtime in RUNTIME_MAP:
             rt = RUNTIME_MAP[self._selected_runtime]
-            is_zh = t("app_title") == "SD-reScripts 启动器"
+            is_zh = get_language() == "zh"
             name = rt.name_zh if is_zh else rt.name_en
             self._runtime_name.configure(text=name)
+            self.update_runtime(self._selected_runtime, self._selected_runtime_status)
+        self.update_connection_info(self._connection_host, self._connection_port, self._safe_mode)
         self._update_hint()

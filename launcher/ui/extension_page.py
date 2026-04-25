@@ -17,6 +17,7 @@ import customtkinter as ctk
 
 from launcher.assets import style as S
 from launcher.i18n import t
+from launcher.ui.animations import HoverAnimator
 from launcher.ui.icons import StatusDot
 
 
@@ -219,14 +220,14 @@ class PluginCard(ctk.CTkFrame):
                 ctk.CTkLabel(
                     badge_frame, text=cap, font=S.FONT_BADGE,
                     text_color=S.ACCENT, fg_color=S.ACCENT_DIM,
-                    corner_radius=6, padx=6, pady=1,
+                    corner_radius=S.BADGE_CORNER_RADIUS, padx=6, pady=1,
                 ).pack(side="left", padx=(0, 4))
 
             for hook in plugin.hooks[:3]:
                 ctk.CTkLabel(
                     badge_frame, text=hook, font=S.FONT_BADGE,
                     text_color=S.TEXT_SECONDARY, fg_color=S.BG_INPUT,
-                    corner_radius=6, padx=6, pady=1,
+                    corner_radius=S.BADGE_CORNER_RADIUS, padx=6, pady=1,
                 ).pack(side="left", padx=(0, 4))
 
             if len(plugin.hooks) + len(plugin.capabilities) > 6:
@@ -245,14 +246,36 @@ class PluginCard(ctk.CTkFrame):
             right_frame, text="", variable=self._switch_var,
             font=S.FONT_SMALL, text_color=S.TEXT_PRIMARY,
             fg_color=S.BG_INPUT, progress_color=S.ACCENT,
-            button_color="#ffffff", button_hover_color=S.ACCENT_HOVER,
+            button_color=S.WHITE, button_hover_color=S.ACCENT_HOVER,
             width=40, command=self._on_switch,
         )
         self._switch.pack()
 
+        # Hover animator
+        self._hover_anim = HoverAnimator(
+            self,
+            normal=S.BG_CARD,
+            hover=S.BG_CARD_HOVER,
+            border_normal=S.BORDER_SUBTLE if not plugin.enabled else S.BORDER_ACCENT,
+            border_hover=S.BORDER_CARD,
+            steps=5, interval=12,
+        )
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        for child in self.winfo_children():
+            if child != self._shadow:
+                child.bind("<Enter>", self._on_enter)
+                child.bind("<Leave>", self._on_leave)
+
     @property
     def shadow(self) -> ctk.CTkFrame:
         return self._shadow
+
+    def _on_enter(self, event) -> None:
+        self._hover_anim.on_enter()
+
+    def _on_leave(self, event) -> None:
+        self._hover_anim.on_leave()
 
     def _on_switch(self) -> None:
         enabled = self._switch_var.get()
@@ -262,8 +285,10 @@ class PluginCard(ctk.CTkFrame):
         self._on_toggle(self._plugin.plugin_id, enabled)
 
     def destroy(self):
-        self._shadow.destroy()
-        super().destroy()
+        try:
+            self._shadow.destroy()
+        except Exception:
+            pass
 
 
 class ExtensionPage(ctk.CTkScrollableFrame):
@@ -288,19 +313,21 @@ class ExtensionPage(ctk.CTkScrollableFrame):
         header.grid(row=0, column=0, padx=S.INNER_PAD, pady=(S.INNER_PAD, 8), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
+        self._title_label = ctk.CTkLabel(
             header, text=t("extension_title"),
             font=S.FONT_H2, text_color=S.TEXT_WHITE, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self._title_label.grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(
+        self._refresh_btn = ctk.CTkButton(
             header, text=t("btn_refresh"), font=S.FONT_TINY,
-            width=80, height=28, corner_radius=10,
+            width=80, height=28, corner_radius=S.BUTTON_CORNER_RADIUS,
             fg_color=S.BG_INPUT, hover_color=S.ACCENT_DIM,
             border_width=1, border_color=S.BORDER_SUBTLE,
             text_color=S.TEXT_SECONDARY,
             command=self.refresh,
-        ).grid(row=0, column=1, padx=(8, 0))
+        )
+        self._refresh_btn.grid(row=0, column=1, padx=(8, 0))
 
         # Note
         self._note_label = ctk.CTkLabel(
@@ -343,7 +370,7 @@ class ExtensionPage(ctk.CTkScrollableFrame):
                 plugin=plugin,
                 on_toggle=self._handle_toggle,
             )
-            card.shadow.grid(row=self._list_row + i, column=0, padx=S.INNER_PAD, pady=4, sticky="ew")
+            card.shadow.grid(row=self._list_row + i, column=0, padx=S.INNER_PAD, pady=S.CARD_GAP // 2, sticky="ew")
             self._cards.append(card)
 
     def _handle_toggle(self, plugin_id: str, enabled: bool) -> None:
@@ -352,4 +379,8 @@ class ExtensionPage(ctk.CTkScrollableFrame):
             self._on_toggle_callback(plugin_id, enabled)
 
     def refresh_labels(self) -> None:
+        self._title_label.configure(text=t("extension_title"))
+        self._refresh_btn.configure(text=t("btn_refresh"))
         self._note_label.configure(text=t("extension_note"))
+        if self._empty_label:
+            self._empty_label.configure(text=t("extension_no_plugins"))

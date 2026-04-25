@@ -661,8 +661,24 @@ class LatentsCachingStrategy:
     def resolve_disk_cache_root(self, absolute_path: str, dataset_root: Optional[str] = None) -> str:
         return resolve_latents_cache_root(absolute_path, dataset_root)
 
-    def build_disk_cache_image_key(self, absolute_path: str, cache_root: str) -> str:
-        return build_latents_cache_image_key(absolute_path, cache_root)
+    def build_disk_cache_image_key(
+        self,
+        absolute_path: str,
+        cache_root: str,
+        *,
+        image_size: Optional[Tuple[int, int]] = None,
+        bucket_reso: Optional[Tuple[int, int]] = None,
+        flip_aug: Optional[bool] = None,
+        alpha_mask: Optional[bool] = None,
+    ) -> str:
+        return build_latents_cache_image_key(
+            absolute_path,
+            cache_root,
+            image_size=image_size,
+            bucket_reso=bucket_reso,
+            flip_aug=flip_aug,
+            alpha_mask=alpha_mask,
+        )
 
     def _get_safetensors_cache_dir(self, cache_root: str) -> str:
         normalized_cache_root = os.path.abspath(cache_root)
@@ -726,6 +742,7 @@ class LatentsCachingStrategy:
         *,
         shard_path: str,
         entry_key: str,
+        image_size: Optional[Tuple[int, int]],
         bucket_reso: Tuple[int, int],
         flip_aug: bool,
         alpha_mask: bool,
@@ -737,6 +754,7 @@ class LatentsCachingStrategy:
         catalog[str(image_key)] = {
             "path": os.path.abspath(shard_path),
             "entry_key": str(entry_key),
+            "image_size": tuple(image_size or ()),
             "bucket_reso": tuple(bucket_reso),
             "flip_aug": bool(flip_aug),
             "alpha_mask": bool(alpha_mask),
@@ -775,22 +793,37 @@ class LatentsCachingStrategy:
             return None
 
         cache_root = self.resolve_disk_cache_root(absolute_path, cache_root)
-        image_key = self.build_disk_cache_image_key(absolute_path, cache_root)
-        entry = self._load_safetensors_catalog(cache_root).get(image_key)
+        image_key = self.build_disk_cache_image_key(
+            absolute_path,
+            cache_root,
+            image_size=image_size,
+            bucket_reso=bucket_reso,
+            flip_aug=flip_aug,
+            alpha_mask=alpha_mask,
+        )
+        catalog = self._load_safetensors_catalog(cache_root)
+        entry = catalog.get(image_key)
+        if entry is None:
+            legacy_image_key = self.build_disk_cache_image_key(absolute_path, cache_root)
+            entry = catalog.get(legacy_image_key)
         if entry is not None:
             if tuple(entry.get("bucket_reso") or ()) == tuple(bucket_reso):
-                if bool(entry.get("flip_aug")) == bool(flip_aug) and bool(entry.get("alpha_mask")) == bool(alpha_mask):
-                    shard_path = str(entry.get("path") or "")
-                    entry_key = str(entry.get("entry_key") or "")
-                    if shard_path and entry_key and os.path.exists(shard_path):
-                        try:
-                            source_stat = os.stat(absolute_path)
-                        except OSError:
-                            source_stat = None
-                        if source_stat is not None:
-                            if int(entry.get("source_mtime_ns", 0) or 0) == int(source_stat.st_mtime_ns):
-                                if int(entry.get("source_size", 0) or 0) == int(source_stat.st_size):
-                                    return LatentsDiskCacheRef(format="safetensors", path=shard_path, entry_key=entry_key)
+                entry_image_size = tuple(entry.get("image_size") or ())
+                if entry_image_size and entry_image_size != tuple(image_size):
+                    entry = None
+                else:
+                    if bool(entry.get("flip_aug")) == bool(flip_aug) and bool(entry.get("alpha_mask")) == bool(alpha_mask):
+                        shard_path = str(entry.get("path") or "")
+                        entry_key = str(entry.get("entry_key") or "")
+                        if shard_path and entry_key and os.path.exists(shard_path):
+                            try:
+                                source_stat = os.stat(absolute_path)
+                            except OSError:
+                                source_stat = None
+                            if source_stat is not None:
+                                if int(entry.get("source_mtime_ns", 0) or 0) == int(source_stat.st_mtime_ns):
+                                    if int(entry.get("source_size", 0) or 0) == int(source_stat.st_size):
+                                        return LatentsDiskCacheRef(format="safetensors", path=shard_path, entry_key=entry_key)
 
         npz_path = self.get_latents_npz_path(absolute_path, image_size)
         if self.is_disk_cached_latents_expected(bucket_reso, npz_path, flip_aug, alpha_mask):
@@ -932,7 +965,14 @@ class LatentsCachingStrategy:
                 tensors[f"alpha_mask::{entry_key}"] = entry.alpha_mask_tensor.detach().cpu().contiguous()
 
             cache_root_for_entry = str(getattr(entry.info, "latents_cache_root", "") or cache_root)
-            image_key = self.build_disk_cache_image_key(entry.info.absolute_path, cache_root_for_entry)
+            image_key = self.build_disk_cache_image_key(
+                entry.info.absolute_path,
+                cache_root_for_entry,
+                image_size=getattr(entry.info, "image_size", None),
+                bucket_reso=tuple(context["bucket_reso"]),
+                flip_aug=bool(context["flip_aug"]),
+                alpha_mask=bool(context["alpha_mask"]),
+            )
             try:
                 source_stat = os.stat(entry.info.absolute_path)
                 source_mtime_ns = int(source_stat.st_mtime_ns)
@@ -961,6 +1001,7 @@ class LatentsCachingStrategy:
                 image_key,
                 shard_path=shard_path,
                 entry_key=entry_key,
+                image_size=getattr(entry.info, "image_size", None),
                 bucket_reso=tuple(context["bucket_reso"]),
                 flip_aug=bool(context["flip_aug"]),
                 alpha_mask=bool(context["alpha_mask"]),

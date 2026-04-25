@@ -731,6 +731,11 @@ class AnimaNetworkTrainer:
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
 
+        # Align with train_network.py: metadata-backed datasets may inspect the
+        # active latents caching strategy during initialization.
+        strategy_base.LatentsCachingStrategy.set_strategy(
+            strategy_anima.AnimaLatentsCachingStrategy(args.cache_latents_to_disk, args.vae_batch_size, args.skip_cache_check)
+        )
         if args.dataset_class is None:
             blueprint_generator = BlueprintGenerator(ConfigSanitizer(True, True, args.masked_loss, True))
             if args.dataset_config is not None:
@@ -795,9 +800,6 @@ class AnimaNetworkTrainer:
         if cache_latents:
             assert train_dataset_group.is_latent_cacheable(), "when caching latents, either color_aug or random_crop cannot be used"
 
-        strategy_base.LatentsCachingStrategy.set_strategy(
-            strategy_anima.AnimaLatentsCachingStrategy(args.cache_latents_to_disk, args.vae_batch_size, args.skip_cache_check)
-        )
         self.assert_extra_args(args, train_dataset_group, val_dataset_group)
 
         path_bases = anima_train_utils._get_anima_path_bases(args)
@@ -1829,5 +1831,3 @@ def setup_parser() -> argparse.ArgumentParser:
         help="[Deprecated] use 'skip_cache_check' instead",
     )
     return parser
-
-

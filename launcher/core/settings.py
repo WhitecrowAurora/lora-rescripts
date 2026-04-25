@@ -23,6 +23,7 @@ _DEFAULTS: Dict[str, Any] = {
     "disable_tageditor": False,
     "disable_auto_mirror": False,
     "dev_mode": False,
+    "theme": "light",
     "window_width": None,
     "window_height": None,
 }
@@ -64,6 +65,15 @@ class Settings:
         old = self._data.get(key)
         self._data[key] = value
         if old != value:
+            self.save()
+
+    def update_many(self, values: Dict[str, Any]) -> None:
+        changed = False
+        for key, value in values.items():
+            if self._data.get(key) != value:
+                self._data[key] = value
+                changed = True
+        if changed:
             self.save()
 
     def __getattr__(self, name: str) -> Any:

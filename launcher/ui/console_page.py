@@ -21,17 +21,18 @@ class ConsolePage(ctk.CTkFrame):
         toolbar.grid(row=0, column=0, padx=S.INNER_PAD, pady=(S.INNER_PAD, 6), sticky="ew")
         toolbar.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
+        self._title_label = ctk.CTkLabel(
             toolbar, text=t("console_title"),
             font=S.FONT_H2, text_color=S.TEXT_WHITE, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self._title_label.grid(row=0, column=0, sticky="w")
 
         btn_frame = ctk.CTkFrame(toolbar, fg_color="transparent")
         btn_frame.grid(row=0, column=1, sticky="e")
 
         self._copy_btn = ctk.CTkButton(
             btn_frame, text=t("console_copy"), font=S.FONT_TINY,
-            width=60, height=26, corner_radius=10,
+            width=60, height=26, corner_radius=S.BUTTON_CORNER_RADIUS,
             fg_color=S.BG_INPUT, hover_color=S.ACCENT_DIM,
             border_width=1, border_color=S.BORDER_SUBTLE,
             text_color=S.TEXT_SECONDARY,
@@ -41,7 +42,7 @@ class ConsolePage(ctk.CTkFrame):
 
         self._clear_btn = ctk.CTkButton(
             btn_frame, text=t("console_clear"), font=S.FONT_TINY,
-            width=60, height=26, corner_radius=10,
+            width=60, height=26, corner_radius=S.BUTTON_CORNER_RADIUS,
             fg_color=S.BG_INPUT, hover_color=S.ACCENT_DIM,
             border_width=1, border_color=S.BORDER_SUBTLE,
             text_color=S.TEXT_SECONDARY,
@@ -57,12 +58,13 @@ class ConsolePage(ctk.CTkFrame):
         shadow.grid(row=1, column=0, padx=S.INNER_PAD, pady=(0, S.INNER_PAD), sticky="nsew")
         shadow.grid_columnconfigure(0, weight=1)
         shadow.grid_rowconfigure(0, weight=1)
+        self._shadow = shadow
 
         self._textbox = ctk.CTkTextbox(
             shadow,
             font=S.FONT_CONSOLE,
-            fg_color="#1e1e2e",
-            text_color="#cdd6f4",
+            fg_color=S.CONSOLE_BG,
+            text_color=S.CONSOLE_FG,
             corner_radius=S.CARD_CORNER_RADIUS,
             border_width=1,
             border_color=S.BORDER_SUBTLE,
@@ -74,6 +76,25 @@ class ConsolePage(ctk.CTkFrame):
 
         self._placeholder = True
         self._append_text(t("console_empty") + "\n", dim=True)
+
+    def get_text(self) -> str:
+        """Return current console text content."""
+        self._textbox.configure(state="normal")
+        text = self._textbox.get("1.0", "end")
+        self._textbox.configure(state="disabled")
+        return text
+
+    def restore_text(self, text: str) -> None:
+        """Restore console text (used after page rebuild on theme switch)."""
+        stripped = text.strip()
+        if not stripped or stripped == t("console_empty"):
+            return
+        self._textbox.configure(state="normal")
+        self._textbox.delete("1.0", "end")
+        self._placeholder = False
+        self._textbox.insert("end", text)
+        self._textbox.see("end")
+        self._textbox.configure(state="disabled")
 
     def append_line(self, line: str) -> None:
         if self._placeholder:
@@ -107,4 +128,11 @@ class ConsolePage(ctk.CTkFrame):
         self.clipboard_append(text)
 
     def refresh_labels(self) -> None:
-        pass
+        self._title_label.configure(text=t("console_title"))
+        self._copy_btn.configure(text=t("console_copy"))
+        self._clear_btn.configure(text=t("console_clear"))
+        if self._placeholder:
+            self._textbox.configure(state="normal")
+            self._textbox.delete("1.0", "end")
+            self._textbox.configure(state="disabled")
+            self._append_text(t("console_empty") + "\n", dim=True)

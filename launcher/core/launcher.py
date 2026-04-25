@@ -79,7 +79,11 @@ def build_launch_env(
         # already have a guarded policy.
         if "MIKAZUKI_STARTUP_ATTENTION_POLICY" not in runtime_def.env_vars:
             env.pop("MIKAZUKI_STARTUP_ATTENTION_POLICY", None)
-    # "default": don't set anything extra
+    else:
+        # "default" should behave like a clean runtime default, not inherit a
+        # stale value from the parent shell or a previous launcher session.
+        if "MIKAZUKI_STARTUP_ATTENTION_POLICY" not in runtime_def.env_vars:
+            env.pop("MIKAZUKI_STARTUP_ATTENTION_POLICY", None)
 
     # --- CN Mirror ---
     if options.cn_mirror:

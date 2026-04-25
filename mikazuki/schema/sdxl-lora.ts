@@ -76,13 +76,13 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
-            sdxl_block_swap_enabled: Schema.boolean().default(false).description("启用独立的 SDXL U-Net block swap 开关。关闭时，下方子选项不会生效；若同时开启 ≤6GB 低显存优化，则仍会由低显存预设接管 block swap"),
-        }).description("SDXL Block Swap"),
+            sdxl_block_swap_enabled: Schema.boolean().default(false).description("SDXL U-Net block swap 兜底开关。主要用于显存吃紧时保命，能正常跑就不要开；若同时开启 ≤6GB 低显存优化，则仍会由低显存预设接管 block swap"),
+        }).description("SDXL Block Swap（兜底）"),
         Schema.union([
             Schema.object({
                 sdxl_block_swap_enabled: Schema.const(true).required(),
-                sdxl_block_swap_output_blocks: Schema.boolean().default(true).description("推荐第一步尝试。交换 U-Net output blocks，通常速度影响最小"),
-                sdxl_block_swap_middle_block: Schema.boolean().default(true).description("推荐第二步尝试。交换 U-Net middle block，通常仍比较划算"),
+                sdxl_block_swap_output_blocks: Schema.boolean().default(true).description("推荐第一步尝试。交换 U-Net output blocks，通常速度影响最小；如果本来能跑，就不建议开"),
+                sdxl_block_swap_middle_block: Schema.boolean().default(true).description("推荐第二步尝试。交换 U-Net middle block，通常仍比较划算，但依然会拖慢训练"),
                 sdxl_block_swap_offload_after_backward: Schema.boolean().default(true).description("推荐第三步尝试。反向传播结束后立即卸载已交换 block，更省显存，但通常更慢"),
                 sdxl_block_swap_input_blocks: Schema.boolean().default(false).description("推荐最后再尝试。交换 U-Net input blocks，显存收益较大，但通常速度损失最大"),
                 sdxl_block_swap_vram_threshold: Schema.number().min(0).max(99).step(1).default(70).description("高级参数：block swap 的软显存水线（百分比）。一般保持默认即可"),
@@ -93,24 +93,24 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
-            sdxl_low_vram_optimization: Schema.boolean().default(false).description("低显存优化（≤6GB）。开启后会按低显存预设自动调整缓存、预览和训练目标"),
-        }).description("低显存优化（≤6GB）"),
+            sdxl_low_vram_optimization: Schema.boolean().default(false).description("低显存兜底预设（≤6GB）。主要给本来就跑不动、频繁 OOM、或共享显存环境不稳定的情况使用。能正常跑就不要开"),
+        }).description("低显存优化（≤6GB / 兜底）"),
         Schema.union([
             Schema.object({
                 sdxl_low_vram_optimization: Schema.const(true).required(),
                 sdxl_low_vram_resolution_mode: Schema.union(["long_edge", "short_edge"]).default("long_edge").description("分辨率规划模式。推荐 `long_edge`；`short_edge` 细节更强但更吃显存"),
                 sdxl_low_vram_bucket_reso_steps: Schema.number().default(32).description("低显存模式 bucket 步长。推荐 32，可改为 64"),
-                sdxl_low_vram_two_phase_cache: Schema.boolean().default(true).description("启用两阶段缓存流程。会优先把缓存阶段与正式训练阶段解耦"),
-                sdxl_low_vram_component_cpu_residency: Schema.boolean().default(true).description("启用非训练组件 CPU 驻留。VAE / 文本编码器会尽量只在需要时临时上 GPU"),
-                sdxl_low_vram_fixed_block_swap: Schema.boolean().default(true).description("启用 SDXL U-Net block swap。下面的子项可决定具体交换哪些区域、是否在反向后卸载，以及显存水线目标"),
+                sdxl_low_vram_two_phase_cache: Schema.boolean().default(true).description("启用两阶段缓存流程。会优先把缓存阶段与正式训练阶段解耦。更稳，但初始化和整体节奏通常会更保守"),
+                sdxl_low_vram_component_cpu_residency: Schema.boolean().default(true).description("启用非训练组件 CPU 驻留。VAE / 文本编码器会尽量只在需要时临时上 GPU，更省显存，但通常会更慢"),
+                sdxl_low_vram_fixed_block_swap: Schema.boolean().default(true).description("启用 SDXL U-Net block swap。属于明显的省显存兜底项，通常会牺牲速度"),
                 sdxl_low_vram_swap_input_blocks: Schema.boolean().default(false).description("交换 U-Net input blocks。显存收益较大，但通常会更慢"),
-                sdxl_low_vram_swap_middle_block: Schema.boolean().default(true).description("交换 U-Net middle block。通常是比较划算的一档"),
-                sdxl_low_vram_swap_output_blocks: Schema.boolean().default(true).description("交换 U-Net output blocks。通常建议优先尝试"),
+                sdxl_low_vram_swap_middle_block: Schema.boolean().default(true).description("交换 U-Net middle block。通常是比较划算的一档，但本质上仍是兜底减速项"),
+                sdxl_low_vram_swap_output_blocks: Schema.boolean().default(true).description("交换 U-Net output blocks。通常建议优先尝试，但仅在显存吃紧时再开"),
                 sdxl_low_vram_swap_offload_after_backward: Schema.boolean().default(true).description("反向传播结束后把已交换 block 立即移回 CPU。更省显存，但通常更慢"),
                 sdxl_low_vram_swap_vram_threshold: Schema.number().min(0).max(99).step(1).default(0).description("block swap 的软显存水线（百分比）。`0` 表示始终尽快卸载；高于 0 时，低于该值会尽量少卸载，超过后会更积极地把已交换 block 移回 CPU"),
                 sdxl_low_vram_preview_policy: Schema.union(["every_2_epochs", "every_4_epochs", "disable"]).default("every_4_epochs").description("低显存模式预览策略。默认每 4 个 epoch 生成一次，也可改成每 2 个 epoch 或完全关闭"),
-                sdxl_low_vram_auto_protection: Schema.boolean().default(true).description("启用 OOM 自动保护。预览 OOM 时会先降频，再自动关闭预览；训练阶段会给出更明确的低显存建议"),
-                sdxl_low_vram_auto_resolution_probe: Schema.boolean().default(true).description("启动前自动分辨率探测。会先用 3 步预跑检查专用显存与共享显存占用，必要时按 64 为单位自动下调目标边长"),
+                sdxl_low_vram_auto_protection: Schema.boolean().default(true).description("启用 OOM 自动保护。预览 OOM 时会先降频，再自动关闭预览；训练阶段会给出更明确的低显存建议。只在低显存兜底模式下建议使用"),
+                sdxl_low_vram_auto_resolution_probe: Schema.boolean().default(true).description("启动前自动分辨率探测。会先用 3 步预跑检查专用显存与共享显存占用，必要时按 64 为单位自动下调目标边长。更稳，但启动会更慢"),
             }),
             Schema.object({}),
         ]),
@@ -174,7 +174,7 @@ Schema.intersect([
         SHARED_SCHEMAS.NETWORK_OPTION_BASEWEIGHT,
     ]),
 
-    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_SDXL,
+    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_SDXL.description("Lulynx 实验核心"),
     SHARED_SCHEMAS.PREVIEW_IMAGE,
     SHARED_SCHEMAS.LOG_SETTINGS,
     SHARED_SCHEMAS.VALIDATION_SETTINGS,

@@ -45,6 +45,9 @@
 
     "host": "Host",
     "port": "Port",
+    "mode": "Mode",
+    "mode_safe": "Safe Mode",
+    "mode_normal": "Normal Mode",
     "listen": "Listen on all interfaces (0.0.0.0)",
     "disable_tensorboard": "Disable TensorBoard",
     "disable_tageditor": "Disable Tag Editor",
@@ -70,6 +73,7 @@
     "about_project": "Project",
     "about_fork": "Forked from Akegarasu lora-scripts",
     "about_github": "GitHub Repository",
+    "about_footer": "Forked from 秋葉 lora-scripts · Modified by Lulynx",
 
     "runtime_missing_title": "Runtime Not Found",
     "runtime_missing_msg": "No Python runtime detected for {runtime}. Please install it first.",
@@ -96,5 +100,8 @@
     "extension_note": "Manage installed plugin extensions. Changes take effect on next trainer launch.",
     "extension_no_plugins": "No plugin extensions detected",
     "extension_enabled": "Enabled",
-    "extension_disabled": "Disabled"
+    "extension_disabled": "Disabled",
+
+    "theme_light": "Light Mode",
+    "theme_dark": "Dark Mode"
 }
