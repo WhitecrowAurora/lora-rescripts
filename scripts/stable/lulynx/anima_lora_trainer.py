@@ -137,6 +137,7 @@ class AnimaNetworkTrainer:
         self.sample_prompts_te_outputs = None
         self.is_swapping_blocks = False
         self._use_unsloth_offload_checkpointing = False
+        self._anima_backend_drift_check_completed = False
 
     def normalize_conflicting_network_target_flags(self, args):
         train_unet_only = bool(getattr(args, "network_train_unet_only", False))
@@ -350,6 +351,210 @@ class AnimaNetworkTrainer:
     def get_noise_scheduler(self, args: argparse.Namespace, device: torch.device) -> Any:
         return sd3_train_utils.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=args.discrete_flow_shift)
 
+    @staticmethod
+    def _is_anima_sage_drift_check_disabled() -> bool:
+        raw_value = str(os.environ.get("LULYNX_DISABLE_ANIMA_SAGE_DRIFT_CHECK", "") or "").strip().lower()
+        return raw_value in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _resolve_anima_sage_drift_reference_backend() -> str:
+        has_flash_fixed = callable(getattr(anima_models.attention, "flash_attn_func", None))
+        has_flash_varlen = callable(getattr(anima_models.attention, "flash_attn_varlen_func", None))
+        return "flash" if has_flash_fixed and has_flash_varlen else "torch"
+
+    @staticmethod
+    def _forward_anima_model_pred(
+        anima,
+        network,
+        noisy_model_input,
+        timesteps,
+        prompt_embeds,
+        padding_mask,
+        t5_input_ids,
+        t5_attn_mask,
+        attn_mask,
+    ) -> torch.Tensor:
+        try:
+            if network is not None and hasattr(network, "set_current_timestep"):
+                network.set_current_timestep(timesteps)
+            model_pred = anima(
+                noisy_model_input,
+                timesteps,
+                prompt_embeds,
+                padding_mask=padding_mask,
+                target_input_ids=t5_input_ids,
+                target_attention_mask=t5_attn_mask,
+                source_attention_mask=attn_mask,
+            )
+        finally:
+            if network is not None and hasattr(network, "clear_current_timestep"):
+                network.clear_current_timestep()
+        return model_pred.squeeze(2)
+
+    def _maybe_run_anima_sageattention_drift_check(
+        self,
+        args,
+        accelerator,
+        anima,
+        network,
+        noisy_model_input,
+        timesteps,
+        text_encoder_conds,
+        padding_mask,
+        target,
+        weighting,
+    ) -> None:
+        if self._anima_backend_drift_check_completed:
+            return
+
+        attn_mode = str(getattr(args, "attn_mode", "") or "").strip().lower()
+        if attn_mode != "sageattn" or accelerator.device.type != "cuda":
+            return
+
+        self._anima_backend_drift_check_completed = True
+        if self._is_anima_sage_drift_check_disabled():
+            logger.info("Anima SageAttention startup drift self-check disabled via LULYNX_DISABLE_ANIMA_SAGE_DRIFT_CHECK=1.")
+            return
+
+        reference_backend = self._resolve_anima_sage_drift_reference_backend()
+        wrapped_modules = []
+        for module in (anima, network):
+            if module is None or not isinstance(module, torch.nn.Module):
+                continue
+            wrapped_modules.append((module, module.training))
+
+        prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = text_encoder_conds
+        model_input_check = anima_train_utils.maybe_apply_anima_channels_last(args, noisy_model_input.detach().unsqueeze(2))
+        timesteps_check = timesteps.detach()
+        prompt_embeds_check = prompt_embeds.detach()
+        padding_mask_check = padding_mask.detach()
+        attn_mask_check = attn_mask.detach() if attn_mask is not None else None
+        t5_input_ids_check = t5_input_ids.detach() if t5_input_ids is not None else None
+        t5_attn_mask_check = t5_attn_mask.detach() if t5_attn_mask is not None else None
+        target_check = target.detach().float()
+        weighting_check = weighting.detach() if weighting is not None else None
+
+        unwrapped_anima = accelerator.unwrap_model(anima) if hasattr(accelerator, "unwrap_model") else anima
+        if not hasattr(unwrapped_anima, "set_attention_backend"):
+            logger.warning(
+                "Anima SageAttention drift self-check skipped because the current Anima model does not expose set_attention_backend()."
+            )
+            return
+
+        original_backend = str(getattr(unwrapped_anima, "attn_mode", attn_mode) or attn_mode).strip().lower() or attn_mode
+        original_split_attn = bool(getattr(unwrapped_anima, "split_attn", False))
+
+        try:
+            for module, _ in wrapped_modules:
+                module.eval()
+
+            with torch.no_grad(), accelerator.autocast():
+                unwrapped_anima.set_attention_backend(reference_backend, split_attn=original_split_attn)
+                ref_pred = self._forward_anima_model_pred(
+                    anima,
+                    network,
+                    model_input_check,
+                    timesteps_check,
+                    prompt_embeds_check,
+                    padding_mask_check,
+                    t5_input_ids_check,
+                    t5_attn_mask_check,
+                    attn_mask_check,
+                ).float()
+
+                unwrapped_anima.set_attention_backend(attn_mode, split_attn=original_split_attn)
+                sage_pred = self._forward_anima_model_pred(
+                    anima,
+                    network,
+                    model_input_check,
+                    timesteps_check,
+                    prompt_embeds_check,
+                    padding_mask_check,
+                    t5_input_ids_check,
+                    t5_attn_mask_check,
+                    attn_mask_check,
+                ).float()
+
+            if not torch.isfinite(ref_pred).all() or not torch.isfinite(sage_pred).all():
+                logger.warning(
+                    "Anima SageAttention startup drift self-check produced non-finite outputs. "
+                    "Treat SageAttention loss as non-comparable to FlashAttention / SDPA for this run."
+                )
+                return
+
+            diff = sage_pred - ref_pred
+            ref_norm = float(ref_pred.norm().item())
+            diff_norm = float(diff.norm().item())
+            relative_l2 = diff_norm / max(ref_norm, 1e-12)
+            cosine = float(
+                torch.nn.functional.cosine_similarity(
+                    sage_pred.reshape(1, -1),
+                    ref_pred.reshape(1, -1),
+                    dim=1,
+                    eps=1e-12,
+                ).item()
+            )
+            max_abs_diff = float(diff.abs().max().item())
+
+            huber_c = train_util.get_huber_threshold_if_needed(args, timesteps_check, None)
+            ref_loss = train_util.conditional_loss(ref_pred, target_check, args.loss_type, "none", huber_c)
+            sage_loss = train_util.conditional_loss(sage_pred, target_check, args.loss_type, "none", huber_c)
+            if weighting_check is not None:
+                ref_loss = ref_loss * weighting_check
+                sage_loss = sage_loss * weighting_check
+
+            ref_loss_value = float(ref_loss.mean().item())
+            sage_loss_value = float(sage_loss.mean().item())
+            loss_ratio = sage_loss_value / max(ref_loss_value, 1e-12)
+
+            logger.info(
+                "Anima SageAttention startup drift self-check: reference_backend=%s | relative_l2=%.6f | cosine=%.6f | "
+                "max_abs_diff=%.6f | loss_sage=%.6f | loss_%s=%.6f | loss_ratio=%.6f",
+                reference_backend,
+                relative_l2,
+                cosine,
+                max_abs_diff,
+                sage_loss_value,
+                reference_backend,
+                ref_loss_value,
+                loss_ratio,
+            )
+
+            drift_exceeds_guard = (
+                not math.isfinite(relative_l2)
+                or not math.isfinite(cosine)
+                or not math.isfinite(loss_ratio)
+                or relative_l2 > 0.05
+                or cosine < 0.995
+                or loss_ratio < 0.85
+                or loss_ratio > 1.15
+            )
+            if drift_exceeds_guard:
+                logger.warning(
+                    "Anima SageAttention startup drift self-check detected a large mismatch against %s. "
+                    "Training can continue, but the displayed SageAttention loss is not directly comparable to %s and may "
+                    "appear artificially lower. For production Anima training, prefer FlashAttention2 when available, or "
+                    "fall back to torch/SDPA. Metrics: relative_l2=%.6f, cosine=%.6f, max_abs_diff=%.6f, loss_ratio=%.6f.",
+                    reference_backend,
+                    reference_backend,
+                    relative_l2,
+                    cosine,
+                    max_abs_diff,
+                    loss_ratio,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Anima SageAttention startup drift self-check failed: %s. Training will continue with SageAttention enabled.",
+                exc,
+            )
+        finally:
+            try:
+                unwrapped_anima.set_attention_backend(original_backend, split_attn=original_split_attn)
+            except Exception:
+                pass
+            for module, was_training in reversed(wrapped_modules):
+                module.train(was_training)
+
     def get_noise_pred_and_target(
         self,
         args,
@@ -398,6 +603,21 @@ class AnimaNetworkTrainer:
                 dtype=weight_dtype,
                 use_channels_last=bool(getattr(args, "opt_channels_last", False)),
             )
+            target = noise - latents
+            weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
+
+        self._maybe_run_anima_sageattention_drift_check(
+            args,
+            accelerator,
+            anima,
+            network,
+            noisy_model_input,
+            timesteps,
+            text_encoder_conds,
+            padding_mask,
+            target,
+            weighting,
+        )
 
         with (profiler.step_section("dit_forward") if profiler is not None else nullcontext()):
             noisy_model_input = noisy_model_input.unsqueeze(2)
@@ -420,8 +640,6 @@ class AnimaNetworkTrainer:
                         network.clear_current_timestep()
             model_pred = model_pred.squeeze(2)
 
-        target = noise - latents
-        weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
         return model_pred, target, timesteps, weighting
 
     def process_batch(
@@ -1722,11 +1940,13 @@ class AnimaNetworkTrainer:
                 if safeguard is not None:
                     safeguard.record_loss(current_loss)
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-                logs = {"avr_loss": loss_recorder.moving_average}
+                average_loss = loss_recorder.moving_average
+                logs = {"avr_loss": average_loss}
                 progress_bar.set_postfix(**{**max_mean_logs, **logs}, refresh=False)
 
                 if len(accelerator.trackers) > 0:
                     step_logs = {"loss": current_loss}
+                    train_util.append_step_loss_to_logs(step_logs, current_loss=current_loss, average_loss=average_loss)
                     if keys_scaled is not None:
                         step_logs["max_norm/keys_scaled"] = keys_scaled
                         step_logs["max_norm/max_key_norm"] = maximum_norm
@@ -1749,7 +1969,10 @@ class AnimaNetworkTrainer:
                 break
 
             if len(accelerator.trackers) > 0:
-                accelerator.log({"loss/epoch_average": loss_recorder.moving_average}, step=global_step)
+                accelerator.log(
+                    {"loss/epoch": loss_recorder.moving_average, "loss/epoch_average": loss_recorder.moving_average},
+                    step=epoch + 1,
+                )
 
             accelerator.wait_for_everyone()
             optimizer_eval_fn()

@@ -47,7 +47,7 @@ echo # PowerShell Detection Script
  echo.
  echo $runtimeSpecs = @(
  echo     [pscustomobject]@{ Name = 'portable'; Label = 'Main Runtime / 主运行时' }
- echo     [pscustomobject]@{ Name = 'flashattention'; Label = 'FlashAttention Runtime / FlashAttention 运行时' }
+ echo     [pscustomobject]@{ Name = 'flashattention'; Label = 'FlashAttention2 Runtime / FlashAttention2 运行时' }
  echo     [pscustomobject]@{ Name = 'blackwell'; Label = 'Blackwell Runtime / Blackwell 运行时' }
  echo     [pscustomobject]@{ Name = 'sageattention'; Label = 'SageAttention Runtime / SageAttention 运行时' }
  echo     [pscustomobject]@{ Name = 'sageattention2'; Label = 'SageAttention2 Runtime / SageAttention2 运行时' }
@@ -111,7 +111,7 @@ if "%RUNTIME_COUNT%"=="0" (
     echo.
     echo 请先运行安装脚本:
     echo   - install_venv_portable.ps1      (主环境)
-    echo   - install_flashattention.ps1    (FlashAttention)
+    echo   - install_flashattention.ps1    (FlashAttention2)
     echo   - install_sageattention.ps1     (SageAttention)
     echo   - ...
     echo.

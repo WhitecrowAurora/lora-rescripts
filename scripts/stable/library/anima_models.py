@@ -1369,6 +1369,19 @@ class Anima(nn.Module):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
+    def set_attention_backend(self, attn_mode: str, split_attn: Optional[bool] = None) -> None:
+        normalized_attn_mode = str(attn_mode or "torch").strip().lower() or "torch"
+        normalized_split_attn = self.split_attn if split_attn is None else bool(split_attn)
+
+        for module in self.modules():
+            if hasattr(module, "attn_mode"):
+                module.attn_mode = normalized_attn_mode
+            if hasattr(module, "split_attn"):
+                module.split_attn = normalized_split_attn
+
+        self.attn_mode = normalized_attn_mode
+        self.split_attn = normalized_split_attn
+
     @property
     def device(self):
         return next(self.parameters()).device

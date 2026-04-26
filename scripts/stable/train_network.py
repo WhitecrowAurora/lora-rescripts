@@ -2504,7 +2504,7 @@ class NetworkTrainer:
 
             # END OF EPOCH
             if is_tracking:
-                logs = {"loss/epoch_average": loss_recorder.moving_average}
+                logs = {"loss/epoch": loss_recorder.moving_average, "loss/epoch_average": loss_recorder.moving_average}
                 self.epoch_logging(accelerator, logs, global_step, effective_epoch_no)
 
             accelerator.wait_for_everyone()

@@ -90,10 +90,20 @@ def detect_all(repo_root: Optional[Path] = None) -> Dict[str, RuntimeStatus]:
 def get_best_runtime(statuses: Dict[str, RuntimeStatus]) -> Optional[str]:
     """Auto-select the best available runtime.
 
-    Priority: sageattention > sageattention2 > flashattention > standard
+    Prefers dedicated/specialized runtimes before the generic standard runtime.
     Falls back to any installed runtime if the preferred ones are missing.
     """
-    preference_order = ["sageattention", "sageattention2", "flashattention", "standard"]
+    preference_order = [
+        "sageattention-blackwell",
+        "blackwell",
+        "sageattention2",
+        "sageattention",
+        "flashattention",
+        "intel-xpu-sage",
+        "intel-xpu",
+        "rocm-amd",
+        "standard",
+    ]
     for rt_id in preference_order:
         if rt_id in statuses and statuses[rt_id].installed:
             return rt_id

@@ -600,6 +600,7 @@ def train(args):
 
             wandb.define_metric("epoch")
             wandb.define_metric("loss/epoch", step_metric="epoch")
+            wandb.define_metric("loss/epoch_average", step_metric="epoch")
 
     if is_swapping_blocks:
         accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
@@ -1036,8 +1037,11 @@ def train(args):
 
             if safeguard is not None:
                 safeguard.record_loss(current_loss)
+            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+            avr_loss: float = loss_recorder.moving_average
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
+                train_util.append_step_loss_to_logs(logs, current_loss=current_loss, average_loss=avr_loss)
                 train_util.append_lr_to_logs_with_names(
                     logs,
                     lr_scheduler,
@@ -1046,8 +1050,6 @@ def train(args):
                 )
                 accelerator.log(logs, step=global_step)
 
-            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-            avr_loss: float = loss_recorder.moving_average
             logs = {"avr_loss": avr_loss}
             progress_bar.set_postfix(**logs, refresh=False)
 
@@ -1055,8 +1057,12 @@ def train(args):
                 break
 
         if len(accelerator.trackers) > 0:
-            logs = {"loss/epoch": loss_recorder.moving_average, "epoch": effective_epoch_no}
-            accelerator.log(logs, step=global_step)
+            logs = {
+                "loss/epoch": loss_recorder.moving_average,
+                "loss/epoch_average": loss_recorder.moving_average,
+                "epoch": effective_epoch_no,
+            }
+            accelerator.log(logs, step=effective_epoch_no)
 
         accelerator.wait_for_everyone()
 

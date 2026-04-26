@@ -1035,8 +1035,11 @@ def train(args):
 
             if safeguard is not None:
                 safeguard.record_loss(current_loss)
+            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+            avr_loss: float = loss_recorder.moving_average
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
+                train_util.append_step_loss_to_logs(logs, current_loss=current_loss, average_loss=avr_loss)
                 if block_lrs is None:
                     train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_unet)
                 else:
@@ -1044,8 +1047,6 @@ def train(args):
 
                 accelerator.log(logs, step=global_step)
 
-            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-            avr_loss: float = loss_recorder.moving_average
             logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
 
@@ -1053,7 +1054,7 @@ def train(args):
                 break
 
         if len(accelerator.trackers) > 0:
-            logs = {"loss/epoch": loss_recorder.moving_average}
+            logs = {"loss/epoch": loss_recorder.moving_average, "loss/epoch_average": loss_recorder.moving_average}
             accelerator.log(logs, step=epoch + 1)
 
         accelerator.wait_for_everyone()

@@ -16,15 +16,8 @@ if _root not in sys.path:
 
 
 def main():
-    import customtkinter as ctk
-    from launcher.app import App
-
-    ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("dark-blue")
-
-    app = App()
-    app.protocol("WM_DELETE_WINDOW", app._on_close)
-    app.mainloop()
+    from launcher.window import create_window
+    create_window()
 
 
 if __name__ == "__main__":

@@ -46,3 +46,4 @@ huggingface/hub/version_diffusers_cache.txt
 A启动新前端UI.bat
 /flashattention-wheels
 /ref
+/launcher/web/node_modules

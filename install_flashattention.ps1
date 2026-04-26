@@ -335,7 +335,7 @@ function Assert-FlashAttentionRuntimeReady {
         throw "FlashAttention runtime verification failed: $($issues -join '; ')"
     }
 
-    Write-Host -ForegroundColor Green "FlashAttention runtime versions: Python $($probe.python_version); Torch $($probe.torch_version); TorchVision $($probe.torchvision_version); flash-attn $($probe.flashattention_version)"
+    Write-Host -ForegroundColor Green "FlashAttention2 runtime versions: Python $($probe.python_version); Torch $($probe.torch_version); TorchVision $($probe.torchvision_version); flash-attn $($probe.flashattention_version)"
     Write-Host -ForegroundColor Green "CUDA available: $($probe.cuda_available)"
 }
 
@@ -716,4 +716,4 @@ Invoke-Step "Verifying FlashAttention environment..." {
 }
 
 Set-Content -Path $flashAttentionMarker -Value "" -Encoding ASCII
-Write-Host -ForegroundColor Green "FlashAttention experimental environment is ready"
+Write-Host -ForegroundColor Green "FlashAttention2 experimental environment is ready"

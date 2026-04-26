@@ -1,0 +1,305 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+Theme CSS variables
+Dark theme → blue-600 primary
+Light theme → amber-600 primary
+--------------------------------------------------------------------------- */
+
+:root {
+  /* Dark theme (default) */
+  --bg-base: #0a0b0e;
+  --bg-sidebar: rgba(17, 19, 24, 0.5);
+  --bg-card: rgba(255, 255, 255, 0.05);
+  --bg-card-hover: rgba(255, 255, 255, 0.1);
+  --bg-input: rgba(30, 32, 40, 0.5);
+  --border: rgba(255, 255, 255, 0.05);
+  --border-card: rgba(255, 255, 255, 0.1);
+
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-dim: #475569;
+
+  --accent: #2563eb; /* blue-600 */
+  --accent-light: #3b82f6; /* blue-500 */
+  --accent-dark: #1d4ed8; /* blue-700 */
+  --accent-subtle: rgba(37, 99, 235, 0.1);
+  --accent-border: rgba(37, 99, 235, 0.5);
+  --accent-ring: rgba(37, 99, 235, 0.2);
+  --accent-shadow: rgba(37, 99, 235, 0.2);
+  --accent-text: #60a5fa; /* blue-400 */
+  --accent-glow: rgba(37, 99, 235, 0.6);
+
+  --secondary: #a855f7; /* purple-500 */
+  --secondary-text: #c084fc; /* purple-400 */
+
+  --success: #10b981;
+  --success-text: #34d399;
+  --success-subtle: rgba(16, 185, 129, 0.1);
+  --success-border: rgba(16, 185, 129, 0.2);
+
+  --warning: #f59e0b;
+  --warning-text: #fbbf24;
+  --warning-subtle: rgba(245, 158, 11, 0.1);
+  --warning-border: rgba(245, 158, 11, 0.2);
+
+  --danger: #ef4444;
+  --danger-text: #f87171;
+  --danger-subtle: rgba(239, 68, 68, 0.1);
+  --danger-border: rgba(239, 68, 68, 0.2);
+
+  --console-bg: #0f1115;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.05);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.1);
+}
+
+[data-theme="light"] {
+  --bg-base: #f5f5f4;
+  --bg-sidebar: rgba(255, 255, 255, 0.7);
+  --bg-card: rgba(0, 0, 0, 0.03);
+  --bg-card-hover: rgba(0, 0, 0, 0.06);
+  --bg-input: rgba(0, 0, 0, 0.04);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-card: rgba(0, 0, 0, 0.1);
+
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-dim: #cbd5e1;
+
+  --accent: #d97706; /* amber-600 */
+  --accent-light: #f59e0b; /* amber-500 */
+  --accent-dark: #b45309; /* amber-700 */
+  --accent-subtle: rgba(217, 119, 6, 0.08);
+  --accent-border: rgba(217, 119, 6, 0.4);
+  --accent-ring: rgba(217, 119, 6, 0.15);
+  --accent-shadow: rgba(217, 119, 6, 0.2);
+  --accent-text: #d97706; /* amber-600 */
+  --accent-glow: rgba(217, 119, 6, 0.5);
+
+  --secondary: #8b5cf6; /* violet-500 */
+  --secondary-text: #7c3aed; /* violet-600 */
+
+  --success: #10b981;
+  --success-text: #059669;
+  --success-subtle: rgba(16, 185, 129, 0.08);
+  --success-border: rgba(16, 185, 129, 0.2);
+
+  --warning: #f59e0b;
+  --warning-text: #d97706;
+  --warning-subtle: rgba(245, 158, 11, 0.08);
+  --warning-border: rgba(245, 158, 11, 0.2);
+
+  --danger: #ef4444;
+  --danger-text: #dc2626;
+  --danger-subtle: rgba(239, 68, 68, 0.08);
+  --danger-border: rgba(239, 68, 68, 0.2);
+
+  --console-bg: #1e1e2e;
+  --scrollbar-thumb: rgba(0, 0, 0, 0.1);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.2);
+}
+
+/* ---------------------------------------------------------------------------
+Base styles
+--------------------------------------------------------------------------- */
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+}
+
+/* Custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* Shadow glow for active nav indicator */
+.shadow-glow {
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
+}
+[data-theme="light"] .shadow-glow {
+  box-shadow: 0 0 10px rgba(217, 119, 6, 0.4);
+}
+
+/* ---------------------------------------------------------------------------
+1. Button animations — hover scale + glow, click shrink
+--------------------------------------------------------------------------- */
+
+.btn-interactive {
+  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.2s ease,
+              background-color 0.2s ease,
+              color 0.2s ease;
+  cursor: pointer;
+}
+.btn-interactive:hover {
+  transform: scale(1.03);
+}
+.btn-interactive:active {
+  transform: scale(0.97);
+  transition-duration: 0.08s;
+}
+
+/* Accent button variant — adds glow on hover */
+.btn-accent-glow:hover {
+  box-shadow: 0 0 20px var(--accent-shadow), 0 4px 12px var(--accent-shadow);
+}
+
+/* ---------------------------------------------------------------------------
+2. Launch button — breathing ring pulse + running spinner
+--------------------------------------------------------------------------- */
+
+@keyframes breathe-ring {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.15;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.35;
+  }
+}
+.launch-breathe-ring {
+  animation: breathe-ring 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.launch-spinner-ring {
+  animation: spin-slow 2s linear infinite;
+}
+
+/* ---------------------------------------------------------------------------
+3. Page transition — fade + slide
+--------------------------------------------------------------------------- */
+
+@keyframes pageEnter {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes pageExit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+}
+.page-enter {
+  animation: pageEnter 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ---------------------------------------------------------------------------
+4. Card hover lift + border highlight
+--------------------------------------------------------------------------- */
+
+.card-interactive {
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+              border-color 0.2s ease,
+              box-shadow 0.25s ease,
+              background-color 0.2s ease;
+}
+.card-interactive:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent-border) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15), 0 0 0 1px var(--accent-ring);
+}
+
+/* ---------------------------------------------------------------------------
+5. Sidebar sliding indicator
+--------------------------------------------------------------------------- */
+
+@keyframes slideIndicator {
+  from {
+    transform: translateY(var(--indicator-from-y));
+  }
+  to {
+    transform: translateY(var(--indicator-to-y));
+  }
+}
+.sidebar-indicator {
+  transition: top 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ---------------------------------------------------------------------------
+6. Install button shimmer
+--------------------------------------------------------------------------- */
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.btn-shimmer {
+  background-size: 200% 100%;
+  background-image: linear-gradient(
+    90deg,
+    var(--accent) 0%,
+    var(--accent-light) 25%,
+    rgba(255, 255, 255, 0.3) 50%,
+    var(--accent-light) 75%,
+    var(--accent) 100%
+  );
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+/* ---------------------------------------------------------------------------
+Utility animations (existing)
+--------------------------------------------------------------------------- */
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-glow {
+  animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.animate-slide-in-right {
+  animation: slideInRight 0.3s ease-out;
+}
+
+@keyframes slideInUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-in-up {
+  animation: slideInUp 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}

@@ -816,8 +816,12 @@ class TextualInversionTrainer:
 
                 if safeguard is not None:
                     safeguard.record_loss(current_loss)
+                loss_total += current_loss
+                avr_loss = loss_total / (step + 1)
                 if len(accelerator.trackers) > 0:
                     logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
+                    train_util.append_step_loss_to_logs(logs, current_loss=current_loss, average_loss=avr_loss)
+                    logs["lr/embedding"] = float(lr_scheduler.get_last_lr()[0])
                     if (
                         args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower()
                     ):  # tracking d*lr value
@@ -826,8 +830,6 @@ class TextualInversionTrainer:
                         )
                     accelerator.log(logs, step=global_step)
 
-                loss_total += current_loss
-                avr_loss = loss_total / (step + 1)
                 logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)
 
@@ -835,7 +837,7 @@ class TextualInversionTrainer:
                     break
 
             if len(accelerator.trackers) > 0:
-                logs = {"loss/epoch": loss_total / len(train_dataloader)}
+                logs = {"loss/epoch": loss_total / len(train_dataloader), "loss/epoch_average": loss_total / len(train_dataloader)}
                 accelerator.log(logs, step=epoch + 1)
 
             accelerator.wait_for_everyone()

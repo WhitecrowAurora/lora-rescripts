@@ -80,6 +80,40 @@ def get_anima_adapter_type(payload: dict) -> str:
     return "lora"
 
 
+def payload_uses_sageattention(payload: dict) -> bool:
+    attn_mode = str(payload.get("attn_mode", "") or "").strip().lower()
+    return (
+        attn_mode == "sageattn"
+        or parse_boolish(payload.get("sageattn"))
+        or parse_boolish(payload.get("use_sage_attn"))
+    )
+
+
+def build_sageattention_experimental_warning(payload: dict, training_type: str) -> Optional[str]:
+    if not payload_uses_sageattention(payload):
+        return None
+
+    if training_type in {"sdxl-lora", "sdxl-finetune", "sdxl-controlnet", "sdxl-controlnet-lllite", "sdxl-textual-inversion"}:
+        return (
+            "SDXL SageAttention is experimental in this build and requires the SageAttention runtime. / "
+            "当前构建中的 SDXL SageAttention 仍属实验功能，并且需要 SageAttention 专用环境。"
+        )
+
+    if training_type.startswith("anima"):
+        return (
+            "Anima SageAttention is experimental in this build. Training startup will run a one-time drift self-check against "
+            "FlashAttention / SDPA when possible; if the reported mismatch is large, treat SageAttention loss as not directly "
+            "comparable to FlashAttention / SDPA and prefer FlashAttention for production runs. / "
+            "当前构建中的 Anima SageAttention 仍属实验功能。训练启动时会尽量自动做一次与 FlashAttention / SDPA 的前向漂移自检；"
+            "若日志提示偏移较大，请不要把当前 SageAttention loss 与 FlashAttention / SDPA 直接横向比较，正式训练建议优先使用 FlashAttention。"
+        )
+
+    return (
+        "Current trainer does not have a stable SageAttention path. The launch layer will automatically fall back to SDPA / torch. / "
+        "当前训练种类尚未接好稳定的 SageAttention 路径，启动时会自动回退为 SDPA / torch。"
+    )
+
+
 def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list[str], warnings: list[str], notes: list[str]) -> None:
     if not training_type.startswith("anima"):
         return
@@ -443,22 +477,9 @@ def analyze_training_preflight(
                 "若没有明确需求，建议改回 clip_skip=1。"
             )
 
-    if bool(payload.get("sageattn")):
-        if training_type in {"sdxl-lora", "sdxl-finetune", "sdxl-controlnet", "sdxl-controlnet-lllite", "sdxl-textual-inversion"}:
-            warnings.append(
-                "SDXL SageAttention is experimental in this build and requires the SageAttention runtime. / "
-                "当前构建中的 SDXL SageAttention 仍属实验功能，并且需要 SageAttention 专用环境。"
-            )
-        elif training_type.startswith("anima"):
-            warnings.append(
-                "Anima SageAttention is experimental in this build and should be verified with sample previews first. / "
-                "当前构建中的 Anima SageAttention 仍属实验功能，建议先用预览图验证。"
-            )
-        else:
-            warnings.append(
-                "Current trainer does not have a stable SageAttention path. The launch layer will automatically fall back to SDPA / torch. / "
-                "当前训练种类尚未接好稳定的 SageAttention 路径，启动时会自动回退为 SDPA / torch。"
-            )
+    sageattention_warning = build_sageattention_experimental_warning(payload, training_type)
+    if sageattention_warning:
+        warnings.append(sageattention_warning)
 
     if bool(payload.get("torch_compile")):
         backend = str(payload.get("dynamo_backend", "inductor") or "inductor").strip() or "inductor"

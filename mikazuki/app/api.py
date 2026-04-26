@@ -52,7 +52,10 @@ from mikazuki.utils.mixed_resolution import (
     build_mixed_resolution_summary_text,
 )
 from mikazuki.utils.training_launch_runtime import resolve_training_launch_runtime
-from mikazuki.utils.training_preflight import analyze_training_preflight
+from mikazuki.utils.training_preflight import (
+    analyze_training_preflight,
+    build_sageattention_experimental_warning,
+)
 from mikazuki.utils.training_sample_prompt_runtime import prepare_training_sample_prompt_config
 from mikazuki.utils.training_start_warnings import (
     build_runtime_dependency_failure_message,
@@ -1503,6 +1506,10 @@ async def create_toml_file(request: Request):
     sdxl_clip_skip_warning = build_sdxl_clip_skip_warning(config)
     if sdxl_clip_skip_warning:
         start_warnings.append(sdxl_clip_skip_warning)
+
+    sageattention_training_warning = build_sageattention_experimental_warning(config, training_type)
+    if sageattention_training_warning:
+        start_warnings.append(sageattention_training_warning)
 
     sageattention_override_message = apply_sageattention_runtime_override(config, parse_boolish)
     if sageattention_override_message:

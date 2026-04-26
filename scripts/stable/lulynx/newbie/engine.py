@@ -277,6 +277,8 @@ class NewbieCachedTrainer:
 
         global_step = start_step
         last_loss = 0.0
+        loss_running_total = 0.0
+        loss_running_steps = 0
         completed_epochs = 0
         stop_training_requested = False
         stop_training_reason = None
@@ -640,13 +642,19 @@ class NewbieCachedTrainer:
                 if accelerator.sync_gradients:
                     global_step += 1
                     last_loss = float(current_loss)
+                    loss_running_total += last_loss
+                    loss_running_steps += 1
+                    average_loss = loss_running_total / max(1, loss_running_steps)
                     peak_vram_logs, peak_vram_message = peak_vram_diagnostics.finish_step()
                     if peak_vram_message and accelerator.is_main_process:
                         print(peak_vram_message)
 
                     step_logs = {
                         'loss': last_loss,
+                        'loss/current': last_loss,
+                        'loss/average': average_loss,
                         'learning_rate': float(scheduler.get_last_lr()[0]),
+                        'lr/adapter': float(scheduler.get_last_lr()[0]),
                         'epoch': epoch + 1,
                     }
                     if peak_vram_logs:
@@ -701,7 +709,7 @@ class NewbieCachedTrainer:
                         lulynx_decision = lulynx_core.on_optimizer_step(
                             global_step=global_step,
                             current_loss=last_loss,
-                            average_loss=None,
+                            average_loss=average_loss,
                             optimizer=optimizer,
                             lr_scheduler=scheduler,
                             accelerator=accelerator,
@@ -737,6 +745,12 @@ class NewbieCachedTrainer:
                 _save_periodic_artifacts(global_step, "every_epoch", epoch)
             elif completed_epochs % save_every_epochs == 0:
                 _save_periodic_artifacts(global_step, f"every_{save_every_epochs}_epochs", epoch)
+            if len(accelerator.trackers) > 0:
+                epoch_average_loss = loss_running_total / max(1, loss_running_steps)
+                accelerator.log(
+                    {'loss/epoch': epoch_average_loss, 'loss/epoch_average': epoch_average_loss},
+                    step=completed_epochs,
+                )
             if stop_training_requested:
                 if accelerator.is_main_process:
                     print(f"[newbie-train] stopped early by Lulynx experimental core: {stop_training_reason}")

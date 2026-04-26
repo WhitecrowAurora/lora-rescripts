@@ -20,7 +20,7 @@ if (Test-MikazukiChinaMirrorMode) {
 
 $runtimeSpecs = @(
     [pscustomobject]@{ Name = "portable"; Label = "Main Runtime / 主运行时" }
-    [pscustomobject]@{ Name = "flashattention"; Label = "FlashAttention Runtime / FlashAttention 运行时" }
+    [pscustomobject]@{ Name = "flashattention"; Label = "FlashAttention2 Runtime / FlashAttention2 运行时" }
     [pscustomobject]@{ Name = "blackwell"; Label = "Blackwell Runtime / Blackwell 运行时" }
     [pscustomobject]@{ Name = "sageattention"; Label = "SageAttention Runtime / SageAttention 运行时" }
     [pscustomobject]@{ Name = "sageattention2"; Label = "SageAttention2 Runtime / SageAttention2 运行时" }

@@ -7910,6 +7910,16 @@ def append_lr_to_logs_with_names(logs, lr_scheduler, optimizer_type, names):
             )
 
 
+def append_step_loss_to_logs(logs, *, current_loss=None, average_loss=None):
+    if current_loss is not None:
+        current_loss = float(current_loss)
+        logs.setdefault("loss", current_loss)
+        logs["loss/current"] = current_loss
+
+    if average_loss is not None:
+        logs["loss/average"] = float(average_loss)
+
+
 # scheduler:
 SCHEDULER_LINEAR_START = 0.00085
 SCHEDULER_LINEAR_END = 0.0120

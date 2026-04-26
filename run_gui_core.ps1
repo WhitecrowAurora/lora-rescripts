@@ -1130,7 +1130,7 @@ function Test-FlashAttentionRuntimeReady {
 
 function Get-MainPythonSelection {
     if ($preferFlashAttentionRuntime -and -not (Test-Path $flashAttentionPython)) {
-        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'flashattention' -ExpectedPath $flashAttentionPython -PythonMinor '3.11/3.12' -RuntimeDirName $flashAttentionRuntimeDirName -RuntimeDirPath $flashAttentionRuntimeDir -RerunScript 'run_For_FlashAttention_Experimental.bat')
+        throw (New-MissingDedicatedRuntimeMessage -RuntimeName 'flashattention' -ExpectedPath $flashAttentionPython -PythonMinor '3.11/3.12' -RuntimeDirName $flashAttentionRuntimeDirName -RuntimeDirPath $flashAttentionRuntimeDir -RerunScript 'run_For_FlashAttention2_Experimental.bat')
     }
 
     if ($preferBlackwellRuntime -and -not (Test-Path $blackwellPython)) {

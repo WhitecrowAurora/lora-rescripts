@@ -722,7 +722,7 @@ def train(args):
                 break
 
         if len(accelerator.trackers) > 0:
-            logs = {"loss/epoch": loss_recorder.moving_average}
+            logs = {"loss/epoch": loss_recorder.moving_average, "loss/epoch_average": loss_recorder.moving_average}
             accelerator.log(logs, step=epoch + 1)
 
         accelerator.wait_for_everyone()

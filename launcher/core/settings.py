@@ -11,7 +11,8 @@ from launcher.config import DEFAULT_HOST, DEFAULT_PORT
 _SETTINGS_FILE = "launcher_settings.json"
 
 _DEFAULTS: Dict[str, Any] = {
-    "language": "zh",
+    # Keep language unset on first run so the launcher can follow the system UI language.
+    "language": None,
     "last_runtime": "standard",
     "safe_mode": False,
     "cn_mirror": False,
@@ -23,9 +24,11 @@ _DEFAULTS: Dict[str, Any] = {
     "disable_tageditor": False,
     "disable_auto_mirror": False,
     "dev_mode": False,
+    "update_channel": "stable",
     "theme": "light",
     "window_width": None,
     "window_height": None,
+    "onboarding_dismissed": False,
 }
 
 

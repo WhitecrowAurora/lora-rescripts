@@ -13,36 +13,42 @@ def build():
     icon_path = LAUNCHER_DIR / "assets" / "icon.ico"
     icon_args = [f"--icon={icon_path}"] if icon_path.exists() else []
 
+    # Web dist directory (built React SPA)
+    web_dist = LAUNCHER_DIR / "web" / "dist"
+
     # Collect all launcher submodules as hidden imports
     hidden_imports = [
-        "--hidden-import=customtkinter",
-        "--hidden-import=PIL._tkinter_finder",
+        "--hidden-import=pywebview",
         "--hidden-import=launcher",
-        "--hidden-import=launcher.app",
+        "--hidden-import=launcher.main",
         "--hidden-import=launcher.config",
         "--hidden-import=launcher.i18n",
-        "--hidden-import=launcher.main",
-        "--hidden-import=launcher.assets",
-        "--hidden-import=launcher.assets.style",
+        "--hidden-import=launcher.api",
+        "--hidden-import=launcher.window",
         "--hidden-import=launcher.core",
         "--hidden-import=launcher.core.launcher",
         "--hidden-import=launcher.core.installer",
         "--hidden-import=launcher.core.runtime_detector",
         "--hidden-import=launcher.core.settings",
-        "--hidden-import=launcher.ui",
-        "--hidden-import=launcher.ui.sidebar",
-        "--hidden-import=launcher.ui.launch_page",
-        "--hidden-import=launcher.ui.runtime_page",
-        "--hidden-import=launcher.ui.advanced_page",
-        "--hidden-import=launcher.ui.install_page",
-        "--hidden-import=launcher.ui.extension_page",
-        "--hidden-import=launcher.ui.console_page",
-        "--hidden-import=launcher.ui.about_page",
-        "--hidden-import=launcher.ui.icons",
-        "--hidden-import=launcher.ui.animations",
+        "--hidden-import=launcher.core.plugins",
+        "--hidden-import=launcher.core.gpu",
+        "--hidden-import=launcher.core.preflight",
+        "--hidden-import=launcher.core.recommendation",
+        "--hidden-import=launcher.core.api_result",
+        "--hidden-import=launcher.core.compatibility",
+        "--hidden-import=launcher.core.diagnostics",
+        "--hidden-import=launcher.core.task_history_store",
+        "--hidden-import=launcher.core.runtime_coordinator",
+        "--hidden-import=launcher.core.runtime_catalog",
+        "--hidden-import=launcher.core.runtime_tasks",
+        "--hidden-import=launcher.core.task_executor",
+        "--hidden-import=launcher.core.task_state",
+        "--hidden-import=launcher.core.task_plans",
+        "--hidden-import=launcher.core.update_checker",
+        "--hidden-import=launcher.core.versioning",
     ]
 
-    PyInstaller.__main__.run([
+    args = [
         str(LAUNCHER_DIR / "main.py"),
         "--name=SD-reScripts-Launcher",
         "--onefile",
@@ -56,7 +62,13 @@ def build():
         f"--distpath={PROJECT_ROOT / 'dist'}",
         f"--workpath={PROJECT_ROOT / 'build'}",
         f"--specpath={PROJECT_ROOT}",
-    ])
+    ]
+
+    # Include web dist if it exists
+    if web_dist.exists():
+        args.append(f"--add-data={web_dist};launcher/web/dist")
+
+    PyInstaller.__main__.run(args)
 
     # Copy the EXE to project root for convenience
     exe_src = PROJECT_ROOT / "dist" / "SD-reScripts-Launcher.exe"
