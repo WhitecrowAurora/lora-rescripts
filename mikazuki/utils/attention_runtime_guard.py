@@ -277,6 +277,42 @@ def apply_startup_attention_policy(config: dict, parse_boolish) -> Optional[str]
             return message
         return None
 
+    if policy == "prefer_flash":
+        runtime_mode = get_attention_runtime_mode()
+        if runtime_mode != "flashattention" or not _has_importable_flashattention():
+            return None
+
+        if parse_boolish(config.get("mem_eff_attn", False)):
+            return None
+
+        changed = False
+        if parse_boolish(config.get("xformers", False)):
+            config["xformers"] = False
+            changed = True
+        if "sdpa" in config and parse_boolish(config.get("sdpa", False)):
+            config["sdpa"] = False
+            changed = True
+        if "sageattn" in config and parse_boolish(config.get("sageattn", False)):
+            config["sageattn"] = False
+            changed = True
+        if "use_sage_attn" in config and parse_boolish(config.get("use_sage_attn", False)):
+            config["use_sage_attn"] = False
+            changed = True
+        if "attn_mode" in config:
+            attn_mode = str(config.get("attn_mode", "") or "").strip().lower()
+            if attn_mode not in {"flash", "flashattn"}:
+                config["attn_mode"] = "flashattn"
+                changed = True
+        if not parse_boolish(config.get("flashattn", False)):
+            config["flashattn"] = True
+            changed = True
+
+        if changed:
+            message = "启动器当前处于 FlashAttention 2 默认模式，本次训练已自动优先使用 FlashAttention 2。若内核调用失败，训练进程会自动回退到 SDPA。"
+            log.info(message)
+            return message
+        return None
+
     runtime_mode = get_attention_runtime_mode()
     if policy != "prefer_sage" or runtime_mode not in {"sageattention", "sageattention2", "sagebwd-nvidia", "intel-xpu-sage"}:
         return None

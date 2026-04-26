@@ -1507,7 +1507,7 @@ async def create_toml_file(request: Request):
     if sdxl_clip_skip_warning:
         start_warnings.append(sdxl_clip_skip_warning)
 
-    sageattention_training_warning = build_sageattention_experimental_warning(config, training_type)
+    sageattention_training_warning = build_sageattention_experimental_warning(config, model_train_type)
     if sageattention_training_warning:
         start_warnings.append(sageattention_training_warning)
 

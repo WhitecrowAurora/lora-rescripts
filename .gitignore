@@ -47,3 +47,5 @@ A启动新前端UI.bat
 /flashattention-wheels
 /ref
 /launcher/web/node_modules
+/tools
+*.7z

@@ -16,7 +16,7 @@ _DEFAULTS: Dict[str, Any] = {
     "last_runtime": "standard",
     "safe_mode": False,
     "cn_mirror": False,
-    "attention_policy": "default",  # "default", "prefer_sage", "force_sdpa"
+    "attention_policy": "default",  # "default", "prefer_sage", "prefer_flash", "force_sdpa"
     "host": DEFAULT_HOST,
     "port": DEFAULT_PORT,
     "listen": False,
@@ -26,6 +26,8 @@ _DEFAULTS: Dict[str, Any] = {
     "dev_mode": False,
     "update_channel": "stable",
     "theme": "light",
+    "managed_server_url": "",
+    "managed_api_key": "",
     "window_width": None,
     "window_height": None,
     "onboarding_dismissed": False,

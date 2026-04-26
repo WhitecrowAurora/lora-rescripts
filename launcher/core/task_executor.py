@@ -5,12 +5,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from launcher.config import RUNTIME_MAP
 from launcher.core.api_result import error_result, ok_result
+from launcher.core.runtime_initializer import initialize_runtime_environment
 from launcher.core.task_history_store import TaskHistoryStore, TaskStateStore
 from launcher.core.runtime_coordinator import RuntimeCoordinator
 from launcher.core.task_plans import run_install_plan, run_launch_plan
@@ -64,6 +66,28 @@ class LauncherTaskExecutor:
         self._task_log_lines: list[str] = []
         self._task_log_dirty_count = 0
         self._recover_interrupted_task_if_needed()
+
+    def _wait_for_runtime_detection(
+        self,
+        runtime_id: str,
+        *,
+        require_installed: bool,
+        timeout_seconds: float = 6.0,
+        poll_interval_seconds: float = 0.4,
+    ) -> None:
+        """Wait briefly for runtime filesystem markers to become visible to detector logic."""
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while time.monotonic() < deadline:
+            status = self._runtime_coordinator.get_statuses().get(runtime_id)
+            if not status:
+                time.sleep(poll_interval_seconds)
+                continue
+            if require_installed:
+                if status.installed:
+                    return
+            elif status.python_exists:
+                return
+            time.sleep(poll_interval_seconds)
 
     def get_task_state(self) -> Dict[str, Any]:
         return dict(self._task_state)
@@ -348,6 +372,165 @@ class LauncherTaskExecutor:
         )
         return ok_result("trainer.stop_no_process")
 
+    def kill(self) -> Dict[str, Any]:
+        if self._process:
+            self._begin_task(
+                "kill",
+                "trainer.kill_request_received",
+                "已收到强制结束请求",
+                "Kill request received",
+            )
+            self._advance_task(
+                "trainer.kill_signal_sent",
+                "已发送强制结束信号",
+                "Kill signal sent",
+                details={"pid": self._process.pid},
+            )
+            thread = threading.Thread(target=self._force_kill_process, daemon=True)
+            thread.start()
+            return ok_result("trainer.kill_signal_sent")
+
+        self._begin_task(
+            "kill",
+            "trainer.kill_request_received",
+            "已收到强制结束请求",
+            "Kill request received",
+        )
+        self._finish_task(
+            success=True,
+            stage_code="trainer.kill_no_process",
+            stage_label_zh="当前没有可结束的进程",
+            stage_label_en="No running process to kill",
+            result_code="trainer.kill_no_process",
+        )
+        return ok_result("trainer.kill_no_process")
+
+    def initialize_runtime(self, runtime_id: str) -> Dict[str, Any]:
+        lang = get_language()
+        self._begin_task(
+            "initialize",
+            "runtime_initialize.request_received",
+            "已收到初始化请求",
+            "Initialization request received",
+            runtime_id=runtime_id,
+        )
+        if self._installing:
+            message = "已有安装或初始化任务正在进行中。" if lang == "zh" else "Another install or initialization task is already in progress."
+            self._finish_task(
+                success=False,
+                stage_code="runtime_initialize.already_running",
+                stage_label_zh="已有初始化任务在运行",
+                stage_label_en="Initialization task already running",
+                code="runtime_initialize.already_running",
+                error=message,
+                details={"runtime_id": runtime_id},
+            )
+            return error_result("runtime_initialize.already_running", message)
+        if runtime_id not in RUNTIME_MAP:
+            message = "未知的运行时。" if lang == "zh" else "Unknown runtime."
+            self._finish_task(
+                success=False,
+                stage_code="runtime.unknown",
+                stage_label_zh="未知运行时",
+                stage_label_en="Unknown runtime",
+                code="runtime.unknown",
+                error=message,
+                details={"runtime_id": runtime_id},
+            )
+            return error_result("runtime.unknown", message, details={"runtime_id": runtime_id})
+
+        prepared = self._runtime_coordinator.prepare_install(
+            runtime_id,
+            cn_mirror=bool(self._settings_provider().get("cn_mirror", False)),
+        )
+        if prepared is None:
+            message = "未知的运行时。" if lang == "zh" else "Unknown runtime."
+            self._finish_task(
+                success=False,
+                stage_code="runtime.unknown",
+                stage_label_zh="未知运行时",
+                stage_label_en="Unknown runtime",
+                code="runtime.unknown",
+                error=message,
+                details={"runtime_id": runtime_id},
+            )
+            return error_result("runtime.unknown", message, details={"runtime_id": runtime_id})
+
+        if prepared.status.installed:
+            message = "该运行时已经安装完成，无需再次初始化。" if lang == "zh" else "This runtime is already installed and does not need initialization."
+            self._finish_task(
+                success=True,
+                stage_code="runtime_initialize.already_prepared",
+                stage_label_zh="运行时已可用",
+                stage_label_en="Runtime is already ready",
+                result_code="runtime_initialize.already_prepared",
+                details={"runtime_id": runtime_id},
+            )
+            return ok_result("runtime_initialize.already_prepared", runtime_id=runtime_id, message=message)
+
+        self._installing = True
+
+        def _run():
+            success = False
+            final_code = "runtime_initialize.failed"
+            error_message = None
+            try:
+                self._advance_task(
+                    "runtime_initialize.preparing_runtime",
+                    "正在准备运行时目录",
+                    "Preparing runtime directory",
+                    details={"runtime_id": runtime_id},
+                )
+                initialize_runtime_environment(
+                    prepared.runtime_def,
+                    repo_root=self._repo_root,
+                    statuses=prepared.statuses,
+                    cn_mirror=prepared.cn_mirror,
+                    log_callback=lambda line: self._append_task_log_line(line, event_name="install_log"),
+                )
+                success = True
+                final_code = "runtime_initialize.completed"
+            except Exception as exc:
+                final_code = "runtime_initialize.execution_failed"
+                error_message = str(exc)
+                self._append_task_log_line(f"[Launcher] Runtime initialization failed: {exc}", event_name="install_log")
+            finally:
+                self._installing = False
+                payload: Dict[str, Any] = {
+                    "runtime_id": runtime_id,
+                    "success": success,
+                    "action": "initialize",
+                }
+                if success:
+                    self._wait_for_runtime_detection(runtime_id, require_installed=False)
+                    self._finish_task(
+                        success=True,
+                        stage_code="runtime_initialize.completed",
+                        stage_label_zh="运行时初始化完成",
+                        stage_label_en="Runtime initialization completed",
+                        result_code=final_code,
+                        details={"runtime_id": runtime_id},
+                    )
+                    payload["result_code"] = final_code
+                else:
+                    self._finish_task(
+                        success=False,
+                        stage_code=final_code,
+                        stage_label_zh="运行时初始化失败",
+                        stage_label_en="Runtime initialization failed",
+                        code=final_code,
+                        error=error_message,
+                        details={"runtime_id": runtime_id},
+                    )
+                    payload["code"] = final_code
+                    if error_message:
+                        payload["error"] = error_message
+                self._emit("install_done", payload)
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        return ok_result("runtime_initialize.started", runtime_id=runtime_id)
+
     def install_runtime(self, runtime_id: str) -> Dict[str, Any]:
         lang = get_language()
         self._begin_task(
@@ -546,8 +729,10 @@ class LauncherTaskExecutor:
                 payload: Dict[str, Any] = {
                     "runtime_id": runtime_id,
                     "success": success,
+                    "action": "install",
                 }
                 if success:
+                    self._wait_for_runtime_detection(runtime_id, require_installed=True)
                     self._finish_task(
                         success=True,
                         stage_code="runtime_install.completed",
@@ -985,6 +1170,12 @@ class LauncherTaskExecutor:
         except subprocess.TimeoutExpired:
             pass
         except Exception:
+            return
+        self._force_kill_process(process=process)
+
+    def _force_kill_process(self, process: Optional[subprocess.Popen] = None) -> None:
+        process = process or self._process
+        if not process:
             return
         try:
             if process.poll() is None:

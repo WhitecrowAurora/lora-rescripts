@@ -39,6 +39,7 @@ if exist "logs" rmdir /s /q "logs" 2>nul
 if exist "config\autosave" rmdir /s /q "config\autosave" 2>nul
 if exist "tmp" rmdir /s /q "tmp" 2>nul
 if exist "frontend\.vitepress\cache" rmdir /s /q "frontend\.vitepress\cache" 2>nul
+if exist "launcher\web\node_modules" rmdir /s /q "launcher\web\node_modules" 2>nul
 for %%R in (
     "%MAIN_RUNTIME_DIR%"
     "%TAGEDITOR_RUNTIME_DIR%"
@@ -218,7 +219,7 @@ if /i "%SLIM_SAGEATTENTION%"=="Y" (
 
 echo.
 echo Cleanup summary:
-echo - Always cleared: __pycache__, *.pyc, logs, config\autosave, tmp, frontend\.vitepress\cache, runtime .cache / torch_compile_debug
+echo - Always cleared: __pycache__, *.pyc, logs, config\autosave, tmp, frontend\.vitepress\cache, launcher\web\node_modules, runtime .cache / torch_compile_debug
 echo - Always checked for caches in both root runtimes and env\ runtimes when detected
 echo - Optional: output, huggingface cache/config, main python deps, tag editor deps, Blackwell / FlashAttention deps, Intel XPU deps, AMD ROCm deps, SageAttention deps
 echo - Main/Blackwell/FlashAttention/Intel/AMD slimming removes most installed runtime payload and will require reinstall on next startup

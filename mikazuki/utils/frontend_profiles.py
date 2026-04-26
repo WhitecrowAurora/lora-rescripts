@@ -54,8 +54,10 @@ def _detect_entry_dir(plugin_dir: Path, manifest: dict) -> Path | None:
 
     candidates = [
         plugin_dir / "ui" / "dist",
+        plugin_dir / "ui",
         plugin_dir / "dist",
         plugin_dir / "frontend" / "dist",
+        plugin_dir / "frontend",
     ]
     for candidate in candidates:
         if (candidate / DEFAULT_ENTRY_FILE).exists():
@@ -101,10 +103,11 @@ def _build_plugin_profile(plugin_dir: Path) -> dict | None:
     entry_file = str(manifest.get("entry_file", "")).strip() or DEFAULT_ENTRY_FILE
     source_url = str(manifest.get("source", "")).strip() or str(manifest.get("source_url", "")).strip()
     git_marker = plugin_dir / ".git"
-    removable = not git_marker.exists()
+    installed_via = str(manifest.get("installed_via", "")).strip().lower()
+    removable = installed_via == "github-download" and not git_marker.exists()
     remove_block_reason = ""
     if not removable:
-        remove_block_reason = "This community UI is managed by git and should be removed from the repository directly."
+        remove_block_reason = "This community UI is part of the repository or not marked as launcher-installed, so it should be managed manually."
 
     return {
         "id": str(manifest.get("id", "")).strip() or f"community:{plugin_dir.name}",

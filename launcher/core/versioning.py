@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ _VERSION_RE = re.compile(
     re.IGNORECASE,
 )
 _GUI_VERSION_RE = re.compile(r'APP_VERSION\s*=\s*"([^"]+)"')
+_VERSION_FILE_NAMES = ("version.json",)
 
 
 @dataclass(frozen=True)
@@ -78,8 +80,69 @@ def compare_versions(left: ParsedVersion, right: ParsedVersion) -> int:
     return 0
 
 
+def _extract_version_from_manifest(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("version", "current", "project_version"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    channels = payload.get("channels")
+    if isinstance(channels, dict):
+        for channel_name in ("stable", "beta"):
+            entry = channels.get(channel_name)
+            if isinstance(entry, str) and entry.strip():
+                return entry.strip()
+            if isinstance(entry, dict):
+                for key in ("version", "name", "tag_name"):
+                    value = entry.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+
+    for key in ("stable", "beta"):
+        entry = payload.get(key)
+        if isinstance(entry, str) and entry.strip():
+            return entry.strip()
+        if isinstance(entry, dict):
+            for field in ("version", "name", "tag_name"):
+                value = entry.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+    return None
+
+
+def _read_local_version_file(repo_root: Path) -> Optional[Dict[str, Any]]:
+    for filename in _VERSION_FILE_NAMES:
+        path = repo_root / filename
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        raw = _extract_version_from_manifest(payload)
+        if not raw:
+            continue
+        parsed = parse_version_text(raw)
+        return {
+            "display": parsed.canonical if parsed else raw,
+            "raw": raw,
+            "normalized": parsed.canonical if parsed else None,
+            "source": filename,
+            "is_beta": parsed.is_beta if parsed else None,
+        }
+    return None
+
+
 def detect_project_version(repo_root: Path) -> Dict[str, Any]:
-    """Detect the current project version from git tags or gui.py."""
+    """Detect the current project version from version.json, git tags, or gui.py."""
+
+    file_version = _read_local_version_file(repo_root)
+    if file_version is not None:
+        return file_version
 
     git_value: Optional[str] = None
     try:

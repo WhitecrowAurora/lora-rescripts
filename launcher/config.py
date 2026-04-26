@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
-APP_VERSION = "v1.5.1"
+APP_VERSION = "v1.5.3"
 
 
 def get_repo_root() -> Path:
@@ -243,7 +243,7 @@ DEFAULT_TENSORBOARD_PORT = 6006
 # ---------------------------------------------------------------------------
 
 WINDOW_WIDTH = 960
-WINDOW_HEIGHT = 640
+WINDOW_HEIGHT = 960
 SIDEBAR_WIDTH = 200
 
 # ---------------------------------------------------------------------------

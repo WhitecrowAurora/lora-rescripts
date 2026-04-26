@@ -109,6 +109,7 @@ class AdvancedPage(ctk.CTkScrollableFrame):
         policies = [
             ("default", "attention_default", "attention_default_desc"),
             ("prefer_sage", "attention_prefer_sage", "attention_prefer_sage_desc"),
+            ("prefer_flash", "attention_prefer_flash", "attention_prefer_flash_desc"),
             ("force_sdpa", "attention_force_sdpa", "attention_force_sdpa_desc"),
         ]
         for val, label_key, desc_key in policies:

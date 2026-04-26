@@ -21,10 +21,12 @@ class RuntimeStatus:
 
     @property
     def status_text(self) -> str:
-        """One of: 'installed', 'partial', 'missing'."""
+        """One of: 'installed', 'initialized', 'partial', 'missing'."""
         if self.installed:
             return "installed"
-        if self.python_exists or self.env_dir is not None:
+        if self.python_exists:
+            return "initialized"
+        if self.env_dir is not None:
             return "partial"
         return "missing"
 

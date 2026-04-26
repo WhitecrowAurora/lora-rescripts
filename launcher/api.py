@@ -15,6 +15,7 @@ from launcher.core.compatibility import build_runtime_compatibility_matrix
 from launcher.core.runtime_catalog import build_runtime_catalog
 from launcher.core.runtime_coordinator import RuntimeCoordinator
 from launcher.core.gpu import get_gpu_stats
+from launcher.core.managed_catalog import ManagedCatalogService
 from launcher.core.plugins import PluginInfo, scan_plugins, set_plugin_enabled
 from launcher.core.settings import Settings
 from launcher.core.task_executor import LauncherTaskExecutor
@@ -22,6 +23,15 @@ from launcher.core.update_checker import UpdateChecker
 from launcher.core.versioning import detect_project_version
 from launcher import i18n
 from launcher.i18n import detect_system_language, get_language, set_language
+from mikazuki.app.config import app_config
+from mikazuki.utils.frontend_profiles import (
+    PLUGIN_ROOT,
+    install_github_frontend_plugin,
+    list_frontend_profiles,
+    resolve_frontend_profile,
+    resolve_frontend_profile_id,
+    uninstall_frontend_plugin,
+)
 
 
 class Api:
@@ -38,10 +48,16 @@ class Api:
         self._window = None  # set by window.py after creation
         self._shutting_down = False
         self._update_checker = UpdateChecker(self._repo_root)
+        self._managed_catalog = ManagedCatalogService(
+            repo_root=self._repo_root,
+            config_dir=self._config_dir,
+            settings_provider=self.get_settings,
+        )
 
         # Initialize language from settings or system
         lang = self._settings.get("language") or detect_system_language()
         set_language(lang)
+        app_config.load_config()
         self._runtime_coordinator = RuntimeCoordinator(
             repo_root=self._repo_root,
             settings_provider=self.get_settings,
@@ -95,6 +111,8 @@ class Api:
             "dev_mode": self._settings.get("dev_mode", False),
             "update_channel": self._settings.get("update_channel", "stable"),
             "theme": self._settings.get("theme", "light"),
+            "managed_server_url": self._settings.get("managed_server_url", ""),
+            "managed_api_key": self._settings.get("managed_api_key", ""),
             "language": language,
             "last_runtime": self._settings.get("last_runtime"),
             "window_width": self._settings.get("window_width"),
@@ -111,6 +129,13 @@ class Api:
         theme = str(payload.get("theme") or "").strip().lower()
         if theme:
             payload["theme"] = theme if theme in {"light", "dark"} else "light"
+        attention_policy = str(payload.get("attention_policy") or "").strip().lower()
+        if attention_policy:
+            payload["attention_policy"] = (
+                attention_policy
+                if attention_policy in {"default", "prefer_sage", "prefer_flash", "force_sdpa"}
+                else "default"
+            )
         for dimension_key in ("window_width", "window_height"):
             if dimension_key in payload and payload[dimension_key] is not None:
                 try:
@@ -150,6 +175,113 @@ class Api:
         set_plugin_enabled(self._repo_root, plugin_id, enabled)
         return ok_result("plugin.state_updated", plugin_id=plugin_id, enabled=enabled)
 
+    def get_ui_profiles(self) -> Dict[str, Any]:
+        """Return installable/activatable frontend UI profiles."""
+        app_config.load_config()
+        requested_profile_id = app_config["active_ui_profile"]
+        active_profile = resolve_frontend_profile(requested_profile_id)
+        return {
+            "profiles": [
+                {
+                    "id": profile["id"],
+                    "kind": profile["kind"],
+                    "name": profile["name"],
+                    "version": profile["version"],
+                    "source_path": profile["source_path"],
+                    "plugin_path": profile["plugin_path"],
+                    "source_url": profile["source_url"],
+                    "available": profile["available"],
+                    "removable": profile["removable"],
+                    "remove_block_reason": profile["remove_block_reason"],
+                }
+                for profile in list_frontend_profiles()
+            ],
+            "active_profile_id": active_profile["id"],
+            "plugin_root": str(PLUGIN_ROOT),
+            "config_path": str(app_config.path),
+        }
+
+    def activate_ui_profile(self, profile_id: str) -> Dict[str, Any]:
+        """Set the active frontend UI profile."""
+        normalized_profile_id = str(profile_id or "").strip()
+        if not normalized_profile_id:
+            return {"error": "profile_id is required", "code": "ui_profile.profile_id_required"}
+
+        app_config.load_config()
+        profile = resolve_frontend_profile(normalized_profile_id)
+        if profile["id"] != normalized_profile_id:
+            return {"error": f"UI not found: {normalized_profile_id}", "code": "ui_profile.not_found"}
+        if not profile.get("available", False):
+            return {"error": f"UI is not ready yet: {normalized_profile_id}", "code": "ui_profile.not_available"}
+
+        app_config["active_ui_profile"] = profile["id"]
+        app_config.save_config()
+        return ok_result(
+            "ui_profile.activated",
+            active_profile_id=profile["id"],
+            reload_required=True,
+        )
+
+    def install_ui_profile(self, repo_url: str, replace_existing: bool = False) -> Dict[str, Any]:
+        """Download and register a community frontend UI from a GitHub repository URL."""
+        normalized_repo_url = str(repo_url or "").strip()
+        if not normalized_repo_url:
+            return {"error": "repo_url is required", "code": "ui_profile.repo_url_required"}
+
+        try:
+            profile = install_github_frontend_plugin(
+                normalized_repo_url,
+                replace_existing=bool(replace_existing),
+            )
+        except ValueError as exc:
+            return {"error": str(exc), "code": "ui_profile.install_invalid"}
+        except Exception as exc:
+            return {
+                "error": f"Failed to download or install the GitHub community UI: {exc}",
+                "code": "ui_profile.install_failed",
+            }
+
+        return ok_result(
+            "ui_profile.installed",
+            installed_profile={
+                "id": profile["id"],
+                "name": profile["name"],
+                "kind": profile["kind"],
+                "version": profile["version"],
+                "plugin_path": profile["plugin_path"],
+                "source_path": profile["source_path"],
+            },
+            plugin_root=str(PLUGIN_ROOT),
+        )
+
+    def uninstall_ui_profile(self, profile_id: str) -> Dict[str, Any]:
+        """Remove a launcher-installed community frontend UI."""
+        normalized_profile_id = str(profile_id or "").strip()
+        if not normalized_profile_id:
+            return {"error": "profile_id is required", "code": "ui_profile.profile_id_required"}
+
+        app_config.load_config()
+        try:
+            removed_profile = uninstall_frontend_plugin(normalized_profile_id)
+        except ValueError as exc:
+            return {"error": str(exc), "code": "ui_profile.uninstall_invalid"}
+        except Exception as exc:
+            return {
+                "error": f"Failed to uninstall the selected community UI: {exc}",
+                "code": "ui_profile.uninstall_failed",
+            }
+
+        if app_config["active_ui_profile"] == removed_profile["id"]:
+            app_config["active_ui_profile"] = resolve_frontend_profile_id(None)
+            app_config.save_config()
+
+        return ok_result(
+            "ui_profile.uninstalled",
+            removed_profile_id=removed_profile["id"],
+            active_profile_id=resolve_frontend_profile_id(app_config["active_ui_profile"]),
+            reload_required=True,
+        )
+
     # ------------------------------------------------------------------
     # Language / i18n
     # ------------------------------------------------------------------
@@ -164,7 +296,10 @@ class Api:
 
     def get_translations(self) -> Dict[str, str]:
         """Return all translation strings for the current language."""
-        return dict(i18n._TRANSLATIONS.get(get_language(), {}))
+        english = dict(i18n._TRANSLATIONS.get("en", {}))
+        current = dict(i18n._TRANSLATIONS.get(get_language(), {}))
+        english.update(current)
+        return english
 
     def get_app_version(self) -> str:
         return APP_VERSION
@@ -245,6 +380,25 @@ class Api:
         return self._executor.is_installing()
 
     # ------------------------------------------------------------------
+    # Managed presets / hosted catalog
+    # ------------------------------------------------------------------
+
+    def get_managed_catalog(self, force_refresh: bool = False) -> Dict[str, Any]:
+        return self._managed_catalog.get_catalog(force_refresh=force_refresh)
+
+    def test_managed_connection(self) -> Dict[str, Any]:
+        return self._managed_catalog.test_connection()
+
+    def get_managed_import_state(self) -> Dict[str, Any]:
+        return self._managed_catalog.get_import_state()
+
+    def import_managed_preset(self, preset_id: str) -> Dict[str, Any]:
+        return self._managed_catalog.import_preset(preset_id)
+
+    def revert_managed_import(self) -> Dict[str, Any]:
+        return self._managed_catalog.revert_last_import()
+
+    # ------------------------------------------------------------------
     # Launch / Stop (async — runs in background thread, emits events)
     # ------------------------------------------------------------------
 
@@ -256,6 +410,10 @@ class Api:
         """Terminate the running process."""
         return self._executor.stop()
 
+    def kill(self) -> Dict[str, Any]:
+        """Force-kill the running process tree."""
+        return self._executor.kill()
+
     # ------------------------------------------------------------------
     # Install (async — runs in background thread, emits events)
     # ------------------------------------------------------------------
@@ -263,6 +421,10 @@ class Api:
     def install_runtime(self, runtime_id: str) -> Dict[str, Any]:
         """Run install scripts for a runtime. Emits install_log and install_done events."""
         return self._executor.install_runtime(runtime_id)
+
+    def initialize_runtime(self, runtime_id: str) -> Dict[str, Any]:
+        """Prepare a project-local portable Python runtime for the selected runtime ID."""
+        return self._executor.initialize_runtime(runtime_id)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -329,6 +491,8 @@ class Api:
             "dev_mode",
             "update_channel",
             "theme",
+            "managed_server_url",
+            "managed_api_key",
             "language",
             "last_runtime",
             "window_width",

@@ -25,7 +25,7 @@ from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_r
 from mikazuki.utils.runtime_paths import get_project_local_main_python_roots, get_tageditor_python_candidates
 
 APP_NAME = "SD-reScripts"
-APP_VERSION = "v1.4.8"
+APP_VERSION = "v1.5.3"
 ALLOW_SYSTEM_PYTHON_ENV = "MIKAZUKI_ALLOW_SYSTEM_PYTHON"
 REPO_ROOT = base_dir_path()
 LOG_DIR = REPO_ROOT / "logs"

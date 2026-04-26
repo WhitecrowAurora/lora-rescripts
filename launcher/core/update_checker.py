@@ -16,7 +16,18 @@ from launcher.core.versioning import compare_versions, detect_project_version, p
 
 
 DEFAULT_RELEASE_FEED = "https://api.github.com/repos/WhitecrowAurora/lora-rescripts/releases?per_page=20"
+DEFAULT_VERSION_MANIFEST = "https://raw.githubusercontent.com/WhitecrowAurora/lora-rescripts/main/version.json"
 UPDATE_CHANNELS = {"stable", "beta"}
+
+
+def _iter_manifest_urls() -> Iterable[str]:
+    raw = os.environ.get("MIKAZUKI_UPDATE_MANIFEST_URL", "").strip()
+    if raw:
+        for chunk in raw.replace("\n", ";").split(";"):
+            candidate = chunk.strip()
+            if candidate:
+                yield candidate
+    yield DEFAULT_VERSION_MANIFEST
 
 
 def _iter_feed_urls() -> Iterable[str]:
@@ -41,6 +52,83 @@ def _fetch_json(url: str, timeout: float = 6.0) -> Any:
         charset = response.headers.get_content_charset() or "utf-8"
         payload = response.read().decode(charset, errors="replace")
     return json.loads(payload)
+
+
+def _normalize_manifest_release_entry(entry: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(entry, str):
+        raw_version = entry.strip()
+        extra: Dict[str, Any] = {}
+    elif isinstance(entry, dict):
+        raw_version = (
+            str(entry.get("version") or "").strip()
+            or str(entry.get("name") or "").strip()
+            or str(entry.get("tag_name") or "").strip()
+        )
+        extra = entry
+    else:
+        return None
+
+    if not raw_version:
+        return None
+
+    parsed = parse_version_text(raw_version)
+    if parsed is None:
+        return None
+
+    return {
+        "display": parsed.canonical,
+        "raw": raw_version,
+        "normalized": parsed.canonical,
+        "is_beta": parsed.is_beta,
+        "release_url": str(extra.get("release_url") or "").strip() or None,
+        "published_at": str(extra.get("published_at") or "").strip() or None,
+        "release_notes": str(extra.get("release_notes") or extra.get("body") or "").strip(),
+        "source": "manifest",
+    }
+
+
+def _pick_latest_from_manifest(channel: str, payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    candidates: List[Any] = []
+
+    channels = payload.get("channels")
+    if isinstance(channels, dict):
+        candidates.append(channels.get(channel))
+        if channel == "beta" and channels.get("beta") is None:
+            candidates.append(channels.get("stable"))
+
+    candidates.append(payload.get(channel))
+    if channel == "beta" and payload.get("beta") is None:
+        candidates.append(payload.get("stable"))
+
+    if channel == "stable":
+        candidates.append(payload.get("version"))
+        candidates.append(payload.get("current"))
+        candidates.append(payload.get("project_version"))
+    else:
+        candidates.append(payload.get("beta"))
+        candidates.append(payload.get("version"))
+        candidates.append(payload.get("current"))
+        candidates.append(payload.get("project_version"))
+
+    best_release: Optional[Dict[str, Any]] = None
+    best_version = None
+    for candidate in candidates:
+        normalized = _normalize_manifest_release_entry(candidate)
+        if normalized is None:
+            continue
+        parsed = parse_version_text(normalized["display"])
+        if parsed is None:
+            continue
+        if channel == "stable" and parsed.is_beta:
+            continue
+        if best_version is None or compare_versions(parsed, best_version) > 0:
+            best_release = normalized
+            best_version = parsed
+
+    return best_release
 
 
 def _normalize_release_feed(payload: Any) -> List[Dict[str, Any]]:
@@ -171,16 +259,15 @@ class UpdateChecker:
         }
 
         feed_error: Optional[str] = None
-        for url in _iter_feed_urls():
+        manifest_error: Optional[str] = None
+        for url in _iter_manifest_urls():
             try:
                 payload = _fetch_json(url)
-                releases = _normalize_release_feed(payload)
-                latest = _pick_latest_release(channel_name, releases)
-                result["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                latest = _pick_latest_from_manifest(channel_name, payload)
                 if latest is None:
-                    result["error"] = "No matching release was found in the update feed."
-                    break
+                    continue
 
+                result["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 result["latest"] = {
                     "display": latest["display"],
                     "raw": latest["raw"],
@@ -201,13 +288,47 @@ class UpdateChecker:
                 result["error"] = None
                 break
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-                feed_error = str(exc)
+                manifest_error = str(exc)
                 continue
+
+        if result["latest"] is None:
+            for url in _iter_feed_urls():
+                try:
+                    payload = _fetch_json(url)
+                    releases = _normalize_release_feed(payload)
+                    latest = _pick_latest_release(channel_name, releases)
+                    result["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    if latest is None:
+                        result["error"] = "No matching release was found in the update feed."
+                        break
+
+                    result["latest"] = {
+                        "display": latest["display"],
+                        "raw": latest["raw"],
+                        "normalized": latest["normalized"],
+                        "source": latest["source"],
+                        "is_beta": latest["is_beta"],
+                    }
+                    result["release_url"] = latest["release_url"]
+                    result["release_notes"] = latest["release_notes"]
+                    result["published_at"] = latest["published_at"]
+
+                    current_parsed = parse_version_text(current.get("display"))
+                    latest_parsed = parse_version_text(latest["display"])
+                    if current_parsed is not None and latest_parsed is not None:
+                        result["has_update"] = compare_versions(latest_parsed, current_parsed) > 0
+                    elif current.get("display") != latest["display"]:
+                        result["has_update"] = True
+                    result["error"] = None
+                    break
+                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+                    feed_error = str(exc)
+                    continue
 
         if result["checked_at"] is None:
             result["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if result["latest"] is None and result["error"] is None:
-            result["error"] = feed_error or "Unable to fetch update information."
+            result["error"] = manifest_error or feed_error or "Unable to fetch update information."
 
         self._cache[channel_name] = {"_cached_at": now, **result}
         return result

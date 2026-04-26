@@ -30,6 +30,10 @@ def create_window() -> None:
 
     # Try to load icon
     icon_path = Path(__file__).parent / "assets" / "icon.ico"
+    if not icon_path.exists():
+        fallback_icon = Path(__file__).parent / "assets" / "favicon.ico"
+        if fallback_icon.exists():
+            icon_path = fallback_icon
 
     window = webview.create_window(
         title="SD-reScripts Launcher",
@@ -63,7 +67,11 @@ def _sanitize_dimension(value: object, fallback: int) -> int:
         parsed = int(value)
     except (TypeError, ValueError):
         return fallback
-    return max(900 if fallback == WINDOW_WIDTH else 620, parsed)
+    minimum = 900 if fallback == WINDOW_WIDTH else 620
+    parsed = max(minimum, parsed)
+    if fallback == WINDOW_HEIGHT:
+        return max(WINDOW_HEIGHT, parsed)
+    return parsed
 
 
 def _on_closing(api: Api, window: webview.Window) -> None:

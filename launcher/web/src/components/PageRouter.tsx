@@ -2,6 +2,7 @@ import React from 'react';
 import { useApp } from '../context/AppContext';
 import { LaunchPage } from '../pages/LaunchPage';
 import { RuntimePage } from '../pages/RuntimePage';
+import { ManagedPage } from '../pages/ManagedPage';
 import { AdvancedPage } from '../pages/AdvancedPage';
 import { InstallPage } from '../pages/InstallPage';
 import { ExtensionsPage } from '../pages/ExtensionsPage';
@@ -12,6 +13,7 @@ import type { PageId } from '../api/types';
 const pages: Record<PageId, React.ComponentType> = {
   launch: LaunchPage,
   runtime: RuntimePage,
+  managed: ManagedPage,
   advanced: AdvancedPage,
   install: InstallPage,
   extensions: ExtensionsPage,

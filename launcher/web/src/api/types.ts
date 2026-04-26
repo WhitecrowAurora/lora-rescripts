@@ -7,7 +7,7 @@ export interface RuntimeStatus {
   installed: boolean;
   python_path: string | null;
   env_dir: string | null;
-  status_text: 'installed' | 'partial' | 'missing';
+  status_text: 'installed' | 'initialized' | 'partial' | 'missing';
 }
 
 export interface RuntimeDef {
@@ -73,6 +73,8 @@ export interface Settings {
   dev_mode: boolean;
   update_channel: 'stable' | 'beta';
   theme: 'dark' | 'light';
+  managed_server_url: string;
+  managed_api_key: string;
   language: string;
   last_runtime: string | null;
   window_width?: number | null;
@@ -92,6 +94,26 @@ export interface PluginInfo {
   capabilities: string[];
   hooks: string[];
   error: string;
+}
+
+export interface FrontendProfile {
+  id: string;
+  kind: 'builtin' | 'community';
+  name: string;
+  version: string;
+  source_path: string;
+  plugin_path: string;
+  source_url: string;
+  available: boolean;
+  removable: boolean;
+  remove_block_reason: string;
+}
+
+export interface UiProfilesState {
+  profiles: FrontendProfile[];
+  active_profile_id: string;
+  plugin_root: string;
+  config_path: string;
 }
 
 export interface GpuStats {
@@ -257,6 +279,7 @@ export interface ApiResult {
 export interface InstallDoneEvent {
   runtime_id: string;
   success: boolean;
+  action?: 'install' | 'initialize';
   code?: string;
   result_code?: string;
   error?: string;
@@ -362,9 +385,54 @@ export interface TaskResultRecord {
 // Translations: flat key→string map
 export type Translations = Record<string, string>;
 
+export interface ManagedPresetItem {
+  preset_id: string;
+  title: string;
+  summary: string;
+  trainer_type: string;
+  base_model: string;
+  author: string;
+  tags: string[];
+  updated_at: string | null;
+  cover_url: string | null;
+  detail_url: string | null;
+  has_payload: boolean;
+  config_preview: Record<string, unknown>;
+}
+
+export interface ManagedCatalog {
+  configured: boolean;
+  server_url: string | null;
+  source: string | null;
+  endpoint: string | null;
+  fetched_at: string | null;
+  expires_at: string | null;
+  using_cache: boolean;
+  stale: boolean;
+  error: string | null;
+  items: ManagedPresetItem[];
+}
+
+export interface ManagedConnectionResult {
+  ok: boolean;
+  server_url: string;
+  message: string;
+  username?: string;
+}
+
+export interface ManagedImportState {
+  current_name: string | null;
+  backup_name: string | null;
+  snapshot_name: string | null;
+  preset_id: string | null;
+  preset_title: string | null;
+  imported_at: string | null;
+  reverted_at: string | null;
+}
+
 // Category labels
 export const CATEGORY_ORDER = ['nvidia', 'intel', 'amd'] as const;
 export type RuntimeCategory = (typeof CATEGORY_ORDER)[number];
 
 // Navigation page IDs
-export type PageId = 'launch' | 'runtime' | 'advanced' | 'install' | 'extensions' | 'console' | 'about';
+export type PageId = 'launch' | 'runtime' | 'managed' | 'advanced' | 'install' | 'extensions' | 'console' | 'about';

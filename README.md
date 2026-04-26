@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.4.6 Beta36**
+**v1.5.3**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -60,25 +60,37 @@ LoRA & Dreambooth training GUI & scripts preset & one key training environment f
 
 ## Recent Updates
 
-### v1.4.6 Beta36
+### v1.5.3
 
-- added a shared `weight_decay` option for training routes, with automatic optimizer arg injection when `optimizer_args` does not override it
-- added `anima_debug_mode` for opt-in detailed Anima diagnostics (default off)
-- added `anima_rope_mismatch_mode` (`strict`/`resample`) to control RoPE mismatch behavior in Anima and TLoRA-related paths
-- added Anima bucket precheck and `anima_rope_max_seq_tokens` guard to catch oversized token grids before training starts
-- improved Anima preview stability and compatibility (fp32 preview sampling path, prompt dict parsing compatibility, and text encoder unwrap handling)
+- added `safetensors` support for latent disk cache
+- added the backend APIs required by the new UI
+- fixed the old Anima + SageAttention gradient-checkpoint crash caused by forward/recompute tensor-count mismatch
+- improved Anima / TLoRA runtime compatibility
+- improved FlashAttention runtime installation robustness
 
-## ✨NEW: Train WebUI
+## ✨ NEW: SD-reScripts Launcher
+
+A dedicated desktop launcher is now included for runtime setup, launch control, runtime diagnostics, managed preset import, and safer day-to-day startup flow.
+
+![SD-reScripts Launcher (English)](./assets/launcher-en.png)
+
+## ✨ NEW: Train WebUI
 
 The **REAL** Stable Diffusion Training Studio. Everything in one WebUI.
 
-Follow the installation guide below to install the GUI, then run `run_gui.ps1`(windows) or `run_gui.sh`(linux) to start the GUI.
+Follow the installation guide below to install the GUI, then run `run_gui.ps1` (Windows) or `run_gui.sh` (Linux) to start it.
 
-![image](https://github.com/Akegarasu/lora-scripts/assets/36563862/d3fcf5ad-fb8f-4e1d-81f9-c903376c19c6)
+![Train WebUI](https://github.com/Akegarasu/lora-scripts/assets/36563862/d3fcf5ad-fb8f-4e1d-81f9-c903376c19c6)
 
 | Tensorboard | WD 1.4 Tagger | Tag Editor |
 | ------------ | ------------ | ------------ |
-| ![image](https://github.com/Akegarasu/lora-scripts/assets/36563862/b2ac5c36-3edf-43a6-9719-cb00b757fc76) | ![image](https://github.com/Akegarasu/lora-scripts/assets/36563862/9504fad1-7d77-46a7-a68f-91fbbdbc7407) | ![image](https://github.com/Akegarasu/lora-scripts/assets/36563862/4597917b-caa8-4e90-b950-8b01738996f2) |
+| ![Tensorboard](https://github.com/Akegarasu/lora-scripts/assets/36563862/b2ac5c36-3edf-43a6-9719-cb00b757fc76) | ![WD 1.4 Tagger](https://github.com/Akegarasu/lora-scripts/assets/36563862/9504fad1-7d77-46a7-a68f-91fbbdbc7407) | ![Tag Editor](https://github.com/Akegarasu/lora-scripts/assets/36563862/4597917b-caa8-4e90-b950-8b01738996f2) |
+
+## ✨ NEW: UI Design
+
+A redesigned community UI is also supported through the frontend profile system. You can switch to it from the launcher or your configured frontend profile workflow.
+
+![New UI Design](./assets/new-ui-cn.png)
 
 
 # Usage
@@ -164,6 +176,67 @@ Run `bash run_gui.sh`, then program will open [http://127.0.0.1:28000](http://12
 #### TensorBoard
 
 TensorBoard is already integrated into the GUI startup path.
+
+## Hosted Preset Sharing
+
+The launcher `Managed` tab can connect to a hosted preset site for one-click preset import, rollback, and 24-hour local cache sync.
+
+Reference repository:
+
+- [WhitecrowAurora/lulynx-lora-share](https://github.com/WhitecrowAurora/lulynx-lora-share)
+
+Recommended Linux prerequisites for the hosted preset site:
+
+- `git`
+- `Node.js 20+`
+- `npm 10+`
+- if native modules need local compilation: `build-essential`, `python3`, `pkg-config`, `libvips-dev`
+
+### Linux quick start
+
+```sh
+git clone https://github.com/WhitecrowAurora/lulynx-lora-share.git
+cd lulynx-lora-share
+```
+
+Install backend dependencies:
+
+```sh
+cd backend
+npm install
+```
+
+Install frontend dependencies:
+
+```sh
+cd ../frontend
+npm install
+```
+
+Run the backend locally:
+
+```sh
+cd ../backend
+PORT=3000 CORS_ORIGIN=http://127.0.0.1:5173 npm run start
+```
+
+Run the frontend in dev mode:
+
+```sh
+cd ../frontend
+VITE_API_URL=http://127.0.0.1:3000/api npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+Create a production frontend build:
+
+```sh
+cd frontend
+VITE_API_URL=https://your-domain.example/api npm run build
+```
+
+Then configure your reverse proxy to serve `frontend/dist` and forward `/api` to the backend server.
+
+After the site is online, create an API key in LORA Share and paste the server URL + API key into the launcher `Managed` tab.
 
 ## Program arguments
 

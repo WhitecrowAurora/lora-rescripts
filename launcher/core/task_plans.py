@@ -124,11 +124,40 @@ def _collect_launch_env_changes(runtime_def: RuntimeDef, options: LaunchOptions)
     for key, value in sorted(runtime_def.env_vars.items()):
         changes.append(_set_change(key, value, "运行时默认值", "Runtime default"))
 
+    runtime_default_attention_policy = runtime_def.env_vars.get("MIKAZUKI_STARTUP_ATTENTION_POLICY")
+
     if options.attention_policy == "force_sdpa":
         changes.append(
             _set_change(
                 "MIKAZUKI_STARTUP_ATTENTION_POLICY",
                 "force_sdpa",
+                "用户注意力策略",
+                "User attention policy",
+            )
+        )
+    elif runtime_default_attention_policy == "runtime_guarded":
+        changes.append(
+            _set_change(
+                "MIKAZUKI_STARTUP_ATTENTION_POLICY",
+                "runtime_guarded",
+                "运行时默认值",
+                "Runtime default",
+            )
+        )
+    elif options.attention_policy == "prefer_flash":
+        changes.append(
+            _set_change(
+                "MIKAZUKI_STARTUP_ATTENTION_POLICY",
+                "prefer_flash",
+                "用户注意力策略",
+                "User attention policy",
+            )
+        )
+    elif options.attention_policy == "prefer_sage":
+        changes.append(
+            _set_change(
+                "MIKAZUKI_STARTUP_ATTENTION_POLICY",
+                "prefer_sage",
                 "用户注意力策略",
                 "User attention policy",
             )

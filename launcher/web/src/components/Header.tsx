@@ -7,6 +7,7 @@ import type { PageId } from '../api/types';
 const pageLabelKeys: Record<PageId, string> = {
   launch: 'launch',
   runtime: 'runtime',
+  managed: 'managed',
   advanced: 'advanced',
   install: 'install',
   extensions: 'extension',

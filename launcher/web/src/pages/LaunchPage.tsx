@@ -1,9 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import {
-  Play,
-  Activity,
   CheckCircle2,
-  XCircle,
   Zap,
   Settings,
   Download,
@@ -31,15 +28,11 @@ export function LaunchPage() {
     launchPlan,
     healthReport,
     updateInfo,
-    launch,
-    stop,
     setActivePage,
     language,
     translations,
   } = useApp();
   const { t } = useTranslation(translations, language);
-  const [launchError, setLaunchError] = useState<string | null>(null);
-
   const currentDef = runtimeDefs.find((d) => d.id === selectedRuntime);
   const currentStatus = selectedRuntime ? runtimes[selectedRuntime] : null;
   const name = currentDef
@@ -52,7 +45,6 @@ export function LaunchPage() {
     [runtimes],
   );
 
-  const noRuntimeAtAll = !selectedRuntime || !currentStatus?.installed;
   const recommendedRuntimeDef = useMemo(() => {
     const targetId = runtimeRecommendation?.selected_runtime_id;
     if (!targetId) return null;
@@ -68,25 +60,6 @@ export function LaunchPage() {
   const showOnboarding = installedRuntimeCount === 0 && !settings.onboarding_dismissed;
   const selectedRuntimeCompatibility = selectedRuntime ? (runtimeCompatibility[selectedRuntime] || []) : [];
   const healthPrimaryFindings = healthReport?.primary_findings || [];
-
-  useEffect(() => {
-    setLaunchError(null);
-  }, [selectedRuntime, settings, launchPreflight.ready]);
-
-  const handleLaunch = async () => {
-    if (noRuntimeAtAll) {
-      setActivePage('runtime');
-      return;
-    }
-    if (isRunning) {
-      stop();
-      return;
-    }
-    const result = await launch(selectedRuntime);
-    if (result.error) {
-      setLaunchError(result.error);
-    }
-  };
 
   return (
     <div className="space-y-6 animate-fade-in animate-slide-in-up">
@@ -508,20 +481,6 @@ export function LaunchPage() {
         )}
       </div>
 
-      {launchError && (
-        <div className="rounded-2xl p-4 flex items-start gap-3" style={{ backgroundColor: 'var(--danger-subtle)', border: '1px solid var(--danger-border)' }}>
-          <XCircle size={18} style={{ color: 'var(--danger-text)' }} />
-          <div>
-            <div className="text-sm font-semibold" style={{ color: 'var(--danger-text)' }}>
-              {t('launch_failed')}
-            </div>
-            <div className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
-              {launchError}
-            </div>
-          </div>
-        </div>
-      )}
-
       <div className="grid grid-cols-3 gap-4">
         {[
           { label: t('host'), value: settings.host },
@@ -539,93 +498,6 @@ export function LaunchPage() {
         ))}
       </div>
 
-      <div className="flex flex-col items-center py-12 space-y-8">
-        <button
-          onClick={handleLaunch}
-          disabled={isInstalling}
-          className={`relative group w-64 h-64 rounded-full flex flex-col items-center justify-center transition-all duration-500 ${
-            isRunning ? 'scale-95' : 'hover:scale-105'
-          } disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100`}
-        >
-          {/* Breathing glow ring (idle, ready) */}
-          {!isRunning && !noRuntimeAtAll && launchPreflight.ready && (
-            <div
-              className="absolute inset-[-12px] rounded-full launch-breathe-ring"
-              style={{ border: `2px solid var(--accent)`, opacity: 0.25 }}
-            />
-          )}
-          {/* Outer glow */}
-          <div
-            className={`absolute inset-0 rounded-full blur-2xl transition-all duration-1000 ${
-              isRunning ? 'animate-pulse' : ''
-            }`}
-            style={{ backgroundColor: isRunning ? 'var(--danger)' : noRuntimeAtAll || !launchPreflight.ready ? 'var(--danger)' : 'var(--accent)', opacity: 0.2 }}
-          />
-          <div className="absolute inset-0 rounded-full border-2 group-hover:border-white/20 transition-colors" style={{ borderColor: 'var(--border-card)' }} />
-
-          <div
-            className="z-10 w-48 h-48 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all duration-500 relative overflow-hidden"
-            style={{
-              backgroundColor: isRunning
-                ? 'var(--bg-card)'
-                : noRuntimeAtAll || !launchPreflight.ready
-                ? 'var(--danger-subtle)'
-                : 'var(--accent)',
-              color: isRunning
-                ? 'var(--danger-text)'
-                : noRuntimeAtAll || !launchPreflight.ready
-                ? 'var(--danger-text)'
-                : '#ffffff',
-            }}
-          >
-            {/* Spinning ring when running */}
-            {isRunning && (
-              <div
-                className="absolute inset-0 rounded-full launch-spinner-ring"
-                style={{
-                  border: '3px solid transparent',
-                  borderTopColor: 'var(--danger)',
-                  borderRightColor: 'var(--danger)',
-                  opacity: 0.4,
-                }}
-              />
-            )}
-            {isRunning ? (
-              <Activity size={48} className="animate-pulse" />
-            ) : noRuntimeAtAll || !launchPreflight.ready ? (
-              <XCircle size={48} />
-            ) : (
-              <Play size={48} fill="currentColor" />
-            )}
-            <span className="mt-4 font-bold tracking-widest text-lg">
-              {isRunning ? t('btn_stop') : noRuntimeAtAll ? t('no_runtime_installed') : !launchPreflight.ready ? t('launch_blocked') : t('btn_launch')}
-            </span>
-          </div>
-        </button>
-
-        <div className="flex gap-3">
-          <button
-            onClick={() => setActivePage('runtime')}
-            className="btn-interactive px-4 py-2 rounded-xl text-xs flex items-center gap-2"
-            style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border-card)', color: 'var(--text-muted)' }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-card-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-card)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
-          >
-            <Settings size={14} />
-            {t('runtime_selection')}
-          </button>
-          <button
-            onClick={() => setActivePage('install')}
-            className="btn-interactive px-4 py-2 rounded-xl text-xs flex items-center gap-2"
-            style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border-card)', color: 'var(--text-muted)' }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-card-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-card)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
-          >
-            <Download size={14} />
-            {t('install')}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

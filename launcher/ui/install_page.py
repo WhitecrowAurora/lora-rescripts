@@ -85,10 +85,19 @@ class InstallPage(ctk.CTkFrame):
 
             is_zh = get_language() == "zh"
             name = rt.name_zh if is_zh else rt.name_en
-            is_partial = status and (status.python_exists or status.env_dir)
-            status_text = t("status_partial") if is_partial else t("status_missing")
-            status_color = S.YELLOW if is_partial else S.TEXT_DIM
-            status_bg = S.YELLOW_DIM if is_partial else S.BG_INPUT
+            runtime_status = status.status_text if status else "missing"
+            if runtime_status == "initialized":
+                status_text = t("status_initialized")
+                status_color = S.YELLOW
+                status_bg = S.YELLOW_DIM
+            elif runtime_status == "partial":
+                status_text = t("status_partial")
+                status_color = S.YELLOW
+                status_bg = S.YELLOW_DIM
+            else:
+                status_text = t("status_missing")
+                status_color = S.TEXT_DIM
+                status_bg = S.BG_INPUT
 
             # Shadow frame for clay depth
             shadow = ctk.CTkFrame(

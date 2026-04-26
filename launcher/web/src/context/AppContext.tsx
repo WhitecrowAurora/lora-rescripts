@@ -7,6 +7,7 @@ import type {
   RuntimeDef,
   Settings,
   PluginInfo,
+  UiProfilesState,
   GpuStats,
   PageId,
   Translations,
@@ -23,6 +24,9 @@ import type {
   TaskResultRecord,
   TaskStateSnapshot,
   UpdateInfo,
+  ManagedCatalog,
+  ManagedConnectionResult,
+  ManagedImportState,
 } from '../api/types';
 
 export type Theme = 'dark' | 'light';
@@ -40,6 +44,7 @@ interface AppState {
   selectedRuntime: string | null;
   settings: Settings;
   plugins: PluginInfo[];
+  uiProfiles: UiProfilesState | null;
   gpuStats: GpuStats;
   runtimeRecommendation: RuntimeRecommendation | null;
   runtimeCompatibility: RuntimeCompatibilityMatrix;
@@ -48,10 +53,13 @@ interface AppState {
   projectVersion: ProjectVersionInfo | null;
   healthReport: HealthReport | null;
   updateInfo: UpdateInfo | null;
+  managedCatalog: ManagedCatalog | null;
+  managedImportState: ManagedImportState | null;
   currentTaskState: TaskStateSnapshot;
   taskStageEvents: TaskStageEvent[];
   taskHistory: TaskResultRecord[];
   isCheckingUpdates: boolean;
+  isRefreshingManagedCatalog: boolean;
   isRunning: boolean;
   isInstalling: boolean;
   lastInstallSummary: InstallSummary | null;
@@ -71,10 +79,20 @@ interface AppContextValue extends AppState {
   updateSettings: (values: Partial<Settings>) => void;
   launch: (runtimeId: string) => Promise<ApiResult>;
   stop: () => void;
+  kill: () => Promise<ApiResult>;
+  initializeRuntime: (runtimeId: string) => Promise<ApiResult>;
   installRuntime: (runtimeId: string) => Promise<ApiResult>;
   refreshUpdateInfo: (force?: boolean) => Promise<void>;
+  refreshManagedCatalog: (force?: boolean) => Promise<void>;
+  testManagedConnection: () => Promise<ManagedConnectionResult>;
+  importManagedPreset: (presetId: string) => Promise<ManagedImportState>;
+  revertManagedImport: () => Promise<ManagedImportState>;
   runUpdater: () => Promise<ApiResult>;
   togglePlugin: (pluginId: string, enabled: boolean) => void;
+  refreshUiProfiles: () => Promise<void>;
+  activateUiProfile: (profileId: string) => Promise<ApiResult>;
+  installUiProfile: (repoUrl: string, replaceExisting?: boolean) => Promise<ApiResult>;
+  uninstallUiProfile: (profileId: string) => Promise<ApiResult>;
   toggleLanguage: () => void;
   toggleTheme: () => void;
   clearConsole: () => void;
@@ -95,6 +113,8 @@ const defaultSettings: Settings = {
   dev_mode: false,
   update_channel: 'stable',
   theme: 'light',
+  managed_server_url: '',
+  managed_api_key: '',
   language: 'zh',
   last_runtime: null,
   window_width: null,
@@ -143,6 +163,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [selectedRuntime, setSelectedRuntime] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
+  const [uiProfiles, setUiProfiles] = useState<UiProfilesState | null>(null);
   const [gpuStats, setGpuStats] = useState<GpuStats>(defaultGpuStats);
   const [runtimeRecommendation, setRuntimeRecommendation] = useState<RuntimeRecommendation | null>(null);
   const [runtimeCompatibility, setRuntimeCompatibility] = useState<RuntimeCompatibilityMatrix>({});
@@ -151,10 +172,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [projectVersion, setProjectVersion] = useState<ProjectVersionInfo | null>(null);
   const [healthReport, setHealthReport] = useState<HealthReport | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [managedCatalog, setManagedCatalog] = useState<ManagedCatalog | null>(null);
+  const [managedImportState, setManagedImportState] = useState<ManagedImportState | null>(null);
   const [currentTaskState, setCurrentTaskState] = useState<TaskStateSnapshot>(defaultTaskState);
   const [taskStageEvents, setTaskStageEvents] = useState<TaskStageEvent[]>([]);
   const [taskHistory, setTaskHistory] = useState<TaskResultRecord[]>([]);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [isRefreshingManagedCatalog, setIsRefreshingManagedCatalog] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isInstalling, setIsInstalling] = useState(false);
   const [lastInstallSummary, setLastInstallSummary] = useState<InstallSummary | null>(null);
@@ -206,7 +230,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     const load = async () => {
       try {
-        const [rt, defs, best, st, lang, trans, ver, plug, recommendation, compatibility, detectedProjectVersion, taskState, history] = await Promise.all([
+        const [rt, defs, best, st, lang, trans, ver, plug, uiProfileState, recommendation, compatibility, detectedProjectVersion, taskState, history, managed, managedState] = await Promise.all([
           api.getRuntimes(),
           api.getRuntimeDefs(),
           api.getBestRuntime(),
@@ -215,11 +239,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           api.getTranslations(),
           api.getAppVersion(),
           api.scanPlugins(),
+          api.getUiProfiles(),
           api.getRuntimeRecommendation(),
           api.getRuntimeCompatibility(),
           api.getProjectVersion(),
           api.getTaskState(),
           api.getTaskHistory(),
+          api.getManagedCatalog(false),
+          api.getManagedImportState(),
         ]);
 
         const storedTheme = localStorage.getItem('launcher-theme') as Theme | null;
@@ -239,12 +266,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setTranslations(trans);
         setVersion(ver);
         setPlugins(plug);
+        setUiProfiles(uiProfileState);
         setRuntimeRecommendation(recommendation);
         setRuntimeCompatibility(compatibility);
         setProjectVersion(detectedProjectVersion);
         projectVersionRef.current = detectedProjectVersion;
         setCurrentTaskState(taskState || defaultTaskState);
         setTaskHistory(history || []);
+        setManagedCatalog(managed);
+        setManagedImportState(managedState);
 
         // Use saved last_runtime or auto-detect
         const saved = st.last_runtime;
@@ -372,18 +402,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   useEvent('install_done', (data: InstallDoneEvent) => {
     void (async () => {
+      const action = data.action || (data.result_code?.startsWith('runtime_initialize.') ? 'initialize' : 'install');
       setIsInstalling(false);
-      setLastInstallSummary({
-        runtimeId: data.runtime_id,
-        success: data.success,
-        finishedAt: Date.now(),
-      });
+      if (action === 'install') {
+        setLastInstallSummary({
+          runtimeId: data.runtime_id,
+          success: data.success,
+          finishedAt: Date.now(),
+        });
+      } else {
+        setLastInstallSummary(null);
+      }
       setConsoleLines((prev) => [
         ...prev,
         '',
         data.success
-          ? `[Launcher] Runtime '${data.runtime_id}' installation completed successfully.${data.result_code ? ` [${data.result_code}]` : ''}`
-          : `[Launcher] Runtime '${data.runtime_id}' installation failed. Check the log above and try again.${data.code ? ` [${data.code}]` : ''}`,
+          ? action === 'initialize'
+            ? `[Launcher] Runtime '${data.runtime_id}' initialization completed successfully.${data.result_code ? ` [${data.result_code}]` : ''}`
+            : `[Launcher] Runtime '${data.runtime_id}' installation completed successfully.${data.result_code ? ` [${data.result_code}]` : ''}`
+          : action === 'initialize'
+            ? `[Launcher] Runtime '${data.runtime_id}' initialization failed. Check the log above and try again.${data.code ? ` [${data.code}]` : ''}`
+            : `[Launcher] Runtime '${data.runtime_id}' installation failed. Check the log above and try again.${data.code ? ` [${data.code}]` : ''}`,
       ]);
 
       await refreshRuntimes(data.success ? data.runtime_id : null);
@@ -571,10 +610,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshManagedCatalog = useCallback(async (force = false) => {
+    setIsRefreshingManagedCatalog(true);
+    try {
+      await flushSettingsNow();
+      const catalog = await api.getManagedCatalog(force);
+      setManagedCatalog(catalog);
+    } finally {
+      setIsRefreshingManagedCatalog(false);
+    }
+  }, [flushSettingsNow]);
+
   useEffect(() => {
     if (!ready) return;
     void refreshUpdateInfo(false);
   }, [ready, settings.update_channel, refreshUpdateInfo]);
+
+  const testManagedConnection = useCallback(async () => {
+    await flushSettingsNow();
+    return api.testManagedConnection();
+  }, [flushSettingsNow]);
+
+  const importManagedPreset = useCallback(async (presetId: string) => {
+    const state = await api.importManagedPreset(presetId);
+    setManagedImportState(state);
+    return state;
+  }, []);
+
+  const revertManagedImport = useCallback(async () => {
+    const state = await api.revertManagedImport();
+    setManagedImportState(state);
+    return state;
+  }, []);
 
   const launch = useCallback(async (runtimeId: string) => {
     try {
@@ -602,11 +669,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const kill = useCallback(async () => {
+    try {
+      return await api.kill();
+    } catch (e: any) {
+      return { error: e.message };
+    }
+  }, []);
+
   const installRuntimeAction = useCallback(async (runtimeId: string) => {
     setConsoleLines([]);
     setLastInstallSummary(null);
     try {
       const result = await api.installRuntime(runtimeId);
+      applyResultNavigation(result);
+      if (result.error) {
+        return result;
+      }
+      setIsInstalling(true);
+      return result;
+    } catch (e: any) {
+      setIsInstalling(false);
+      return { error: e.message };
+    }
+  }, [applyResultNavigation]);
+
+  const initializeRuntimeAction = useCallback(async (runtimeId: string) => {
+    setConsoleLines([]);
+    setLastInstallSummary(null);
+    try {
+      const result = await api.initializeRuntime(runtimeId);
       applyResultNavigation(result);
       if (result.error) {
         return result;
@@ -642,6 +734,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // ignore
     }
   }, []);
+
+  const refreshUiProfiles = useCallback(async () => {
+    try {
+      const state = await api.getUiProfiles();
+      setUiProfiles(state);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const activateUiProfile = useCallback(async (profileId: string) => {
+    try {
+      const result = await api.activateUiProfile(profileId);
+      if (!result.error) {
+        await refreshUiProfiles();
+      }
+      return result;
+    } catch (e: any) {
+      return { error: e.message };
+    }
+  }, [refreshUiProfiles]);
+
+  const installUiProfile = useCallback(async (repoUrl: string, replaceExisting = false) => {
+    try {
+      const result = await api.installUiProfile(repoUrl, replaceExisting);
+      if (!result.error) {
+        await refreshUiProfiles();
+      }
+      return result;
+    } catch (e: any) {
+      return { error: e.message };
+    }
+  }, [refreshUiProfiles]);
+
+  const uninstallUiProfile = useCallback(async (profileId: string) => {
+    try {
+      const result = await api.uninstallUiProfile(profileId);
+      if (!result.error) {
+        await refreshUiProfiles();
+      }
+      return result;
+    } catch (e: any) {
+      return { error: e.message };
+    }
+  }, [refreshUiProfiles]);
 
   const toggleLanguage = useCallback(async () => {
     const newLang = language === 'zh' ? 'en' : 'zh';
@@ -706,6 +843,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     selectedRuntime,
     settings,
     plugins,
+    uiProfiles,
     gpuStats,
     runtimeRecommendation,
     runtimeCompatibility,
@@ -714,10 +852,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     projectVersion,
     healthReport,
     updateInfo,
+    managedCatalog,
+    managedImportState,
     currentTaskState,
     taskStageEvents,
     taskHistory,
     isCheckingUpdates,
+    isRefreshingManagedCatalog,
     isRunning,
     isInstalling,
     lastInstallSummary,
@@ -734,10 +875,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     updateSettings,
     launch,
     stop,
+    kill,
+    initializeRuntime: initializeRuntimeAction,
     installRuntime: installRuntimeAction,
     refreshUpdateInfo,
+    refreshManagedCatalog,
+    testManagedConnection,
+    importManagedPreset,
+    revertManagedImport,
     runUpdater,
     togglePlugin,
+    refreshUiProfiles,
+    activateUiProfile,
+    installUiProfile,
+    uninstallUiProfile,
     toggleLanguage,
     toggleTheme,
     clearConsole,

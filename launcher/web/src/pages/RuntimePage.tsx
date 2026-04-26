@@ -12,12 +12,14 @@ function StatusBadge({ status }: { status: RuntimeStatus }) {
 
   const statusConfig = {
     installed: { label: t('status_installed'), Icon: CheckCircle2 as React.FC<{ size?: number }> },
+    initialized: { label: t('status_initialized'), Icon: AlertCircle as React.FC<{ size?: number }> },
     partial: { label: t('status_partial'), Icon: AlertCircle as React.FC<{ size?: number }> },
     missing: { label: t('status_missing'), Icon: XCircle as React.FC<{ size?: number }> },
   }[status.status_text] ?? { label: status.status_text, Icon: XCircle as React.FC<{ size?: number }> };
 
   const colorMap: Record<string, { bg: string; text: string }> = {
     installed: { bg: 'var(--success-subtle)', text: 'var(--success-text)' },
+    initialized: { bg: 'var(--warning-subtle)', text: 'var(--warning-text)' },
     partial: { bg: 'var(--warning-subtle)', text: 'var(--warning-text)' },
     missing: { bg: 'var(--bg-card)', text: 'var(--text-muted)' },
   };
@@ -74,8 +76,10 @@ export function RuntimePage() {
     runtimeDefs,
     selectedRuntime,
     selectRuntime,
+    initializeRuntime,
     installRuntime,
     isInstalling,
+    currentTaskState,
     runtimeRecommendation,
     runtimeCompatibility,
     language,
@@ -83,6 +87,7 @@ export function RuntimePage() {
   } = useApp();
   const { t } = useTranslation(translations, language);
   const [actionError, setActionError] = useState<string | null>(null);
+  const isInitializingTask = currentTaskState.task_type === 'initialize';
 
   const grouped = CATEGORY_ORDER.map((cat) => ({
     category: cat,
@@ -228,14 +233,22 @@ export function RuntimePage() {
               const compatibilityEntries = runtimeCompatibility[def.id] || [];
               const capabilityTags = def.capability_tags || [];
               const runtimePathHint = def.env_dir_names.length > 0 ? `.\\env\\${def.env_dir_names[0]}` : '.\\env';
-              const canInstall = !!status?.python_exists && !isInstalling;
+              const isInitialized = status?.status_text === 'initialized';
+              const needsInitialize = !status?.python_exists;
               const installHint = status?.installed
                 ? null
-                : status?.python_exists
-                ? null
-                : status?.env_dir
-                ? t('install_incomplete_runtime_hint', { dir: runtimePathHint })
-                : t('install_prepare_runtime_hint', { dir: runtimePathHint });
+                : isInitialized
+                  ? t('install_ready_runtime_hint')
+                  : status?.status_text === 'partial'
+                    ? t('install_incomplete_runtime_hint', { dir: runtimePathHint })
+                    : t('install_prepare_runtime_hint', { dir: runtimePathHint });
+              const actionLabel = isInstalling
+                ? isInitializingTask
+                  ? t('btn_initializing')
+                  : t('btn_installing')
+                : needsInitialize
+                  ? t('btn_initialize')
+                  : t('btn_install');
 
               return (
                 <div
@@ -259,19 +272,21 @@ export function RuntimePage() {
                           onClick={async (e) => {
                             e.stopPropagation();
                             setActionError(null);
-                            const result = await installRuntime(def.id);
+                            const result = needsInitialize
+                              ? await initializeRuntime(def.id)
+                              : await installRuntime(def.id);
                             if (result.error) {
                               setActionError(result.error);
                             }
                           }}
-                          disabled={!canInstall}
+                          disabled={isInstalling}
                           className={`btn-interactive ${isInstalling ? 'btn-shimmer' : 'btn-accent-glow'} flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40`}
                           style={{ backgroundColor: 'var(--accent)', color: '#ffffff' }}
-                          onMouseEnter={(e) => { if (canInstall && !isInstalling) e.currentTarget.style.backgroundColor = 'var(--accent-light)'; }}
+                          onMouseEnter={(e) => { if (!isInstalling) e.currentTarget.style.backgroundColor = 'var(--accent-light)'; }}
                           onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--accent)'}
                         >
                           <Download size={14} />
-                          {canInstall ? t('btn_install') : t('install_prepare_first')}
+                          {actionLabel}
                         </button>
                       )}
                     </div>

@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState } from 'react';
-import { Copy, Trash2, ArrowRight, CheckCircle2, AlertTriangle, Download } from 'lucide-react';
+import { Copy, Trash2, ArrowRight, CheckCircle2, AlertTriangle, Download, Square, ChevronDown, ChevronUp } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { useTranslation } from '../hooks/useTranslation';
 import { colorizeLine } from '../utils/consoleColor';
@@ -14,6 +14,7 @@ export function ConsolePage() {
     taskHistory,
     clearConsole,
     clearTaskHistory,
+    stop,
     lastInstallSummary,
     clearInstallSummary,
     runtimeDefs,
@@ -24,6 +25,9 @@ export function ConsolePage() {
   const { t } = useTranslation(translations, language);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [showCurrentTaskStages, setShowCurrentTaskStages] = useState(false);
+  const [showRecentTasks, setShowRecentTasks] = useState(false);
+  const [showTaskDetails, setShowTaskDetails] = useState(false);
   const installedRuntimeName = useMemo(() => {
     if (!lastInstallSummary) return null;
     const matched = runtimeDefs.find((item) => item.id === lastInstallSummary.runtimeId);
@@ -52,6 +56,12 @@ export function ConsolePage() {
       if (selectedTaskId !== null) {
         setSelectedTaskId(null);
       }
+      if (showRecentTasks) {
+        setShowRecentTasks(false);
+      }
+      if (showTaskDetails) {
+        setShowTaskDetails(false);
+      }
       return;
     }
     if (!selectedTaskId) {
@@ -67,6 +77,17 @@ export function ConsolePage() {
   const handleCopy = () => {
     const text = consoleLines.join('\n');
     navigator.clipboard.writeText(text);
+  };
+
+  const handleTaskRowClick = (task: TaskResultRecord) => {
+    const taskId = getTaskSelectionId(task);
+    if (selectedTaskId === taskId && showTaskDetails) {
+      setShowTaskDetails(false);
+      return;
+    }
+    setSelectedTaskId(taskId);
+    setShowRecentTasks(true);
+    setShowTaskDetails(true);
   };
 
   const handleCopyTask = () => {
@@ -139,35 +160,64 @@ export function ConsolePage() {
                 </div>
               )}
             </div>
-            <TaskStateBadge state={currentTaskState.state} language={language} />
+            <div className="flex items-center gap-2">
+              {recentTaskStages.length > 0 && (
+                <button
+                  onClick={() => setShowCurrentTaskStages((value) => !value)}
+                  className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
+                  style={{ backgroundColor: 'var(--bg-input)', color: 'var(--text-muted)', border: '1px solid var(--border-card)' }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-card-hover)'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-input)'}
+                >
+                  {showCurrentTaskStages ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                  {showCurrentTaskStages
+                    ? (language === 'zh' ? '收起阶段' : 'Hide stages')
+                    : (language === 'zh' ? `展开阶段 (${recentTaskStages.length})` : `Show stages (${recentTaskStages.length})`)}
+                </button>
+              )}
+              {isRunning && (
+                <button
+                  onClick={() => { void stop(); }}
+                  className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
+                  style={{ backgroundColor: 'var(--danger-subtle)', color: 'var(--danger-text)', border: '1px solid var(--danger-border)' }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-border)'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-subtle)'}
+                >
+                  <Square size={10} /> {t('btn_stop')}
+                </button>
+              )}
+              <TaskStateBadge state={currentTaskState.state} language={language} />
+            </div>
           </div>
 
-          {recentTaskStages.length > 0 && (
+          {recentTaskStages.length > 0 && showCurrentTaskStages && (
             <div className="space-y-2">
               <div className="text-[11px] uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
                 {language === 'zh' ? '最近阶段' : 'Recent stages'}
               </div>
-              {recentTaskStages.map((event, index) => (
-                <div
-                  key={`${event.task_id}-${event.stage_code}-${index}`}
-                  className="rounded-xl p-3"
-                  style={{ backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-card)' }}
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <div className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
-                        {language === 'zh' ? event.stage_label_zh : event.stage_label_en}
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
+                {recentTaskStages.map((event, index) => (
+                  <div
+                    key={`${event.task_id}-${event.stage_code}-${index}`}
+                    className="rounded-xl p-3"
+                    style={{ backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-card)' }}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
+                          {language === 'zh' ? event.stage_label_zh : event.stage_label_en}
+                        </div>
+                        <div className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>
+                          {event.timestamp}
+                        </div>
                       </div>
-                      <div className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>
-                        {event.timestamp}
-                      </div>
+                      <span className="text-[10px] px-2 py-1 rounded" style={{ backgroundColor: 'var(--bg-card)', color: 'var(--text-secondary)', border: '1px solid var(--border-card)' }}>
+                        {event.result_code || event.code || event.state}
+                      </span>
                     </div>
-                    <span className="text-[10px] px-2 py-1 rounded" style={{ backgroundColor: 'var(--bg-card)', color: 'var(--text-secondary)', border: '1px solid var(--border-card)' }}>
-                      {event.result_code || event.code || event.state}
-                    </span>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -179,7 +229,28 @@ export function ConsolePage() {
             <div className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
               {language === 'zh' ? '最近任务' : 'Recent tasks'}
             </div>
-            {selectedTask && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setShowRecentTasks((value) => {
+                    const next = !value;
+                    if (!next) {
+                      setShowTaskDetails(false);
+                    }
+                    return next;
+                  });
+                }}
+                className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
+                style={{ backgroundColor: 'var(--bg-input)', color: 'var(--text-muted)', border: '1px solid var(--border-card)' }}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-card-hover)'}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-input)'}
+              >
+                {showRecentTasks ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                {showRecentTasks
+                  ? (language === 'zh' ? '收起任务区' : 'Hide tasks')
+                  : (language === 'zh' ? `展开任务区 (${recentTaskHistory.length})` : `Show tasks (${recentTaskHistory.length})`)}
+              </button>
+            {selectedTask && showTaskDetails && (
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleExportTaskBundle}
@@ -201,20 +272,29 @@ export function ConsolePage() {
                 </button>
               </div>
             )}
+            </div>
           </div>
-          <div className="space-y-2">
+          {!showRecentTasks && (
+            <div className="rounded-xl px-3 py-2 text-xs" style={{ backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-card)', color: 'var(--text-dim)' }}>
+              {language === 'zh'
+                ? `最近任务已收起，共 ${recentTaskHistory.length} 条。`
+                : `${recentTaskHistory.length} recent task(s) hidden.`}
+            </div>
+          )}
+          {showRecentTasks && (
+          <div className="space-y-2 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
             {recentTaskHistory.map((task) => (
               <button
                 key={task.task_id || `${task.task_type}-${task.finished_at || task.started_at}`}
                 type="button"
-                onClick={() => setSelectedTaskId(getTaskSelectionId(task))}
+                onClick={() => handleTaskRowClick(task)}
                 className="w-full rounded-xl p-3 text-left btn-interactive"
                 style={{
-                  backgroundColor: selectedTask && getTaskSelectionId(selectedTask) === getTaskSelectionId(task)
+                  backgroundColor: selectedTask && showTaskDetails && getTaskSelectionId(selectedTask) === getTaskSelectionId(task)
                     ? 'var(--bg-card-hover)'
                     : 'var(--bg-input)',
                   border: `1px solid ${
-                    selectedTask && getTaskSelectionId(selectedTask) === getTaskSelectionId(task)
+                    selectedTask && showTaskDetails && getTaskSelectionId(selectedTask) === getTaskSelectionId(task)
                       ? 'var(--accent-border)'
                       : 'var(--border-card)'
                   }`,
@@ -243,8 +323,9 @@ export function ConsolePage() {
               </button>
             ))}
           </div>
+          )}
 
-          {selectedTask && (
+          {showRecentTasks && showTaskDetails && selectedTask && (
             <div className="rounded-2xl p-4 space-y-3" style={{ backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-card)' }}>
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -255,7 +336,18 @@ export function ConsolePage() {
                     {(language === 'zh' ? `任务类型：${selectedTask.task_type}` : `Task: ${selectedTask.task_type}`) + (selectedTask.runtime_id ? ` · ${selectedTask.runtime_id}` : '')}
                   </div>
                 </div>
-                <TaskStateBadge state={selectedTask.state} language={language} />
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowTaskDetails(false)}
+                    className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
+                    style={{ backgroundColor: 'var(--bg-card)', color: 'var(--text-muted)', border: '1px solid var(--border-card)' }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-card-hover)'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-card)'}
+                  >
+                    <ChevronUp size={10} /> {language === 'zh' ? '收起详情' : 'Hide details'}
+                  </button>
+                  <TaskStateBadge state={selectedTask.state} language={language} />
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -567,6 +659,17 @@ export function ConsolePage() {
           {isRunning ? t('status_running') : t('status_stopped')}
         </div>
         <div className="flex gap-2">
+          {isRunning && (
+            <button
+              onClick={() => { void stop(); }}
+              className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
+              style={{ backgroundColor: 'var(--danger-subtle)', color: 'var(--danger-text)' }}
+              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-border)'}
+              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-subtle)'}
+            >
+              <Square size={10} /> {t('btn_stop')}
+            </button>
+          )}
           <button
             onClick={handleCopy}
             className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
@@ -603,7 +706,7 @@ export function ConsolePage() {
       <div
         ref={scrollRef}
         className="flex-1 rounded-2xl p-4 font-mono text-xs overflow-y-auto leading-relaxed shadow-inner custom-scrollbar"
-        style={{ backgroundColor: 'var(--console-bg)', border: '1px solid var(--border)' }}
+        style={{ backgroundColor: 'var(--console-bg)', border: '1px solid var(--border)', minHeight: '260px' }}
       >
         {consoleLines.length === 0 ? (
           <p className="italic" style={{ color: 'var(--text-dim)' }}>{t('console_empty')}</p>

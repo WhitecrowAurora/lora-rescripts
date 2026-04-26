@@ -26,7 +26,7 @@ class LaunchOptions:
     runtime_id: str = "standard"
     safe_mode: bool = False
     cn_mirror: bool = False
-    attention_policy: str = "default"  # "default", "prefer_sage", "force_sdpa"
+    attention_policy: str = "default"  # "default", "prefer_sage", "prefer_flash", "force_sdpa"
     host: str = "127.0.0.1"
     port: int = 28000
     listen: bool = False
@@ -64,11 +64,16 @@ def build_launch_env(
     for key, value in runtime_def.env_vars.items():
         env[key] = value
 
+    runtime_default_attention_policy = runtime_def.env_vars.get("MIKAZUKI_STARTUP_ATTENTION_POLICY")
+
     if options.attention_policy == "force_sdpa":
         env["MIKAZUKI_STARTUP_ATTENTION_POLICY"] = "force_sdpa"
+    elif runtime_default_attention_policy == "runtime_guarded":
+        env["MIKAZUKI_STARTUP_ATTENTION_POLICY"] = runtime_default_attention_policy
+    elif options.attention_policy == "prefer_flash":
+        env["MIKAZUKI_STARTUP_ATTENTION_POLICY"] = "prefer_flash"
     elif options.attention_policy == "prefer_sage":
-        if "MIKAZUKI_STARTUP_ATTENTION_POLICY" not in runtime_def.env_vars:
-            env.pop("MIKAZUKI_STARTUP_ATTENTION_POLICY", None)
+        env["MIKAZUKI_STARTUP_ATTENTION_POLICY"] = "prefer_sage"
     else:
         if "MIKAZUKI_STARTUP_ATTENTION_POLICY" not in runtime_def.env_vars:
             env.pop("MIKAZUKI_STARTUP_ATTENTION_POLICY", None)

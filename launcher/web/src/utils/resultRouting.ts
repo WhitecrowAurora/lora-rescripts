@@ -25,11 +25,13 @@ export function getTargetPageForApiResult(result: ApiResult): PageId | null {
   const directRules: Record<string, PageId> = {
     'trainer.launch_started': 'console',
     'trainer.already_running': 'console',
+    'runtime_initialize.started': 'console',
     'runtime_install.started': 'console',
     'updater.started': 'about',
     'runtime.unknown': 'runtime',
     'runtime.not_installed': 'runtime',
     'runtime_install.already_running': 'install',
+    'runtime_initialize.already_running': 'install',
     'runtime_install.powershell_missing': 'install',
     'runtime_install.scripts_missing': 'install',
     'runtime_install.python_missing': 'install',
@@ -51,6 +53,10 @@ export function getTargetPageForApiResult(result: ApiResult): PageId | null {
     return result.ok ? 'console' : 'install';
   }
 
+  if (code.startsWith('runtime_initialize.')) {
+    return result.ok ? 'console' : 'install';
+  }
+
   if (code.startsWith('updater.')) {
     return 'about';
   }
@@ -65,4 +71,3 @@ export function getTargetPageForApiResult(result: ApiResult): PageId | null {
 
   return null;
 }
-

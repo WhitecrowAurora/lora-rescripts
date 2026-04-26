@@ -6,6 +6,7 @@ import { useTranslation } from '../hooks/useTranslation';
 const attentionOptions = [
   { key: 'default', labelKey: 'attention_default', descKey: 'attention_default_desc' },
   { key: 'prefer_sage', labelKey: 'attention_prefer_sage', descKey: 'attention_prefer_sage_desc' },
+  { key: 'prefer_flash', labelKey: 'attention_prefer_flash', descKey: 'attention_prefer_flash_desc' },
   { key: 'force_sdpa', labelKey: 'attention_force_sdpa', descKey: 'attention_force_sdpa_desc' },
 ];
 

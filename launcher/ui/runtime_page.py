@@ -128,17 +128,18 @@ class RuntimeCard(ctk.CTkFrame):
 
     def _status_color(self) -> str:
         if self._status.installed: return S.GREEN
-        if self._status.python_exists or self._status.env_dir: return S.YELLOW
+        if self._status.status_text in {"initialized", "partial"}: return S.YELLOW
         return S.TEXT_DIM
 
     def _status_bg_color(self) -> str:
         if self._status.installed: return S.GREEN_DIM
-        if self._status.python_exists or self._status.env_dir: return S.YELLOW_DIM
+        if self._status.status_text in {"initialized", "partial"}: return S.YELLOW_DIM
         return S.BG_INPUT
 
     def _status_text(self) -> str:
         if self._status.installed: return t("status_installed")
-        if self._status.python_exists or self._status.env_dir: return t("status_partial")
+        if self._status.status_text == "initialized": return t("status_initialized")
+        if self._status.status_text == "partial": return t("status_partial")
         return t("status_missing")
 
     def _on_enter(self, event) -> None:

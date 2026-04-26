@@ -5,6 +5,7 @@ import type {
   RuntimeDef,
   Settings,
   PluginInfo,
+  UiProfilesState,
   GpuStats,
   ProjectVersionInfo,
   RuntimeRecommendation,
@@ -20,6 +21,9 @@ import type {
   TaskResultRecord,
   TaskStateSnapshot,
   Translations,
+  ManagedCatalog,
+  ManagedConnectionResult,
+  ManagedImportState,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -81,6 +85,10 @@ interface PywebviewApi {
   set_settings: (values: Partial<Settings>) => Promise<ApiResult>;
   scan_plugins: () => Promise<PluginInfo[]>;
   set_plugin_enabled: (id: string, enabled: boolean) => Promise<ApiResult>;
+  get_ui_profiles: () => Promise<UiProfilesState>;
+  activate_ui_profile: (profileId: string) => Promise<ApiResult>;
+  install_ui_profile: (repoUrl: string, replaceExisting?: boolean) => Promise<ApiResult>;
+  uninstall_ui_profile: (profileId: string) => Promise<ApiResult>;
   get_language: () => Promise<string>;
   set_language: (lang: string) => Promise<ApiResult>;
   get_translations: () => Promise<Translations>;
@@ -100,8 +108,15 @@ interface PywebviewApi {
   clear_task_history: () => Promise<ApiResult>;
   is_running: () => Promise<boolean>;
   is_installing: () => Promise<boolean>;
+  get_managed_catalog: (forceRefresh?: boolean) => Promise<ManagedCatalog>;
+  test_managed_connection: () => Promise<ManagedConnectionResult>;
+  get_managed_import_state: () => Promise<ManagedImportState>;
+  import_managed_preset: (presetId: string) => Promise<ManagedImportState>;
+  revert_managed_import: () => Promise<ManagedImportState>;
   launch: (runtimeId: string) => Promise<ApiResult>;
   stop: () => Promise<ApiResult>;
+  kill: () => Promise<ApiResult>;
+  initialize_runtime: (runtimeId: string) => Promise<ApiResult>;
   install_runtime: (runtimeId: string) => Promise<ApiResult>;
 }
 
@@ -126,6 +141,11 @@ export const api = {
   setSettings: (values: Partial<Settings>) => callApi<ApiResult>('set_settings', values),
   scanPlugins: () => callApi<PluginInfo[]>('scan_plugins'),
   setPluginEnabled: (id: string, enabled: boolean) => callApi<ApiResult>('set_plugin_enabled', id, enabled),
+  getUiProfiles: () => callApi<UiProfilesState>('get_ui_profiles'),
+  activateUiProfile: (profileId: string) => callApi<ApiResult>('activate_ui_profile', profileId),
+  installUiProfile: (repoUrl: string, replaceExisting = false) =>
+    callApi<ApiResult>('install_ui_profile', repoUrl, replaceExisting),
+  uninstallUiProfile: (profileId: string) => callApi<ApiResult>('uninstall_ui_profile', profileId),
   getLanguage: () => callApi<string>('get_language'),
   setLanguage: (lang: string) => callApi<ApiResult>('set_language', lang),
   getTranslations: () => callApi<Translations>('get_translations'),
@@ -147,8 +167,15 @@ export const api = {
   clearTaskHistory: () => callApi<ApiResult>('clear_task_history'),
   isRunning: () => callApi<boolean>('is_running'),
   isInstalling: () => callApi<boolean>('is_installing'),
+  getManagedCatalog: (forceRefresh = false) => callApi<ManagedCatalog>('get_managed_catalog', forceRefresh),
+  testManagedConnection: () => callApi<ManagedConnectionResult>('test_managed_connection'),
+  getManagedImportState: () => callApi<ManagedImportState>('get_managed_import_state'),
+  importManagedPreset: (presetId: string) => callApi<ManagedImportState>('import_managed_preset', presetId),
+  revertManagedImport: () => callApi<ManagedImportState>('revert_managed_import'),
   launch: (runtimeId: string) => callApi<ApiResult>('launch', runtimeId),
   stop: () => callApi<ApiResult>('stop'),
+  kill: () => callApi<ApiResult>('kill'),
+  initializeRuntime: (runtimeId: string) => callApi<ApiResult>('initialize_runtime', runtimeId),
   installRuntime: (runtimeId: string) => callApi<ApiResult>('install_runtime', runtimeId),
 };
 
