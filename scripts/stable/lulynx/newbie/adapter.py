@@ -122,7 +122,7 @@ def attach_newbie_adapter(model, config: NewbieRuntimeConfig):
             raise ImportError('lycoris-lora is required for Newbie LoKr support')
 
         lokr_rank = int(getattr(config, 'lokr_rank', config.network_dim))
-        lokr_alpha = int(getattr(config, 'lokr_alpha', config.network_alpha))
+        lokr_alpha = float(getattr(config, 'lokr_alpha', config.network_alpha))
         lokr_dropout = float(getattr(config, 'lokr_dropout', config.network_dropout))
         lokr_rank_dropout = float(getattr(config, 'lokr_rank_dropout', 0.0))
         lokr_module_dropout = float(getattr(config, 'lokr_module_dropout', 0.0))

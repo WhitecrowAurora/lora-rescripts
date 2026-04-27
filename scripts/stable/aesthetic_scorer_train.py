@@ -57,6 +57,15 @@ def fmt_or_dash(v: float) -> str:
     return "-" if not math.isfinite(float(v)) else f"{float(v):.4f}"
 
 
+def _selected_dim_mae_text(metrics: dict[str, Any], selected_dims: list[str]) -> str:
+    per_dim = metrics.get("per_dim_mae") or []
+    dim_to_value = {
+        name: float(per_dim[index]) if index < len(per_dim) else float("nan")
+        for index, name in enumerate(TARGETS)
+    }
+    return ", ".join(f"{name}:{fmt_or_dash(dim_to_value.get(name, float('nan')))}" for name in selected_dims)
+
+
 def _normalize_split(v: Any) -> str | None:
     if v is None:
         return None
@@ -169,7 +178,7 @@ def _build_model_filename(name_raw: Any, fmt_raw: Any) -> str:
 def _build_runtime_config(config_path: Path) -> tuple[dict[str, Any], Path]:
     raw = toml.load(config_path)
     cfg = copy.deepcopy(DEFAULT_CONFIG)
-    config_base = config_path.parent
+    config_base = ROOT
 
     data = cfg.setdefault("data", {})
     models = cfg.setdefault("models", {})
@@ -523,40 +532,34 @@ def main() -> None:
         history["val"].append(val_metrics)
         history_path.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        train_dim = ", ".join(
-            f"{name}:{fmt_or_dash(float(train_metrics['per_dim_mae'][index]))}"
-            for index, name in enumerate(target_dims)
-        )
-        val_dim = ", ".join(
-            f"{name}:{fmt_or_dash(float(val_metrics['per_dim_mae'][index]))}"
-            for index, name in enumerate(target_dims)
-        )
+        train_dim = _selected_dim_mae_text(train_metrics, target_dims)
+        val_dim = _selected_dim_mae_text(val_metrics, target_dims)
         print(
             f"[第 {epoch}/{epochs} 轮] "
-            f"train_loss={train_metrics['loss']:.4f} "
+            f"train_loss={fmt_or_dash(float(train_metrics['loss']))} "
             f"train_mae={fmt_or_dash(train_metrics['mae'])} "
             f"train_cls_acc={fmt_or_dash(train_metrics['cls_acc'])} | "
-            f"val_loss={val_metrics['loss']:.4f} "
+            f"val_loss={fmt_or_dash(float(val_metrics['loss']))} "
             f"val_mae={fmt_or_dash(val_metrics['mae'])} "
             f"val_cls_acc={fmt_or_dash(val_metrics['cls_acc'])}"
         )
         print(
             "  "
-            f"train 回归loss={train_metrics['score_loss']:.4f} "
-            f"cls_loss={train_metrics['cls_loss']:.4f} "
+            f"train 回归loss={fmt_or_dash(float(train_metrics['score_loss']))} "
+            f"cls_loss={fmt_or_dash(float(train_metrics['cls_loss']))} "
             f"score_n={train_metrics['score_n']} cls_n={train_metrics['cls_n']}"
         )
         print(
             "  "
-            f"val   回归loss={val_metrics['score_loss']:.4f} "
-            f"cls_loss={val_metrics['cls_loss']:.4f} "
+            f"val   回归loss={fmt_or_dash(float(val_metrics['score_loss']))} "
+            f"cls_loss={fmt_or_dash(float(val_metrics['cls_loss']))} "
             f"score_n={val_metrics['score_n']} cls_n={val_metrics['cls_n']}"
         )
         print(f"  train 各维度MAE: [{train_dim}]")
         print(f"  val   各维度MAE: [{val_dim}]")
 
         val_objective = float(val_metrics["loss"])
-        if val_objective < best_val_objective:
+        if math.isfinite(val_objective) and val_objective < best_val_objective:
             best_val_objective = val_objective
             save_checkpoint(
                 best_path,
@@ -571,9 +574,9 @@ def main() -> None:
                 val_cls_acc=float(val_metrics["cls_acc"]),
                 cls_loss_weight=cls_loss_weight,
             )
-            print(f"  已保存最佳模型: {best_path} (val_loss={best_val_objective:.4f})")
+            print(f"  已保存最佳模型: {best_path} (val_loss={fmt_or_dash(best_val_objective)})")
 
-    print(f"\n训练完成。最佳 val_loss={best_val_objective:.4f}")
+    print(f"\n训练完成。最佳 val_loss={fmt_or_dash(best_val_objective)}")
     print(f"最佳模型: {best_path}")
     print(f"训练历史: {history_path}")
 

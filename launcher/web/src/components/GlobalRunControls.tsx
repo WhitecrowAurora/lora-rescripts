@@ -13,6 +13,7 @@ export function GlobalRunControls() {
     launchPreflight,
     isRunning,
     isInstalling,
+    currentTaskState,
     launch,
     stop,
     kill,
@@ -30,6 +31,8 @@ export function GlobalRunControls() {
     [runtimeDefs, selectedRuntime],
   );
   const hasInstalledRuntime = Boolean(selectedRuntime && runtimes[selectedRuntime]?.installed);
+  const isStoppingTask = currentTaskState.task_type === 'stop'
+    && (currentTaskState.state === 'pending' || currentTaskState.state === 'running');
 
   useEffect(() => {
     if (!killArmed) return;
@@ -93,6 +96,7 @@ export function GlobalRunControls() {
 
   const helperText = (() => {
     if (isInstalling) return t('global_run_installing_hint');
+    if (isStoppingTask) return language === 'zh' ? '正在请求训练器优雅停止…' : 'Requesting graceful trainer shutdown…';
     if (!selectedRuntimeDef) return t('global_run_select_runtime');
     if (!hasInstalledRuntime) return t('global_run_runtime_missing');
     if (!launchPreflight.ready) return t('global_run_preflight_blocked');
@@ -117,12 +121,14 @@ export function GlobalRunControls() {
           <span
             className="px-2 py-1 rounded-full text-[10px] font-semibold"
             style={{
-              backgroundColor: isRunning ? 'var(--success-subtle)' : 'var(--bg-input)',
-              color: isRunning ? 'var(--success-text)' : 'var(--text-secondary)',
-              border: `1px solid ${isRunning ? 'var(--success-border)' : 'var(--border-card)'}`,
+              backgroundColor: isStoppingTask ? 'var(--warning-subtle)' : isRunning ? 'var(--success-subtle)' : 'var(--bg-input)',
+              color: isStoppingTask ? 'var(--warning-text)' : isRunning ? 'var(--success-text)' : 'var(--text-secondary)',
+              border: `1px solid ${isStoppingTask ? 'var(--warning-border)' : isRunning ? 'var(--success-border)' : 'var(--border-card)'}`,
             }}
           >
-            {isRunning ? t('status_running') : t('status_stopped')}
+            {isStoppingTask
+              ? (language === 'zh' ? '停止中' : 'Stopping')
+              : isRunning ? t('status_running') : t('status_stopped')}
           </span>
         </div>
 
@@ -140,16 +146,18 @@ export function GlobalRunControls() {
           <div className="grid grid-cols-2 gap-2">
             <button
               onClick={handleStop}
-              disabled={!isRunning}
+              disabled={!isRunning || isStoppingTask}
               className="btn-interactive flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
               style={{
-                backgroundColor: 'var(--bg-input)',
-                color: 'var(--text-secondary)',
-                border: '1px solid var(--border-card)',
+                backgroundColor: isStoppingTask ? 'var(--warning-subtle)' : 'var(--bg-input)',
+                color: isStoppingTask ? 'var(--warning-text)' : 'var(--text-secondary)',
+                border: `1px solid ${isStoppingTask ? 'var(--warning-border)' : 'var(--border-card)'}`,
               }}
             >
               <Square size={14} />
-              {t('btn_stop')}
+              {isStoppingTask
+                ? (language === 'zh' ? '停止中…' : 'Stopping…')
+                : t('btn_stop')}
             </button>
             <button
               onClick={() => { void handleKill(); }}

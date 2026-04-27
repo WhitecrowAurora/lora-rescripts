@@ -378,4 +378,5 @@ def run_install_plan(
             result_callback(command, index, total, success)
         if not success:
             all_success = False
+            break
     return all_success

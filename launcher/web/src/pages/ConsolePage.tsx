@@ -34,8 +34,20 @@ export function ConsolePage() {
     if (!matched) return lastInstallSummary.runtimeId;
     return language === 'zh' ? matched.name_zh : matched.name_en;
   }, [lastInstallSummary, runtimeDefs, language]);
+  const isStoppingTask = isTaskStopping(currentTaskState.task_type, currentTaskState.state);
   const recentTaskStages = useMemo(() => [...taskStageEvents].slice(-8).reverse(), [taskStageEvents]);
-  const recentTaskHistory = useMemo(() => taskHistory.slice(0, 6), [taskHistory]);
+  const liveTaskRecord = useMemo(
+    () => buildLiveTaskRecord(currentTaskState, taskStageEvents, consoleLines),
+    [currentTaskState, taskStageEvents, consoleLines],
+  );
+  const recentTaskHistory = useMemo(() => {
+    const recentHistory = taskHistory.slice(0, 6);
+    if (!liveTaskRecord?.task_id) {
+      return recentHistory;
+    }
+    const next = [liveTaskRecord, ...recentHistory.filter((task) => task.task_id !== liveTaskRecord.task_id)];
+    return next.slice(0, 6);
+  }, [taskHistory, liveTaskRecord]);
   const selectedTask = useMemo(() => {
     if (recentTaskHistory.length === 0) return null;
     if (selectedTaskId) {
@@ -178,15 +190,26 @@ export function ConsolePage() {
               {isRunning && (
                 <button
                   onClick={() => { void stop(); }}
-                  className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
-                  style={{ backgroundColor: 'var(--danger-subtle)', color: 'var(--danger-text)', border: '1px solid var(--danger-border)' }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-border)'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-subtle)'}
+                  disabled={isStoppingTask}
+                  className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    backgroundColor: isStoppingTask ? 'var(--warning-subtle)' : 'var(--danger-subtle)',
+                    color: isStoppingTask ? 'var(--warning-text)' : 'var(--danger-text)',
+                    border: `1px solid ${isStoppingTask ? 'var(--warning-border)' : 'var(--danger-border)'}`,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isStoppingTask) {
+                      e.currentTarget.style.backgroundColor = 'var(--danger-border)';
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = isStoppingTask ? 'var(--warning-subtle)' : 'var(--danger-subtle)';
+                  }}
                 >
-                  <Square size={10} /> {t('btn_stop')}
+                  <Square size={10} /> {isStoppingTask ? (language === 'zh' ? '停止中…' : 'Stopping…') : t('btn_stop')}
                 </button>
               )}
-              <TaskStateBadge state={currentTaskState.state} language={language} />
+              <TaskStateBadge state={currentTaskState.state} language={language} taskType={currentTaskState.task_type} />
             </div>
           </div>
 
@@ -317,8 +340,17 @@ export function ConsolePage() {
                         {task.error}
                       </div>
                     )}
+                    {task.task_id && currentTaskState.task_id === task.task_id && isTaskStopping(task.task_type, task.state) && (
+                      <div className="text-[11px] mt-1" style={{ color: 'var(--warning-text)' }}>
+                        {language === 'zh' ? '停止请求已发送，正在等待训练器退出。' : 'Stop requested, waiting for the trainer process to exit.'}
+                      </div>
+                    )}
                   </div>
-                  <TaskResultCodeBadge state={task.state} text={task.result_code || task.code || task.state} />
+                  <TaskResultCodeBadge
+                    state={task.state}
+                    text={formatTaskBadgeText(task, language)}
+                    taskType={task.task_type}
+                  />
                 </div>
               </button>
             ))}
@@ -346,7 +378,7 @@ export function ConsolePage() {
                   >
                     <ChevronUp size={10} /> {language === 'zh' ? '收起详情' : 'Hide details'}
                   </button>
-                  <TaskStateBadge state={selectedTask.state} language={language} />
+                  <TaskStateBadge state={selectedTask.state} language={language} taskType={selectedTask.task_type} />
                 </div>
               </div>
 
@@ -654,20 +686,32 @@ export function ConsolePage() {
         <div className="flex gap-2 items-center text-xs" style={{ color: 'var(--text-muted)' }}>
           <span
             className={`w-2 h-2 rounded-full ${isRunning ? 'animate-pulse' : ''}`}
-            style={{ backgroundColor: isRunning ? 'var(--success)' : 'var(--text-dim)' }}
+            style={{ backgroundColor: isStoppingTask ? 'var(--warning-text)' : isRunning ? 'var(--success)' : 'var(--text-dim)' }}
           />
-          {isRunning ? t('status_running') : t('status_stopped')}
+          {isStoppingTask
+            ? (language === 'zh' ? '停止中' : 'Stopping')
+            : isRunning ? t('status_running') : t('status_stopped')}
         </div>
         <div className="flex gap-2">
           {isRunning && (
             <button
               onClick={() => { void stop(); }}
-              className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1"
-              style={{ backgroundColor: 'var(--danger-subtle)', color: 'var(--danger-text)' }}
-              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-border)'}
-              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--danger-subtle)'}
+              disabled={isStoppingTask}
+              className="btn-interactive text-[10px] px-2 py-1 rounded flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{
+                backgroundColor: isStoppingTask ? 'var(--warning-subtle)' : 'var(--danger-subtle)',
+                color: isStoppingTask ? 'var(--warning-text)' : 'var(--danger-text)',
+              }}
+              onMouseEnter={(e) => {
+                if (!isStoppingTask) {
+                  e.currentTarget.style.backgroundColor = 'var(--danger-border)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = isStoppingTask ? 'var(--warning-subtle)' : 'var(--danger-subtle)';
+              }}
             >
-              <Square size={10} /> {t('btn_stop')}
+              <Square size={10} /> {isStoppingTask ? (language === 'zh' ? '停止中…' : 'Stopping…') : t('btn_stop')}
             </button>
           )}
           <button
@@ -720,8 +764,15 @@ export function ConsolePage() {
   );
 }
 
-function TaskStateBadge({ state, language }: { state: string; language: string }) {
-  const config = state === 'succeeded'
+function TaskStateBadge({ state, language, taskType }: { state: string; language: string; taskType?: string }) {
+  const config = isTaskStopping(taskType, state)
+    ? {
+        label: language === 'zh' ? '停止中' : 'Stopping',
+        bg: 'var(--warning-subtle)',
+        text: 'var(--warning-text)',
+        border: 'var(--warning-border)',
+      }
+    : state === 'succeeded'
     ? {
         label: language === 'zh' ? '已完成' : 'Succeeded',
         bg: 'var(--success-subtle)',
@@ -766,8 +817,14 @@ function TaskStateBadge({ state, language }: { state: string; language: string }
   );
 }
 
-function TaskResultCodeBadge({ state, text }: { state: string; text: string }) {
-  const tone = state === 'succeeded'
+function TaskResultCodeBadge({ state, text, taskType }: { state: string; text: string; taskType?: string }) {
+  const tone = isTaskStopping(taskType, state)
+    ? {
+        bg: 'var(--warning-subtle)',
+        text: 'var(--warning-text)',
+        border: 'var(--warning-border)',
+      }
+    : state === 'succeeded'
     ? {
         bg: 'var(--success-subtle)',
         text: 'var(--success-text)',
@@ -832,6 +889,59 @@ function TaskDetailField({ label, value }: { label: string; value: string }) {
 
 function getTaskSelectionId(task: TaskResultRecord): string {
   return task.task_id || `${task.task_type}-${task.finished_at || task.started_at || 'unknown'}`;
+}
+
+function isTaskStopping(taskType: string | undefined, state: string | undefined): boolean {
+  return taskType === 'stop' && (state === 'pending' || state === 'running');
+}
+
+function buildLiveTaskRecord(
+  taskState: {
+    task_id: string | null;
+    task_type: string;
+    state: string;
+    runtime_id: string | null;
+    stage_code: string;
+    stage_label_zh: string;
+    stage_label_en: string;
+    started_at: string | null;
+    finished_at: string | null;
+    code?: string | null;
+    result_code?: string | null;
+    error?: string | null;
+    details?: Record<string, unknown>;
+  },
+  taskStages: TaskResultRecord['stages'] | undefined,
+  consoleLogLines: string[],
+): TaskResultRecord | null {
+  if (!taskState.task_id || taskState.task_type === 'idle') {
+    return null;
+  }
+  return {
+    task_id: taskState.task_id,
+    task_type: taskState.task_type,
+    runtime_id: taskState.runtime_id,
+    state: taskState.state as TaskResultRecord['state'],
+    stage_code: taskState.stage_code,
+    stage_label_zh: taskState.stage_label_zh,
+    stage_label_en: taskState.stage_label_en,
+    started_at: taskState.started_at,
+    finished_at: taskState.finished_at,
+    duration_ms: null,
+    code: taskState.code || null,
+    result_code: taskState.result_code || null,
+    error: taskState.error || null,
+    details: taskState.details || {},
+    stages: Array.isArray(taskStages) ? taskStages : [],
+    log_lines: consoleLogLines.slice(-200),
+  };
+}
+
+function formatTaskBadgeText(task: TaskResultRecord, language: string): string {
+  if (isTaskStopping(task.task_type, task.state)) {
+    return language === 'zh' ? '停止中' : 'Stopping';
+  }
+  return task.result_code || task.code || task.state;
 }
 
 function formatDuration(durationMs: number | null | undefined): string {

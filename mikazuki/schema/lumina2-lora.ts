@@ -1,7 +1,7 @@
 //使用sd-script的配置
 Schema.intersect([
     Schema.object({
-        model_train_type: Schema.string().default("lumina-lora").disabled().description("训练种类"),
+        model_train_type: Schema.string().default("lumina2-lora").disabled().description("训练种类"),
         pretrained_model_name_or_path: Schema.string().role('filepicker', { type: "model-file" }).default("./sd-models/model.safetensors").description("Lumina 模型路径"),
         ae: Schema.string().role('filepicker', { type: "model-file" }).description("AE 模型文件路径"),
         gemma2: Schema.string().role('filepicker', { type: "model-file" }).description("gemma2 模型文件路径"),

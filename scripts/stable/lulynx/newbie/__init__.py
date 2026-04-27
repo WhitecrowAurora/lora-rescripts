@@ -37,6 +37,7 @@ from .memory import (
 )
 from .state import (
     NewbieOptimizerBundle,
+    NewbieResumeState,
     create_newbie_optimizer,
     create_newbie_scheduler,
     load_newbie_checkpoint,
@@ -55,6 +56,7 @@ __all__ = [
     'NewbieDatasetReport',
     'NewbieModelBlueprint',
     'NewbieOptimizerBundle',
+    'NewbieResumeState',
     'NewbiePreparationResult',
     'NewbieRuntimeConfig',
     'NewbieSampleRecord',

@@ -91,6 +91,7 @@ TRAINER_REGISTRY = {
     "flux-lora": TrainerDefinition("flux-lora", "./scripts/dev/flux_train_network.py"),
     "flux-finetune": TrainerDefinition("flux-finetune", "./scripts/dev/flux_train.py"),
     "lumina-lora": TrainerDefinition("lumina-lora", "./scripts/stable/lumina_train_network.py"),
+    "lumina2-lora": TrainerDefinition("lumina2-lora", "./scripts/stable/lumina_train_network.py"),
     "lumina-finetune": TrainerDefinition("lumina-finetune", "./scripts/stable/lumina_train.py"),
     "hunyuan-image-lora": TrainerDefinition("hunyuan-image-lora", "./scripts/stable/hunyuan_image_train_network.py"),
     "anima-lora": TrainerDefinition("anima-lora", "./scripts/stable/anima_train_network.py"),

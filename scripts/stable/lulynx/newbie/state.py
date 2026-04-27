@@ -24,6 +24,13 @@ class NewbieOptimizerBundle:
     total_training_steps: int
 
 
+@dataclass(slots=True)
+class NewbieResumeState:
+    step: int = 0
+    next_epoch_index: int | None = None
+    next_batch_index: int | None = None
+
+
 def create_newbie_optimizer(model, config: NewbieRuntimeConfig):
     adapter_type = getattr(model, '_adapter_type', 'lora')
     learning_rate = float(config.learning_rate)
@@ -64,7 +71,16 @@ def create_newbie_scheduler(optimizer, config: NewbieRuntimeConfig, steps_per_ep
     return NewbieOptimizerBundle(optimizer=optimizer, scheduler=scheduler, total_training_steps=total_training_steps)
 
 
-def save_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, step: int) -> Path:
+def save_newbie_checkpoint(
+    output_dir: str | Path,
+    model,
+    optimizer,
+    scheduler,
+    step: int,
+    *,
+    next_epoch_index: int | None = None,
+    next_batch_index: int | None = None,
+) -> Path:
     checkpoint_dir = Path(output_dir) / 'checkpoints'
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f'checkpoint_{step}.pt'
@@ -86,6 +102,10 @@ def save_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, 
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
     }
+    if next_epoch_index is not None:
+        payload['next_epoch_index'] = int(next_epoch_index)
+    if next_batch_index is not None:
+        payload['next_batch_index'] = int(next_batch_index)
     torch.save(payload, temp_checkpoint_path)
     os.replace(temp_checkpoint_path, checkpoint_path)
     return checkpoint_path
@@ -116,7 +136,22 @@ def _discover_checkpoint_files(path: Path) -> list[Path]:
     )
 
 
-def load_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, resume_path: str | Path | None = None) -> int:
+def _optional_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_newbie_checkpoint(
+    output_dir: str | Path,
+    model,
+    optimizer,
+    scheduler,
+    resume_path: str | Path | None = None,
+) -> NewbieResumeState:
     checkpoints: list[Path]
     if resume_path is not None:
         resume_path = Path(resume_path)
@@ -127,7 +162,7 @@ def load_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, 
         checkpoints = _discover_checkpoint_files(Path(output_dir))
 
     if not checkpoints:
-        return 0
+        return NewbieResumeState()
 
     explicit_file_resume = False
     if resume_path is not None:
@@ -159,7 +194,11 @@ def load_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, 
                     f'[newbie-train] skipped invalid checkpoint(s) before resume: {skipped_paths}. '
                     f'Resuming from {checkpoint_path}.'
                 )
-            return int(checkpoint.get('step', 0))
+            return NewbieResumeState(
+                step=int(checkpoint.get('step', 0)),
+                next_epoch_index=_optional_int(checkpoint.get('next_epoch_index')),
+                next_batch_index=_optional_int(checkpoint.get('next_batch_index')),
+            )
         except (RuntimeError, EOFError, OSError, KeyError, ValueError) as exc:
             load_errors.append((checkpoint_path, exc))
             continue
@@ -171,7 +210,7 @@ def load_newbie_checkpoint(output_dir: str | Path, model, optimizer, scheduler, 
     if load_errors:
         skipped_paths = ', '.join(str(path) for path, _ in load_errors)
         print(f'[newbie-train] skipped invalid checkpoint(s) and started from scratch: {skipped_paths}.')
-    return 0
+    return NewbieResumeState()
 
 
 def save_newbie_adapter(output_dir: str | Path, output_name: str, model, step: int | None = None) -> Path:

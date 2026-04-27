@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from launcher.config import (
@@ -440,11 +441,9 @@ class Api:
         if self._shutting_down or not self._window:
             return
         try:
-            import json
+            js_event = json.dumps(event, ensure_ascii=False)
             js_data = json.dumps(data, ensure_ascii=False)
-            # Escape for embedding in JS string
-            js_data_escaped = js_data.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n')
-            js_code = f"window.__launcher_event && window.__launcher_event('{event}', {js_data_escaped});"
+            js_code = f"window.__launcher_event && window.__launcher_event({js_event}, {js_data});"
             self._window.evaluate_js(js_code)
         except Exception:
             pass
@@ -510,6 +509,11 @@ class Api:
         window_height: Optional[int] = None,
     ) -> None:
         """Perform non-blocking shutdown preparation for the native window."""
+
+        try:
+            self.flush_frontend_settings_on_close()
+        except Exception:
+            pass
 
         self._shutting_down = True
 

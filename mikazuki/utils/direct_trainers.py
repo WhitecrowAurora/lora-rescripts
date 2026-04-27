@@ -213,6 +213,12 @@ def validate_newbie_runtime_config(config: dict) -> Optional[str]:
         return "Newbie 训练图像目录不能为空。"
     if not train_utils.validate_data_dir(train_data_dir):
         return "Newbie 训练图像目录不存在或没有图片，请检查目录。"
+    if not parse_boolish(config.get("use_cache", True)):
+        return "当前 stable Newbie wrapper 暂不支持 use_cache=false。请先开启 use_cache，或等待后续接入真实 no-cache 训练分支。"
+    if not parse_boolish(config.get("newbie_two_phase_execution", True)):
+        return "当前 stable Newbie wrapper 暂不支持关闭两阶段执行。请保持 newbie_two_phase_execution=true。"
+    if parse_boolish(config.get("enable_preview")):
+        return "当前 stable Newbie wrapper 暂不支持训练中预览。请先关闭 enable_preview。"
 
     resume_path = str(config.get("resume", "") or "").strip()
     if resume_path:
@@ -243,9 +249,11 @@ def build_newbie_start_warnings(config: dict) -> list[str]:
         "Newbie 训练会直接复用当前 GUI 所在运行时，不会切换到独立 Newbie Python 环境。"
     ]
     if parse_boolish(config.get("enable_preview")):
-        warnings.append("Newbie 新分支当前仍建议关闭训练中预览，以避免额外显存峰值。")
+        warnings.append("当前 stable Newbie wrapper 暂不支持训练中预览；请先关闭 enable_preview。")
     if not parse_boolish(config.get("use_cache", True)):
-        warnings.append("当前 Newbie 分支建议保持 use_cache 开启；关闭后正式训练阶段显存峰值会明显更高。")
+        warnings.append("当前 stable Newbie wrapper 暂不支持 use_cache=false；请先开启 use_cache。")
+    if not parse_boolish(config.get("newbie_two_phase_execution", True)):
+        warnings.append("当前 stable Newbie wrapper 暂不支持关闭两阶段执行；请保持 newbie_two_phase_execution=true。")
     return warnings
 
 

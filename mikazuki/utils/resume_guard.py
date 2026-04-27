@@ -5,6 +5,7 @@ from typing import Iterable
 
 CKPT_EXTENSIONS = {".safetensors", ".ckpt", ".pt"}
 YOLO_RESUME_EXTENSIONS = {".pt", ".pth"}
+NEWBIE_RESUME_EXTENSIONS = {".pt"}
 STATE_ALWAYS_REQUIRED_FILES = ("train_state.json", "optimizer.bin")
 STATE_MODEL_FILE_CANDIDATES = ("model.safetensors", "pytorch_model.bin", "model.bin")
 
@@ -64,7 +65,28 @@ def iter_existing_output_artifacts(config: dict, repo_root: Path) -> Iterable[Pa
     if not output_dir.exists() or not output_dir.is_dir():
         return []
 
+    model_train_type = get_model_train_type(config)
     output_name = str(config.get("output_name", "") or "").strip()
+
+    if model_train_type == "newbie-lora":
+        artifacts: list[Path] = []
+        checkpoint_dir = output_dir / "checkpoints"
+        if checkpoint_dir.exists() and checkpoint_dir.is_dir():
+            artifacts.extend(
+                checkpoint_path
+                for checkpoint_path in checkpoint_dir.glob("checkpoint_*.pt")
+                if checkpoint_path.is_file()
+            )
+        if output_name:
+            adapter_dir = output_dir / output_name
+            if adapter_dir.exists():
+                artifacts.append(adapter_dir)
+            artifacts.extend(
+                child
+                for child in output_dir.glob(f"{output_name}_step_*")
+                if child.exists()
+            )
+        return artifacts
 
     def _name_matches(filename: str) -> bool:
         """Check if *filename* is an exact sd-scripts artifact for *output_name*.
@@ -123,7 +145,8 @@ def validate_yolo_resume_checkpoint(config: dict, repo_root: Path) -> tuple[bool
 
 
 def validate_resume_launch_guard(config: dict, repo_root: Path) -> tuple[bool, str]:
-    if get_model_train_type(config) == "yolo":
+    model_train_type = get_model_train_type(config)
+    if model_train_type == "yolo":
         return validate_yolo_resume_checkpoint(config, repo_root)
 
     existing_artifacts = list(iter_existing_output_artifacts(config, repo_root))
@@ -139,16 +162,26 @@ def validate_resume_launch_guard(config: dict, repo_root: Path) -> tuple[bool, s
         )
 
     resume_dir = resolve_local_path(resume_path_raw, repo_root)
-    if not resume_dir.exists() or not resume_dir.is_dir():
-        return False, f"resume 路径不存在或不是目录，已阻止启动。resume={resume_dir}"
+    if model_train_type == "newbie-lora":
+        if not resume_dir.exists():
+            return False, f"Newbie resume 路径不存在，已阻止启动。resume={resume_dir}"
+        if resume_dir.is_file():
+            if resume_dir.suffix.lower() not in NEWBIE_RESUME_EXTENSIONS:
+                return False, f"Newbie resume 文件必须是 .pt 检查点，已阻止启动。resume={resume_dir}"
+        elif not resume_dir.is_dir():
+            return False, f"Newbie resume 路径必须是 checkpoint 文件或目录，已阻止启动。resume={resume_dir}"
+    else:
+        if not resume_dir.exists() or not resume_dir.is_dir():
+            return False, f"resume 路径不存在或不是目录，已阻止启动。resume={resume_dir}"
 
-    complete, incomplete_reason = check_resume_state_dir_complete(resume_dir, config=config)
-    if not complete:
-        return (
-            False,
-            "resume 路径指向的 state 目录不完整，已阻止启动。"
-            f" resume={resume_dir}，原因: {incomplete_reason}。",
-        )
+    if model_train_type != "newbie-lora":
+        complete, incomplete_reason = check_resume_state_dir_complete(resume_dir, config=config)
+        if not complete:
+            return (
+                False,
+                "resume 路径指向的 state 目录不完整，已阻止启动。"
+                f" resume={resume_dir}，原因: {incomplete_reason}。",
+            )
 
     output_dir_raw = str(config.get("output_dir", "") or "").strip()
     if output_dir_raw:

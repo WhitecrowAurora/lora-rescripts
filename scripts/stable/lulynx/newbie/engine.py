@@ -218,13 +218,14 @@ class NewbieCachedTrainer:
         unwrapped_model = accelerator.unwrap_model(model)
         if use_optimized_runtime:
             setattr(unwrapped_model, '_max_swappable_blocks', get_newbie_max_swappable_blocks(unwrapped_model))
-        start_step = load_newbie_checkpoint(
+        resume_state = load_newbie_checkpoint(
             self.config.output_dir,
             unwrapped_model,
             optimizer,
             scheduler,
             resume_path=self.config.resume,
         )
+        start_step = resume_state.step
         trainable_params, total_params = count_trainable_parameters(unwrapped_model)
         if lulynx_core is not None:
             lulynx_core.attach_runtime(train_text_encoder=False, network=unwrapped_model)
@@ -287,15 +288,38 @@ class NewbieCachedTrainer:
         save_every_steps = max(0, int(getattr(self.config, 'save_every_n_steps', 0) or 0))
         save_every_epochs = max(0, int(getattr(self.config, 'save_every_n_epochs', 0) or 0))
         last_periodic_save_step = -1
-        start_epoch = min(max_train_epochs - 1, start_step // optimizer_steps_per_epoch) if start_step > 0 else 0
-        resume_micro_step = 0
+        gradient_accumulation_steps = max(1, int(self.config.gradient_accumulation_steps))
+        start_epoch = 0
+        resume_batch_index = 0
+        resume_state_source = 'fresh'
         if start_step > 0:
-            resume_micro_step = (start_step % optimizer_steps_per_epoch) * max(1, int(self.config.gradient_accumulation_steps))
+            if resume_state.next_epoch_index is not None and resume_state.next_batch_index is not None:
+                start_epoch = max(0, min(max_train_epochs, int(resume_state.next_epoch_index)))
+                resume_batch_index = max(0, min(micro_batches_per_epoch, int(resume_state.next_batch_index)))
+                resume_state_source = 'checkpoint-metadata'
+            else:
+                completed_full_epochs = start_step // optimizer_steps_per_epoch
+                steps_into_epoch = start_step % optimizer_steps_per_epoch
+                start_epoch = max(0, min(max_train_epochs, completed_full_epochs))
+                if start_epoch < max_train_epochs:
+                    resume_batch_index = min(micro_batches_per_epoch, steps_into_epoch * gradient_accumulation_steps)
+                    if resume_batch_index >= micro_batches_per_epoch:
+                        start_epoch = min(max_train_epochs, start_epoch + 1)
+                        resume_batch_index = 0
+                resume_state_source = 'derived-from-step'
+            if start_step >= max_train_steps:
+                start_epoch = max_train_epochs
+                resume_batch_index = 0
+                resume_state_source = 'already-complete'
             if accelerator.is_main_process:
+                resume_epoch_label = min(start_epoch + 1, max_train_epochs) if start_epoch < max_train_epochs else max_train_epochs
                 print(
                     f"[newbie-train] resume detected | start_step={start_step} | "
-                    f"start_epoch={start_epoch + 1} | skip_micro_batches={resume_micro_step}"
+                    f"start_epoch={resume_epoch_label} | skip_micro_batches={resume_batch_index} | "
+                    f"resume_source={resume_state_source}"
                 )
+        checkpoint_resume_epoch_index = start_epoch
+        checkpoint_resume_batch_index = resume_batch_index
 
         def _save_periodic_artifacts(step: int, reason: str, epoch_index: int) -> None:
             nonlocal last_periodic_save_step
@@ -309,6 +333,8 @@ class NewbieCachedTrainer:
                 optimizer,
                 scheduler,
                 step,
+                next_epoch_index=checkpoint_resume_epoch_index,
+                next_batch_index=checkpoint_resume_batch_index,
             )
             adapter_path = save_newbie_adapter(
                 self.config.output_dir,
@@ -371,8 +397,10 @@ class NewbieCachedTrainer:
             if hasattr(sampler, 'set_epoch'):
                 sampler.set_epoch(epoch)
             epoch_start = perf_counter()
+            last_batch_index = -1
             for batch_index, batch in enumerate(dataloader):
-                if epoch == start_epoch and resume_micro_step > 0 and batch_index < resume_micro_step:
+                last_batch_index = batch_index
+                if epoch == start_epoch and resume_batch_index > 0 and batch_index < resume_batch_index:
                     continue
                 if _graceful_stop_requested():
                     stop_training_reason = _graceful_stop_reason()
@@ -641,6 +669,11 @@ class NewbieCachedTrainer:
 
                 if accelerator.sync_gradients:
                     global_step += 1
+                    checkpoint_resume_epoch_index = epoch
+                    checkpoint_resume_batch_index = batch_index + 1
+                    if checkpoint_resume_batch_index >= micro_batches_per_epoch:
+                        checkpoint_resume_epoch_index = min(max_train_epochs, epoch + 1)
+                        checkpoint_resume_batch_index = 0
                     last_loss = float(current_loss)
                     loss_running_total += last_loss
                     loss_running_steps += 1
@@ -731,21 +764,25 @@ class NewbieCachedTrainer:
                 else:
                     auto_vram_controller.end_step()
 
-            resume_micro_step = 0
-            completed_epochs = epoch + 1
+            resume_batch_index = 0
+            epoch_completed = last_batch_index >= micro_batches_per_epoch - 1
+            if epoch_completed:
+                checkpoint_resume_epoch_index = min(max_train_epochs, epoch + 1)
+                checkpoint_resume_batch_index = 0
+            completed_epochs = epoch + 1 if epoch_completed else epoch
             epoch_seconds = perf_counter() - epoch_start
-            if accelerator.is_main_process:
+            if accelerator.is_main_process and epoch_completed:
                 print(
                     f"[newbie-train] epoch {completed_epochs}/{max_train_epochs} done | "
                     f"global_step={global_step} | loss={last_loss:.6f} | "
                     f"epoch_time={epoch_seconds:.2f}s | cache_ready={len(ready_records)}/{dataset_report.total_images} | "
                     f"blocks_to_swap={getattr(unwrapped_model, 'blocks_to_swap', 0)} | cpu_offload={'on' if getattr(self.config, 'cpu_offload_checkpointing', False) else 'off'}"
                 )
-            if save_every_epochs == 0:
+            if epoch_completed and save_every_epochs == 0:
                 _save_periodic_artifacts(global_step, "every_epoch", epoch)
-            elif completed_epochs % save_every_epochs == 0:
+            elif epoch_completed and completed_epochs % save_every_epochs == 0:
                 _save_periodic_artifacts(global_step, f"every_{save_every_epochs}_epochs", epoch)
-            if len(accelerator.trackers) > 0:
+            if epoch_completed and len(accelerator.trackers) > 0:
                 epoch_average_loss = loss_running_total / max(1, loss_running_steps)
                 accelerator.log(
                     {'loss/epoch': epoch_average_loss, 'loss/epoch_average': epoch_average_loss},
@@ -771,7 +808,15 @@ class NewbieCachedTrainer:
                     None,
                 )
             )
-            save_newbie_checkpoint(self.config.output_dir, accelerator.unwrap_model(model), optimizer, scheduler, global_step)
+            save_newbie_checkpoint(
+                self.config.output_dir,
+                accelerator.unwrap_model(model),
+                optimizer,
+                scheduler,
+                global_step,
+                next_epoch_index=checkpoint_resume_epoch_index,
+                next_batch_index=checkpoint_resume_batch_index,
+            )
         for signum, previous_handler in previous_signal_handlers.items():
             signal.signal(signum, previous_handler)
         accelerator.end_training()

@@ -55,6 +55,7 @@ from mikazuki.utils.training_launch_runtime import resolve_training_launch_runti
 from mikazuki.utils.training_preflight import (
     analyze_training_preflight,
     build_sageattention_experimental_warning,
+    train_data_dir_can_be_omitted,
 )
 from mikazuki.utils.training_sample_prompt_runtime import prepare_training_sample_prompt_config
 from mikazuki.utils.training_start_warnings import (
@@ -297,21 +298,22 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
     if "sample_prompts" in config and "positive_prompts" not in config:
         return None, config["sample_prompts"]
 
-    train_data_dir = config["train_data_dir"]
+    config_view = dict(config)
+    train_data_dir = config_view["train_data_dir"]
     sub_dirs = [dir for dir in glob(os.path.join(train_data_dir, '*')) if os.path.isdir(dir)]
     sub_dirs_with_txt = [dir for dir in sub_dirs if glob(os.path.join(dir, '*.txt'))]
     root_txt_files = glob(os.path.join(train_data_dir, '*.txt'))
 
-    enable_preview = parse_boolish(config.get('enable_preview', False))
-    positive_prompts = config.pop('positive_prompts', None)
-    negative_prompts = config.pop('negative_prompts', '')
-    sample_width = config.pop('sample_width', 512)
-    sample_height = config.pop('sample_height', 512)
-    sample_cfg = config.pop('sample_cfg', 7)
-    sample_seed = config.pop('sample_seed', 2333)
-    sample_steps = config.pop('sample_steps', 24)
-    randomly_choice_prompt = parse_boolish(config.pop('randomly_choice_prompt', False))
-    random_prompt_include_subdirs = parse_boolish(config.pop('random_prompt_include_subdirs', False))
+    enable_preview = parse_boolish(config_view.get('enable_preview', False))
+    positive_prompts = config_view.get('positive_prompts', None)
+    negative_prompts = config_view.get('negative_prompts', '')
+    sample_width = config_view.get('sample_width', 512)
+    sample_height = config_view.get('sample_height', 512)
+    sample_cfg = config_view.get('sample_cfg', 7)
+    sample_seed = config_view.get('sample_seed', 2333)
+    sample_steps = config_view.get('sample_steps', 24)
+    randomly_choice_prompt = parse_boolish(config_view.get('randomly_choice_prompt', False))
+    random_prompt_include_subdirs = parse_boolish(config_view.get('random_prompt_include_subdirs', False))
 
     # random prompt sampling is only meaningful for preview generation
     if not enable_preview:
@@ -1443,7 +1445,7 @@ async def create_toml_file(request: Request):
 
     if trainer_definition.start_warning_builder is not None:
         start_warnings.extend(trainer_definition.start_warning_builder(config))
-    if not direct_python_training and model_train_type != "sdxl-finetune":
+    if not direct_python_training and not train_data_dir_can_be_omitted(config, model_train_type):
         if not train_utils.validate_data_dir(config["train_data_dir"]):
             return APIResponseFail(message="训练数据集路径不存在或没有图片，请检查目录。")
 
@@ -2281,8 +2283,14 @@ async def get_aesthetic_infer_image(path: str):
 
 @router.get("/tasks/terminate/{task_id}", response_model_exclude_none=True)
 async def terminate_task(task_id: str):
-    tm.terminate_task(task_id)
-    return APIResponseSuccess()
+    result = tm.request_terminate_task(task_id)
+    if result == "not-found":
+        return APIResponseFail(message="Task not found")
+    if result == "already-requested":
+        return APIResponseSuccess(message="Stop request is already in progress / 停止请求已在处理中。")
+    if result == "already-stopped":
+        return APIResponseSuccess(message="Task is already stopped / 任务已经停止。")
+    return APIResponseSuccess(message="Stop request accepted / 已接受停止请求。")
 
 
 @router.get("/task_output/{task_id}", response_model_exclude_none=True)

@@ -1,7 +1,7 @@
 [model_arguments]
 v2 = false
 v_parameterization = false
-pretrained_model_name_or_path = "./sd-models/model.ckpt"
+pretrained_model_name_or_path = "./sd-models/model.safetensors"
 
 [dataset_arguments]
 train_data_dir = "./train/aki"
@@ -24,7 +24,7 @@ text_encoder_lr = 1e-5
 optimizer_type = "AdamW8bit"
 lr_scheduler = "cosine_with_restarts"
 lr_warmup_steps = 0
-lr_restart_cycles = 1
+lr_scheduler_num_cycles = 1
 
 [training_arguments]
 train_batch_size = 1
@@ -33,7 +33,7 @@ keep_tokens = 0
 min_bucket_reso = 256
 max_bucket_reso = 1024
 caption_extension = ".txt"
-max_token_length = 225
+max_token_length = 255
 seed = 1337
 xformers = true
 lowram = false

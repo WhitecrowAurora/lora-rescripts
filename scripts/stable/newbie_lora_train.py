@@ -143,6 +143,22 @@ def main() -> None:
         print('[newbie] inspection-only run completed.')
         return
 
+    if not config.use_cache:
+        raise RuntimeError(
+            'Current stable Newbie wrapper does not support use_cache=false yet. '
+            'Please enable use_cache or wait for a true no-cache training path.'
+        )
+    if not config.newbie_two_phase_execution:
+        raise RuntimeError(
+            'Current stable Newbie wrapper does not support disabling two-phase execution yet. '
+            'Please keep newbie_two_phase_execution enabled.'
+        )
+    if config.enable_preview:
+        raise RuntimeError(
+            'Current stable Newbie wrapper does not support in-training preview yet. '
+            'Please disable enable_preview.'
+        )
+
     if args.phase in {'cache', 'full'}:
         print(f'[newbie] running cache phase on device={args.device} ...')
         cache_summary = cache_missing_newbie_records(

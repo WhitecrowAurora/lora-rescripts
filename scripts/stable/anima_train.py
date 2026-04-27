@@ -188,6 +188,24 @@ def train(args):
     # mixed precision dtype
     weight_dtype, save_dtype = train_util.prepare_dtype(args)
 
+    path_bases = anima_train_utils._get_anima_path_bases(args)
+    args.pretrained_model_name_or_path = anima_train_utils.resolve_required_anima_transformer_path(args, "anima-finetune")
+    args.qwen3 = anima_train_utils.resolve_required_anima_qwen3_path(args, "anima-finetune")
+    args.llm_adapter_path = anima_train_utils.resolve_optional_anima_path(
+        getattr(args, "llm_adapter_path", None),
+        label="Anima LLM adapter",
+        allow_file=True,
+        allow_directory=False,
+        base_dirs=path_bases,
+    )
+    args.t5_tokenizer_path = anima_train_utils.resolve_optional_anima_path(
+        getattr(args, "t5_tokenizer_path", None),
+        label="Anima T5 tokenizer",
+        allow_file=False,
+        allow_directory=True,
+        base_dirs=path_bases,
+    )
+
     # Load tokenizers and set strategies
     logger.info("Loading tokenizers...")
     qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(args.qwen3, dtype=weight_dtype, device="cpu")
@@ -333,13 +351,8 @@ def train(args):
     # prepare optimizer
     accelerator.print("prepare optimizer, data loader etc.")
 
-    if args.fused_backward_pass:
-        # Pass per-component param_groups directly to preserve per-component LRs
-        _, _, optimizer = train_util.get_optimizer(args, trainable_params=param_groups)
-        optimizer_train_fn, optimizer_eval_fn = train_util.get_optimizer_train_eval_fn(optimizer, args)
-    else:
-        _, _, optimizer = train_util.get_optimizer(args, trainable_params=param_groups)
-        optimizer_train_fn, optimizer_eval_fn = train_util.get_optimizer_train_eval_fn(optimizer, args)
+    _, _, optimizer = train_util.get_optimizer(args, trainable_params=param_groups)
+    optimizer_train_fn, optimizer_eval_fn = train_util.get_optimizer_train_eval_fn(optimizer, args)
 
     # prepare dataloader
     train_dataset_group.set_current_strategies()
@@ -525,8 +538,9 @@ def train(args):
         if args.initial_step is not None:
             initial_step = args.initial_step
         else:
-            initial_step = (args.initial_epoch - 1) * math.ceil(
-                len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
+            requested_initial_epoch = max(1, int(args.initial_epoch))
+            initial_step = (requested_initial_epoch - 1) * math.ceil(
+                len(train_dataloader) / args.gradient_accumulation_steps
             )
     else:
         if steps_from_state is not None:
@@ -540,7 +554,8 @@ def train(args):
 
     epoch_to_start = 0
     progress_start_step = 0
-    steps_per_epoch_for_resume = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    skip_micro_batches_in_epoch = 0
+    steps_per_epoch_for_resume = max(1, math.ceil(len(train_dataloader) / args.gradient_accumulation_steps))
     if initial_step > 0:
         if args.skip_until_initial_step:
             if not args.resume:
@@ -548,9 +563,10 @@ def train(args):
                     "initial_step is specified but not resuming. lr scheduler will be started from the beginning / initial_stepが指定されていますがresumeしていないため、lr schedulerは最初から始まります"
                 )
             logger.info(f"skipping {initial_step} steps / {initial_step}ステップをスキップします")
-            initial_step *= args.gradient_accumulation_steps
             epoch_to_start = initial_step // steps_per_epoch_for_resume
+            skip_micro_batches_in_epoch = (initial_step % steps_per_epoch_for_resume) * args.gradient_accumulation_steps
             progress_start_step = initial_step
+            initial_step = 0
         else:
             epoch_to_start = initial_step // steps_per_epoch_for_resume
             progress_start_step = initial_step
@@ -605,10 +621,9 @@ def train(args):
     if is_swapping_blocks:
         accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
 
-    if initial_step > 0:
+    if progress_start_step > 0:
         for skip_epoch in range(epoch_to_start):
-            logger.info(f"skipping epoch {skip_epoch + 1} because initial_step (multiplied) is {initial_step}")
-            initial_step -= len(train_dataloader)
+            logger.info(f"skipping epoch {skip_epoch + 1} because initial_step is {progress_start_step}")
         global_step = progress_start_step
 
     # For --sample_at_first
@@ -651,15 +666,12 @@ def train(args):
             m.train()
 
         skipped_dataloader = None
-        if initial_step > 0:
-            skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
-            initial_step = 1
+        if skip_micro_batches_in_epoch > 0:
+            skipped_dataloader = accelerator.skip_first_batches(train_dataloader, skip_micro_batches_in_epoch)
+            skip_micro_batches_in_epoch = 0
 
         for step, batch in enumerate(skipped_dataloader or train_dataloader):
             current_step.value = global_step
-            if initial_step > 0:
-                initial_step -= 1
-                continue
             anima_step_profiler.begin_micro_step()
             nan_check_step = epoch * len(train_dataloader) + step + 1
             run_nan_check = anima_train_utils.should_run_anima_nan_check(args, nan_check_step)
@@ -967,9 +979,10 @@ def train(args):
                                 },
                                 source="anima_train",
                             )
-                            lr_scheduler.step()
                             optimizer_step_executed = bool(accelerator.sync_gradients)
-                            scheduler_step_executed = True
+                            if accelerator.sync_gradients:
+                                lr_scheduler.step()
+                            scheduler_step_executed = bool(accelerator.sync_gradients)
                             zero_grad_called = bool(accelerator.sync_gradients)
                     emit_after_optimizer_step_event(
                         route="anima-finetune",

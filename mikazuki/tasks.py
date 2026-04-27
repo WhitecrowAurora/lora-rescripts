@@ -16,6 +16,23 @@ from mikazuki.log import log
 
 
 def kill_proc_tree(pid, including_parent=True):
+    if os.name == "nt" and including_parent:
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=PIPE,
+                stderr=PIPE,
+                timeout=15,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return
+            stderr = completed.stderr.decode("utf-8", errors="ignore").strip()
+            if stderr:
+                log.warning(f"taskkill /T /F failed for PID {pid}, falling back to psutil kill tree: {stderr}")
+        except Exception as exc:
+            log.warning(f"taskkill /T /F failed for PID {pid}, falling back to psutil kill tree: {exc}")
+
     parent = psutil.Process(pid)
     children = parent.children(recursive=True)
     for child in children:
@@ -37,6 +54,7 @@ class Task:
     def __init__(self, task_id, command, environ=None, cwd=None):
         self.task_id = task_id
         self.lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self.output_lines: list[str] = []
         self.output_total = 0
         self.max_output_lines = 5000
@@ -50,6 +68,8 @@ class Task:
         self._console_progress_active = False
         self._console_progress_width = 0
         self._last_console_progress_line = ""
+        self._termination_requested = False
+        self._terminate_thread = None
 
     def _append_output_line(self, line: str, *, progress: bool = False):
         with self.lock:
@@ -213,8 +233,42 @@ class Task:
         if self.status == TaskStatus.RUNNING:
             self.status = TaskStatus.FINISHED
 
+    def is_termination_requested(self) -> bool:
+        with self._state_lock:
+            return bool(self._termination_requested)
+
+    def is_termination_in_progress(self) -> bool:
+        with self._state_lock:
+            thread = self._terminate_thread
+            return bool(self._termination_requested and thread is not None and thread.is_alive())
+
+    def request_terminate(self) -> str:
+        process = self.process
+        if process is None:
+            self.status = TaskStatus.TERMINATED
+            return "already-stopped"
+        if process.poll() is not None:
+            self._join_output_thread()
+            if self.status == TaskStatus.RUNNING:
+                self.status = TaskStatus.FINISHED
+            return "already-stopped"
+
+        with self._state_lock:
+            if self._terminate_thread is not None and self._terminate_thread.is_alive():
+                return "already-requested"
+            self._termination_requested = True
+            terminate_thread = threading.Thread(
+                target=self.terminate,
+                name=f"task-terminate-{self.task_id}",
+                daemon=True,
+            )
+            self._terminate_thread = terminate_thread
+
+        self._append_output_line("[task-stop] Stop requested; attempting graceful shutdown.")
+        terminate_thread.start()
+        return "requested"
+
     def execute(self):
-        self.status = TaskStatus.RUNNING
         popen_kwargs = {
             "args": self.command,
             "env": self.environ,
@@ -222,9 +276,19 @@ class Task:
             "stdout": PIPE,
             "stderr": subprocess.STDOUT,
         }
-        if os.name != "nt":
+        if os.name == "nt":
+            create_new_process_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if create_new_process_group:
+                popen_kwargs["creationflags"] = create_new_process_group
+        else:
             popen_kwargs["start_new_session"] = True
-        self.process = subprocess.Popen(**popen_kwargs)
+        try:
+            self.process = subprocess.Popen(**popen_kwargs)
+        except Exception as exc:
+            self.status = TaskStatus.TERMINATED
+            self._append_output_line(f"[task-startup-error] {exc}")
+            raise
+        self.status = TaskStatus.RUNNING
         self._output_thread = threading.Thread(target=self._read_output, daemon=True)
         self._output_thread.start()
 
@@ -235,7 +299,23 @@ class Task:
             self._join_output_thread()
             return True
         if os.name == "nt":
-            return False
+            ctrl_break_event = getattr(signal, "CTRL_BREAK_EVENT", None)
+            if ctrl_break_event is None:
+                return False
+            try:
+                self.process.send_signal(ctrl_break_event)
+            except Exception as exc:
+                log.warning(f"Graceful CTRL_BREAK termination failed, falling back to force kill: {exc}")
+                return False
+            try:
+                self.process.wait(timeout=timeout)
+                self._join_output_thread()
+                return True
+            except TimeoutExpired:
+                log.warning(
+                    f"Graceful task termination timed out after {timeout:.0f}s for task {self.task_id}; falling back to force kill."
+                )
+                return False
 
         try:
             pgid = os.getpgid(self.process.pid)
@@ -255,17 +335,29 @@ class Task:
             return False
 
     def terminate(self):
+        requested_stop = self.is_termination_requested()
         if self.process is None:
             self.status = TaskStatus.TERMINATED
             return
         try:
+            if requested_stop:
+                self._append_output_line("[task-stop] Sending interrupt signal to the training process.")
             if self._try_graceful_terminate():
+                if requested_stop:
+                    self._append_output_line("[task-stop] Task stopped gracefully.")
                 return
+            if requested_stop:
+                self._append_output_line("[task-stop] Graceful shutdown timed out; forcing process tree termination.")
             kill_proc_tree(self.process.pid, True)
         except Exception as e:
+            self._append_output_line(f"[task-stop-error] {e}")
             log.error(f"Error when killing process: {e}")
             return
         finally:
+            with self._state_lock:
+                self._termination_requested = False
+                if self._terminate_thread is not None and self._terminate_thread is threading.current_thread():
+                    self._terminate_thread = None
             self.status = TaskStatus.TERMINATED
 
 
@@ -297,6 +389,12 @@ class TaskManager:
             task = self.tasks[task_id]
             task.terminate()
 
+    def request_terminate_task(self, task_id: str) -> str:
+        task = self.tasks.get(task_id)
+        if task is None:
+            return "not-found"
+        return task.request_terminate()
+
     def wait_for_process(self, task_id: str):
         if task_id in self.tasks:
             task: Task = self.tasks[task_id]
@@ -307,6 +405,8 @@ class TaskManager:
             {
                 "id": task.task_id,
                 "status": task.status.name,
+                "termination_requested": task.is_termination_requested(),
+                "termination_in_progress": task.is_termination_in_progress(),
                 "returncode": task.process.returncode
                 if hasattr(task, "process") and task.process and task.process.poll() is not None
                 else None,

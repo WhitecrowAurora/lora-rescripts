@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.5.3**
+**v1.5.4**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -60,13 +60,12 @@ LoRA & Dreambooth training GUI & scripts preset & one key training environment f
 
 ## Recent Updates
 
-### v1.5.3
+### v1.5.4
 
-- added `safetensors` support for latent disk cache
-- added the backend APIs required by the new UI
-- fixed the old Anima + SageAttention gradient-checkpoint crash caused by forward/recompute tensor-count mismatch
-- improved Anima / TLoRA runtime compatibility
-- improved FlashAttention runtime installation robustness
+- improved Launcher graceful stop flow, duplicate-stop protection, and clearer `Stopping...` task state feedback
+- fixed failed trainer startup leaving task slots occupied and improved Windows stop / kill behavior
+- fixed multiple training issues across Anima, Aesthetic Scorer, and Newbie resume / checkpoint flows
+- hardened community UI installation with safer GitHub validation, manifest handling, and zip extraction checks
 
 ## ✨ NEW: SD-reScripts Launcher
 

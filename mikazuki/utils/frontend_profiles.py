@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_ROOT = REPO_ROOT / "plugin"
 BUILTIN_PROFILE_ID = "builtin-legacy"
 DEFAULT_ENTRY_FILE = "index.html"
+_GITHUB_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+_GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 def _read_json(path: Path) -> dict:
@@ -157,6 +168,41 @@ def resolve_frontend_profile_id(profile_id: str | None) -> str:
     return resolve_frontend_profile(profile_id)["id"]
 
 
+def _is_reserved_windows_name(value: str) -> bool:
+    stem = value.split(".", 1)[0].upper()
+    return stem in _WINDOWS_RESERVED_NAMES
+
+
+def _is_valid_github_owner(owner: str) -> bool:
+    return bool(_GITHUB_OWNER_RE.fullmatch(owner)) and not _is_reserved_windows_name(owner)
+
+
+def _is_valid_github_repo(repo: str) -> bool:
+    if repo in {".", ".."} or _is_reserved_windows_name(repo):
+        return False
+    return bool(_GITHUB_REPO_RE.fullmatch(repo))
+
+
+def _resolve_plugin_dir(repo_name: str) -> Path:
+    plugin_root = PLUGIN_ROOT.resolve()
+    plugin_dir = (PLUGIN_ROOT / repo_name).resolve()
+    try:
+        relative = plugin_dir.relative_to(plugin_root)
+    except ValueError as exc:
+        raise ValueError("Refusing to manage a plugin outside the plugin root directory.") from exc
+    if plugin_dir == plugin_root or len(relative.parts) != 1:
+        raise ValueError("Refusing to manage an invalid plugin directory.")
+    return plugin_dir
+
+
+def _is_launcher_installed_plugin_dir(plugin_dir: Path) -> bool:
+    if not plugin_dir.is_dir() or (plugin_dir / ".git").exists():
+        return False
+    manifest = _read_json(plugin_dir / "manifest.json")
+    installed_via = str(manifest.get("installed_via", "")).strip().lower()
+    return installed_via == "github-download"
+
+
 def parse_github_repo_url(repo_url: str) -> dict | None:
     normalized = (repo_url or "").strip()
     if not normalized:
@@ -172,11 +218,11 @@ def parse_github_repo_url(repo_url: str) -> dict | None:
     if len(parts) < 2:
         return None
 
-    owner = parts[0].strip()
-    repo = parts[1].strip()
+    owner = urllib.parse.unquote(parts[0]).strip()
+    repo = urllib.parse.unquote(parts[1]).strip()
     if repo.endswith(".git"):
         repo = repo[:-4]
-    if not owner or not repo:
+    if not _is_valid_github_owner(owner) or not _is_valid_github_repo(repo):
         return None
 
     return {
@@ -212,18 +258,43 @@ def _download_file(url: str, destination: Path) -> None:
         shutil.copyfileobj(response, handle)
 
 
+def _safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+    destination_root = destination.resolve()
+    for member in archive.infolist():
+        member_name = str(member.filename or "").replace("\\", "/")
+        if not member_name:
+            continue
+
+        member_path = PurePosixPath(member_name)
+        if member_path.is_absolute() or ".." in member_path.parts:
+            raise RuntimeError(f"Refusing to extract unsafe archive entry: {member.filename}")
+
+        target_path = (destination_root / Path(*member_path.parts)).resolve()
+        try:
+            target_path.relative_to(destination_root)
+        except ValueError as exc:
+            raise RuntimeError(f"Refusing to extract archive entry outside destination: {member.filename}") from exc
+
+        if member.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member, "r") as source, open(target_path, "wb") as handle:
+            shutil.copyfileobj(source, handle)
+
+
 def install_github_frontend_plugin(repo_url: str, *, replace_existing: bool = False) -> dict:
     repo_info = parse_github_repo_url(repo_url)
     if repo_info is None:
         raise ValueError("Only standard GitHub repository URLs are supported right now.")
 
-    plugin_dir = PLUGIN_ROOT / repo_info["repo"]
+    plugin_dir = _resolve_plugin_dir(repo_info["repo"])
     if plugin_dir.exists():
         if not replace_existing:
             raise ValueError(f"Plugin directory already exists: {plugin_dir}")
-        if plugin_dir.resolve() == PLUGIN_ROOT.resolve():
-            raise ValueError("Refusing to replace the plugin root directory.")
-        shutil.rmtree(plugin_dir, ignore_errors=True)
+        if not _is_launcher_installed_plugin_dir(plugin_dir):
+            raise ValueError("Only launcher-installed GitHub community UIs can be replaced automatically.")
 
     repo_meta = _http_get_json(f"https://api.github.com/repos/{repo_info['owner']}/{repo_info['repo']}")
     default_branch = str(repo_meta.get("default_branch", "")).strip() or "main"
@@ -240,29 +311,38 @@ def install_github_frontend_plugin(repo_url: str, *, replace_existing: bool = Fa
         _download_file(archive_url, archive_path)
 
         with zipfile.ZipFile(archive_path, "r") as archive:
-            archive.extractall(extract_dir)
+            _safe_extract_zip(archive, extract_dir)
 
         extracted_roots = [path for path in extract_dir.iterdir() if path.is_dir()]
         if not extracted_roots:
             raise RuntimeError("Downloaded archive did not contain an extracted repository directory.")
 
         source_dir = extracted_roots[0]
-        shutil.move(str(source_dir), str(plugin_dir))
+        manifest_path = source_dir / "manifest.json"
+        existing_manifest = _read_json(manifest_path)
+        generated_manifest = {
+            **existing_manifest,
+            "id": existing_manifest.get("id") or f"community:{repo_info['repo']}",
+            "name": existing_manifest.get("name") or repo_info["repo"],
+            "version": existing_manifest.get("version") or str(repo_meta.get("default_branch", "")).strip(),
+            "entry": existing_manifest.get("entry") or "ui/dist",
+            "entry_file": existing_manifest.get("entry_file") or DEFAULT_ENTRY_FILE,
+            "source": existing_manifest.get("source") or repo_info["normalized_url"],
+            "installed_via": "github-download",
+        }
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(generated_manifest, handle, indent=2, ensure_ascii=False)
 
-    manifest_path = plugin_dir / "manifest.json"
-    existing_manifest = _read_json(manifest_path)
-    generated_manifest = {
-        **existing_manifest,
-        "id": existing_manifest.get("id") or f"community:{repo_info['repo']}",
-        "name": existing_manifest.get("name") or repo_info["repo"],
-        "version": existing_manifest.get("version") or str(repo_meta.get("default_branch", "")).strip(),
-        "entry": existing_manifest.get("entry") or "ui/dist",
-        "entry_file": existing_manifest.get("entry_file") or DEFAULT_ENTRY_FILE,
-        "source": existing_manifest.get("source") or repo_info["normalized_url"],
-        "installed_via": "github-download",
-    }
-    with open(manifest_path, "w", encoding="utf-8") as handle:
-        json.dump(generated_manifest, handle, indent=2, ensure_ascii=False)
+        prepared_profile = _build_plugin_profile(source_dir)
+        if prepared_profile is None or not prepared_profile.get("available", False):
+            raise RuntimeError(
+                "The repository was downloaded, but no usable frontend entry was found. "
+                "Expected ui/dist/index.html, dist/index.html, or frontend/dist/index.html."
+            )
+
+        if plugin_dir.exists():
+            shutil.rmtree(plugin_dir, ignore_errors=False)
+        shutil.move(str(source_dir), str(plugin_dir))
 
     profile = _build_plugin_profile(plugin_dir)
     if profile is None or not profile.get("available", False):
@@ -283,11 +363,9 @@ def uninstall_frontend_plugin(profile_id: str) -> dict:
     if not profile.get("removable", False):
         raise ValueError(profile.get("remove_block_reason") or "This UI cannot be removed here.")
 
-    plugin_path = REPO_ROOT / profile["plugin_path"]
+    plugin_path = _resolve_plugin_dir(Path(profile["plugin_path"]).name)
     if not plugin_path.exists():
         raise ValueError(f"Plugin directory does not exist: {plugin_path}")
-    if plugin_path.resolve() == PLUGIN_ROOT.resolve():
-        raise ValueError("Refusing to remove the plugin root directory.")
 
     shutil.rmtree(plugin_path, ignore_errors=False)
     return profile

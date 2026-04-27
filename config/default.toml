@@ -1,7 +1,7 @@
 [model]
 v2 = false
 v_parameterization = false
-pretrained_model_name_or_path = "./sd-models/model.ckpt"
+pretrained_model_name_or_path = "./sd-models/model.safetensors"
 
 [dataset]
 train_data_dir = "./train/input"
@@ -25,7 +25,7 @@ text_encoder_lr = 1e-5
 optimizer_type = "AdamW8bit"
 lr_scheduler = "cosine_with_restarts"
 lr_warmup_steps = 0
-lr_restart_cycles = 1
+lr_scheduler_num_cycles = 1
 
 [training]
 resolution = "512,512"
@@ -46,7 +46,6 @@ sample_every_n_epochs = 1
 [saving]
 output_name = "output_name"
 save_every_n_epochs = 1
-save_n_epoch_ratio = 0
 save_last_n_epochs = 499
 save_state = false
 save_model_as = "safetensors"
@@ -58,5 +57,5 @@ log_prefix = "output_name"
 min_bucket_reso = 256
 max_bucket_reso = 1024
 caption_extension = ".txt"
-max_token_length = 225
+max_token_length = 255
 seed = 1337

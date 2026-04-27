@@ -114,6 +114,13 @@ def build_sageattention_experimental_warning(payload: dict, training_type: str) 
     )
 
 
+def train_data_dir_can_be_omitted(payload: dict, training_type: str) -> bool:
+    normalized_type = str(training_type or "").strip().lower()
+    if normalized_type != "sdxl-finetune":
+        return False
+    return any(str(payload.get(key, "") or "").strip() for key in ("dataset_config", "dataset_class"))
+
+
 def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list[str], warnings: list[str], notes: list[str]) -> None:
     if not training_type.startswith("anima"):
         return
@@ -398,7 +405,7 @@ def analyze_training_preflight(
         if dataset_report is not None:
             dataset_summary = summarize_dataset_report(dataset_report)
             warnings.extend(dataset_report.get("warnings", []))
-    else:
+    elif not train_data_dir_can_be_omitted(payload, training_type):
         errors.append("train_data_dir is empty.")
 
     conditioning_summary = None

@@ -81,7 +81,7 @@ def _call_hf_from_pretrained(factory, *args, low_cpu_mem_usage: bool = False, **
 def _normalize_attn_implementation(value):
     normalized = str(value or '').strip().lower()
     if normalized in {'flash_attention_2', 'flash_attention', 'flash', 'fa2'}:
-        return 'eager'
+        return 'sdpa'
     return value
 
 
