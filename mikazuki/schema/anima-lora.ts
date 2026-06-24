@@ -249,7 +249,7 @@ Schema.intersect([
             Schema.intersect([
                 Schema.object({
                     lora_type: Schema.const("glokr").required(),
-                    network_module: Schema.const("lycoris.kohya").default("lycoris.kohya").hidden(),
+                    network_module: Schema.union(["lycoris.kohya", "networks.lora_anima"]).default("lycoris.kohya").hidden(),
                     lycoris_algo: Schema.const("glokr").default("glokr").hidden(),
                     dropout: Schema.number().step(0.01).default(0).description("GLoKr dropout 概率（本仓库自定义 LyCORIS 路线，当前优先支持 Anima 主干 Linear 层）"),
                     rank_dropout: Schema.number().step(0.01).description("GLoKr rank dropout 概率。当前主要作用在 Kronecker 重建出来的差分权重上"),
