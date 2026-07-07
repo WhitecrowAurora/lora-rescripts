@@ -924,6 +924,46 @@ def move_anima_module(
     return module
 
 
+def _iter_anima_modules(module_or_modules):
+    if module_or_modules is None:
+        return
+    if isinstance(module_or_modules, (list, tuple)):
+        for module in module_or_modules:
+            if module is not None:
+                yield module
+        return
+    yield module_or_modules
+
+
+def _infer_anima_module_state(module: torch.nn.Module) -> tuple[Optional[torch.device], Optional[torch.dtype]]:
+    for tensors in (module.parameters(recurse=True), module.buffers(recurse=True)):
+        for tensor in tensors:
+            if tensor is None:
+                continue
+            dtype = tensor.dtype if tensor.is_floating_point() or tensor.is_complex() else None
+            return tensor.device, dtype
+    return None, None
+
+
+def _snapshot_anima_module_states(module_or_modules) -> list[tuple[torch.nn.Module, Optional[torch.device], Optional[torch.dtype]]]:
+    states = []
+    for module in _iter_anima_modules(module_or_modules):
+        device, dtype = _infer_anima_module_state(module)
+        states.append((module, device, dtype))
+    return states
+
+
+def _restore_anima_module_states(
+    states: list[tuple[torch.nn.Module, Optional[torch.device], Optional[torch.dtype]]],
+    *,
+    non_blocking: bool = False,
+) -> None:
+    for module, device, dtype in states:
+        if device is None:
+            continue
+        move_anima_module(module, device, dtype=dtype, non_blocking=non_blocking)
+
+
 def resolve_anima_dataloader_prefetch_factor(args: argparse.Namespace, n_workers: int) -> Optional[int]:
     if n_workers <= 0:
         return None
@@ -1948,69 +1988,77 @@ def _sample_image_inference(
             )
             neg_crossattn_emb = build_anima_crossattn(dit, neg_pe, neg_am, neg_t5_ids, neg_t5_am)
 
-    # Move text encoders to CPU to free VRAM for sampling
-    if text_encoder is not None:
-        if isinstance(text_encoder, (list, tuple)):
-            for te in text_encoder:
-                if te is not None:
-                    te.to("cpu")
-        else:
-            text_encoder.to("cpu")
-    clean_memory_on_device(accelerator.device)
+    text_encoder_states = _snapshot_anima_module_states(text_encoder)
+    try:
+        # Move text encoders to CPU to free VRAM for sampling, then restore them
+        # so later training steps keep their original fast path.
+        if text_encoder is not None:
+            if isinstance(text_encoder, (list, tuple)):
+                for te in text_encoder:
+                    if te is not None:
+                        te.to("cpu")
+            else:
+                text_encoder.to("cpu")
+        clean_memory_on_device(accelerator.device)
 
-    # Generate sample
-    latents = do_sample(
-        height,
-        width,
-        seed,
-        dit,
-        crossattn_emb,
-        sample_steps,
-        dit.dtype,
-        accelerator.device,
-        scale,
-        flow_shift,
-        neg_crossattn_emb,
-        sample_sampler=sample_sampler,
-        sample_scheduler=sample_scheduler,
-    )
+        # Generate sample
+        latents = do_sample(
+            height,
+            width,
+            seed,
+            dit,
+            crossattn_emb,
+            sample_steps,
+            dit.dtype,
+            accelerator.device,
+            scale,
+            flow_shift,
+            neg_crossattn_emb,
+            sample_sampler=sample_sampler,
+            sample_scheduler=sample_scheduler,
+        )
 
-    # Decode latents
-    gc.collect()
-    synchronize_device(accelerator.device)
-    clean_memory_on_device(accelerator.device)
-    org_vae_device = vae.device
-    org_vae_dtype = vae.dtype
-    latents = latents.to(accelerator.device, dtype=torch.float32)
-    vae.to(accelerator.device, dtype=torch.float32)
-    with torch.autocast(device_type=accelerator.device.type, enabled=False):
-        decoded = vae.decode_to_pixels(latents)
-    vae.to(org_vae_device, dtype=org_vae_dtype)
-    clean_memory_on_device(accelerator.device)
+        # Decode latents
+        gc.collect()
+        synchronize_device(accelerator.device)
+        clean_memory_on_device(accelerator.device)
+        org_vae_device = vae.device
+        org_vae_dtype = vae.dtype
+        latents = latents.to(accelerator.device, dtype=torch.float32)
+        vae.to(accelerator.device, dtype=torch.float32)
+        with torch.autocast(device_type=accelerator.device.type, enabled=False):
+            decoded = vae.decode_to_pixels(latents)
+        vae.to(org_vae_device, dtype=org_vae_dtype)
+        clean_memory_on_device(accelerator.device)
 
-    # Convert to image
-    image_stats = _analyze_decoded_image_health(decoded)
-    image = _decoded_tensor_to_pil_image(decoded)
+        # Convert to image
+        image_stats = _analyze_decoded_image_health(decoded)
+        image = _decoded_tensor_to_pil_image(decoded)
 
-    ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
-    num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-    seed_suffix = "" if seed is None else f"_{seed}"
-    i = prompt_dict.get("enum", 0)
-    img_filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{ts_str}{seed_suffix}.png"
-    image.save(os.path.join(save_dir, img_filename))
+        ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
+        num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+        seed_suffix = "" if seed is None else f"_{seed}"
+        i = prompt_dict.get("enum", 0)
+        img_filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{ts_str}{seed_suffix}.png"
+        image.save(os.path.join(save_dir, img_filename))
 
-    max_train_steps = int(getattr(args, "max_train_steps", 0) or 0)
-    likely_early = bool(max_train_steps > 0 and steps is not None and steps <= max(20, int(max_train_steps * 0.15)))
-    _warn_if_preview_looks_suspicious(
-        args,
-        image_stats,
-        context=f"step={steps}, file={img_filename}",
-        likely_early=likely_early,
-    )
+        max_train_steps = int(getattr(args, "max_train_steps", 0) or 0)
+        likely_early = bool(max_train_steps > 0 and steps is not None and steps <= max(20, int(max_train_steps * 0.15)))
+        _warn_if_preview_looks_suspicious(
+            args,
+            image_stats,
+            context=f"step={steps}, file={img_filename}",
+            likely_early=likely_early,
+        )
 
-    # Log to wandb if enabled
-    if "wandb" in [tracker.name for tracker in accelerator.trackers]:
-        wandb_tracker = accelerator.get_tracker("wandb")
-        import wandb
+        # Log to wandb if enabled
+        if "wandb" in [tracker.name for tracker in accelerator.trackers]:
+            wandb_tracker = accelerator.get_tracker("wandb")
+            import wandb
 
-        wandb_tracker.log({f"sample_{i}": wandb.Image(image, caption=prompt)}, commit=False)
+            wandb_tracker.log({f"sample_{i}": wandb.Image(image, caption=prompt)}, commit=False)
+    finally:
+        _restore_anima_module_states(
+            text_encoder_states,
+            non_blocking=should_use_anima_non_blocking(accelerator),
+        )
