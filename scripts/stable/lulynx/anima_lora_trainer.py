@@ -49,6 +49,7 @@ from mikazuki.plugins.training_hooks import (
     emit_before_forward_event,
     emit_before_optimizer_step_event,
 )
+import library.train_metadata_util as train_metadata_util
 import train_network
 from lulynx.experimental_core import (
     PeakVramDiagnosticsRecorder,
@@ -1461,6 +1462,20 @@ class AnimaNetworkTrainer:
         if lulynx_core is not None:
             metadata.update(lulynx_core.get_metadata())
             minimum_metadata.update(lulynx_core.get_metadata())
+
+        if train_dataset_group is not None:
+            if getattr(args, "dataset_config", None) is not None:
+                _ds_meta = train_metadata_util.build_user_config_dataset_metadata(train_dataset_group)
+            else:
+                total_batch_size = (
+                    int(getattr(args, "train_batch_size", 1) or 1)
+                    * int(getattr(args, "gradient_accumulation_steps", 1) or 1)
+                    * int(accelerator.num_processes)
+                )
+                _ds_meta = train_metadata_util.build_legacy_dataset_metadata(
+                    args, train_dataset_group, args.in_json is None, total_batch_size
+                )
+            metadata.update({k: str(v) for k, v in _ds_meta.items()})
 
         initial_step = 0
         if args.initial_epoch is not None or args.initial_step is not None:
