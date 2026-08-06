@@ -457,6 +457,14 @@ def apply_modify_loss_event(
 
     scale = _to_finite_float(mutation.get("scale"), 1.0)
     bias = _to_finite_float(mutation.get("bias"), 0.0)
+    if scale <= 0:
+        # A zero/negative scale silently zeroes or inverts gradients and makes
+        # training appear frozen. Fall back to the neutral scale instead.
+        log.warning(
+            f"[training_hooks] ignoring non-positive mutation scale {scale!r} from plugin; "
+            f"falling back to scale=1.0 (source={source}, route={route})"
+        )
+        scale = 1.0
     reason = str(mutation.get("reason", "") or "").strip()[:256]
     metadata = mutation.get("metadata") if isinstance(mutation.get("metadata"), dict) else {}
     modified = abs(scale - 1.0) > 1e-12 or abs(bias) > 1e-12

@@ -116,8 +116,9 @@ class AnimaNetworkTrainer(_BaseAnimaNetworkTrainer):
         profiler=None,
         use_non_blocking: bool = False,
         run_nan_check: bool = True,
+        return_per_sample_loss: bool = False,
     ):
-        loss = super().process_batch(
+        batch_result = super().process_batch(
             batch,
             text_encoders,
             unet,
@@ -134,14 +135,19 @@ class AnimaNetworkTrainer(_BaseAnimaNetworkTrainer):
             profiler=profiler,
             use_non_blocking=use_non_blocking,
             run_nan_check=run_nan_check,
+            return_per_sample_loss=return_per_sample_loss,
         )
+        if return_per_sample_loss:
+            loss, per_sample_losses = batch_result
+        else:
+            loss = batch_result
         monitor = self._get_amd_monitor()
         if monitor is not None:
             try:
-                monitor.record_loss(loss.detach().item())
+                monitor.record_loss(float(loss.detach().item()))
             except Exception:
                 monitor.record_loss(float("nan"))
-        return loss
+        return (loss, per_sample_losses) if return_per_sample_loss else loss
 
     def all_reduce_network(self, accelerator, network):
         super().all_reduce_network(accelerator, network)

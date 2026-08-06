@@ -853,9 +853,12 @@ class AnimaNetworkTrainer:
         return train_util.compile_training_model_if_enabled(args, model, label="Anima DiT")
 
     def all_reduce_network(self, accelerator, network):
-        for param in network.parameters():
-            if param.grad is not None:
-                param.grad = accelerator.reduce(param.grad, reduction="mean")
+        # Network gradients are already all-reduced by DDP during backward when
+        # the network is wrapped via accelerator.prepare(...). Manually reducing
+        # them again would average gradients a second time and shrink them by ~1/N
+        # on multi-GPU runs, so this is intentionally a no-op. Kept as a hook for
+        # platform-specific overrides (e.g. AMD diagnostics) that observe grads.
+        return
 
     def build_metadata(self, args, session_id, training_started_at, optimizer_name, optimizer_args):
         metadata = {
@@ -1382,38 +1385,39 @@ class AnimaNetworkTrainer:
                     if len(weights) > index:
                         weights.pop(index)
 
-            train_state_file = os.path.join(output_dir, "train_state.json")
-            mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
-            effective_current_epoch = int(current_epoch.value) + mixed_resolution_phase_start_epoch
-            logger.info(
-                f"save train state to {train_state_file} at epoch {effective_current_epoch} step {current_step.value+1}"
-            )
-            state_payload = {
-                "current_epoch": effective_current_epoch,
-                "current_step": current_step.value + 1,
-            }
-            if mixed_resolution_phase_start_epoch > 0:
-                state_payload["mixed_resolution_local_epoch"] = int(current_epoch.value)
-            mixed_resolution_plan_id = str(getattr(args, "mixed_resolution_plan_id", "") or "").strip()
-            if mixed_resolution_plan_id:
-                state_payload["mixed_resolution_plan_id"] = mixed_resolution_plan_id
-            mixed_phase_index = getattr(args, "mixed_resolution_phase_index", None)
-            if mixed_phase_index is not None:
-                state_payload["mixed_resolution_phase_index"] = mixed_phase_index
-            mixed_phase_target_step = getattr(args, "mixed_resolution_phase_target_step", None)
-            if mixed_phase_target_step is not None:
-                state_payload["mixed_resolution_phase_target_step"] = mixed_phase_target_step
-            mixed_phase_target_epoch = getattr(args, "mixed_resolution_phase_target_epoch", None)
-            if mixed_phase_target_epoch is not None:
-                state_payload["mixed_resolution_phase_target_epoch"] = mixed_phase_target_epoch
-            logging_run_dir = str(getattr(args, "logging_run_dir", "") or "").strip()
-            if not logging_run_dir:
-                logging_run_dir = str(getattr(accelerator, "project_dir", "") or "").strip()
-            if logging_run_dir:
-                state_payload["logging_run_dir"] = logging_run_dir
-                state_payload["logging_dir"] = logging_run_dir
-            with open(train_state_file, "w", encoding="utf-8") as handle:
-                json.dump(state_payload, handle)
+            if accelerator.is_main_process:
+                train_state_file = os.path.join(output_dir, "train_state.json")
+                mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
+                effective_current_epoch = int(current_epoch.value) + mixed_resolution_phase_start_epoch
+                logger.info(
+                    f"save train state to {train_state_file} at epoch {effective_current_epoch} step {current_step.value+1}"
+                )
+                state_payload = {
+                    "current_epoch": effective_current_epoch,
+                    "current_step": current_step.value + 1,
+                }
+                if mixed_resolution_phase_start_epoch > 0:
+                    state_payload["mixed_resolution_local_epoch"] = int(current_epoch.value)
+                mixed_resolution_plan_id = str(getattr(args, "mixed_resolution_plan_id", "") or "").strip()
+                if mixed_resolution_plan_id:
+                    state_payload["mixed_resolution_plan_id"] = mixed_resolution_plan_id
+                mixed_phase_index = getattr(args, "mixed_resolution_phase_index", None)
+                if mixed_phase_index is not None:
+                    state_payload["mixed_resolution_phase_index"] = mixed_phase_index
+                mixed_phase_target_step = getattr(args, "mixed_resolution_phase_target_step", None)
+                if mixed_phase_target_step is not None:
+                    state_payload["mixed_resolution_phase_target_step"] = mixed_phase_target_step
+                mixed_phase_target_epoch = getattr(args, "mixed_resolution_phase_target_epoch", None)
+                if mixed_phase_target_epoch is not None:
+                    state_payload["mixed_resolution_phase_target_epoch"] = mixed_phase_target_epoch
+                logging_run_dir = str(getattr(args, "logging_run_dir", "") or "").strip()
+                if not logging_run_dir:
+                    logging_run_dir = str(getattr(accelerator, "project_dir", "") or "").strip()
+                if logging_run_dir:
+                    state_payload["logging_run_dir"] = logging_run_dir
+                    state_payload["logging_dir"] = logging_run_dir
+                with open(train_state_file, "w", encoding="utf-8") as handle:
+                    json.dump(state_payload, handle)
 
         def load_model_hook(models, input_dir):
             remove_indices = []
@@ -1537,7 +1541,13 @@ class AnimaNetworkTrainer:
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
             if os.path.exists(old_ckpt_file):
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
-                os.remove(old_ckpt_file)
+                try:
+                    os.remove(old_ckpt_file)
+                except OSError as e:
+                    logger.warning(
+                        f"Failed to remove old checkpoint {old_ckpt_file}: {e} / "
+                        f"旧 checkpoint 删除失败：{e} / 删除旧 checkpoint 失败：{e}"
+                    )
 
         accelerator.print("running training / 学習開始")
         accelerator.print(f"  num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")

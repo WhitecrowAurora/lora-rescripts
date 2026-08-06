@@ -56,9 +56,9 @@ class BaseSubsetParams:
     image_dir: Optional[str] = None
     num_repeats: int = 1
     shuffle_caption: bool = False
-    caption_separator: str = (",",)
+    caption_separator: str = ","
     keep_tokens: int = 0
-    keep_tokens_separator: str = (None,)
+    keep_tokens_separator: Optional[str] = None
     secondary_separator: Optional[str] = None
     enable_wildcard: bool = False
     color_aug: bool = False
@@ -70,6 +70,9 @@ class BaseSubsetParams:
     caption_dropout_rate: float = 0.0
     caption_dropout_every_n_epochs: int = 0
     caption_tag_dropout_rate: float = 0.0
+    caption_tag_dropout_targets: Optional[str] = None
+    caption_tag_dropout_target_mode: str = "drop_all"
+    caption_tag_dropout_target_count: int = 1
     token_warmup_min: int = 1
     token_warmup_step: float = 0
     custom_attributes: Optional[Dict[str, Any]] = None
@@ -103,6 +106,7 @@ class ControlNetSubsetParams(BaseSubsetParams):
 @dataclass
 class BaseDatasetParams:
     resolution: Optional[Tuple[int, int]] = None
+    skip_image_resolution: Optional[Tuple[int, int]] = None
     network_multiplier: float = 1.0
     debug_dataset: bool = False
     validation_seed: Optional[int] = None
@@ -117,6 +121,8 @@ class DreamBoothDatasetParams(BaseDatasetParams):
     max_bucket_reso: int = 1024
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
+    bucket_selection_mode: str = "legacy"
+    bucket_custom_resos: Optional[str] = None
     prior_loss_weight: float = 1.0
     
 @dataclass
@@ -127,6 +133,8 @@ class FineTuningDatasetParams(BaseDatasetParams):
     max_bucket_reso: int = 1024
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
+    bucket_selection_mode: str = "legacy"
+    bucket_custom_resos: Optional[str] = None
 
 
 @dataclass
@@ -137,6 +145,8 @@ class ControlNetDatasetParams(BaseDatasetParams):
     max_bucket_reso: int = 1024
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
+    bucket_selection_mode: str = "legacy"
+    bucket_custom_resos: Optional[str] = None
 
 
 @dataclass
@@ -176,7 +186,7 @@ class ConfigSanitizer:
         try:
             Schema(klass)(value)
             return (value, value)
-        except:
+        except Exception:
             return ConfigSanitizer.__validate_and_convert_twodim(klass, value)
 
     # subset schema
@@ -712,7 +722,7 @@ def load_user_config(file: str) -> dict:
 
     if file.name.lower().endswith(".json"):
         try:
-            with open(file, "r") as f:
+            with open(file, "r", encoding="utf-8") as f:
                 config = json.load(f)
         except Exception:
             logger.error(

@@ -130,7 +130,7 @@ class TokenizeStrategy:
         """
 
         def parse_prompt_attention(text):
-            """
+            r"""
             Parses a string with attention tokens and returns a list of pairs: text and its associated weight.
             Accepted tokens are:
             (abc) - increases attention to abc by a multiplier of 1.1
@@ -430,8 +430,11 @@ class LatentsCachingStrategy:
         self._batch_size = batch_size
         self.skip_disk_cache_validity_check = skip_disk_cache_validity_check
         runtime_npz_write_workers = _LATENTS_CACHE_RUNTIME_DEFAULTS.get("npz_write_workers")
+        # A configured value of 0 means "disable async npz writing". Only fall back
+        # to the default when the value was never set (None).
+        default_npz_write_workers = 2 if runtime_npz_write_workers is None else runtime_npz_write_workers
         self._npz_write_workers = (
-            _resolve_npz_write_workers("MIKAZUKI_LATENTS_NPZ_WRITE_WORKERS", runtime_npz_write_workers or 2)
+            _resolve_npz_write_workers("MIKAZUKI_LATENTS_NPZ_WRITE_WORKERS", default_npz_write_workers)
             if cache_to_disk
             else 0
         )
@@ -466,8 +469,13 @@ class LatentsCachingStrategy:
         raise NotImplementedError
 
     def get_image_size_from_disk_cache_path(self, absolute_path: str, npz_path: str) -> Tuple[Optional[int], Optional[int]]:
-        w, h = os.path.splitext(npz_path)[0].split("_")[-2].split("x")
-        return int(w), int(h)
+        parts = os.path.splitext(npz_path)[0].split("_")
+        try:
+            w, h = parts[-2].split("x")
+            return int(w), int(h)
+        except (IndexError, ValueError):
+            # Legacy npz paths may not carry a "_WxH_" segment.
+            return None, None
 
     def get_latents_npz_path(self, absolute_path: str, image_size: Tuple[int, int]) -> str:
         raise NotImplementedError
@@ -545,7 +553,12 @@ class LatentsCachingStrategy:
             kwargs["latents_flipped" + key_reso_suffix] = flipped_latents_array
         if alpha_mask_array is not None:
             kwargs["alpha_mask" + key_reso_suffix] = alpha_mask_array
-        np.savez(npz_path, **kwargs)
+        # Write to a temp file then atomically replace the target so a crash or
+        # power loss never leaves a truncated/corrupt npz on the final path.
+        # np.savez appends ".npz" when the filename does not already end with it.
+        tmp_path = npz_path + ".tmp.npz"
+        np.savez(tmp_path, **kwargs)
+        os.replace(tmp_path, npz_path)
 
     def _queue_latents_npz_write(
         self,

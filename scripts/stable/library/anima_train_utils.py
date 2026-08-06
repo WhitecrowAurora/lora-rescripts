@@ -1254,7 +1254,7 @@ def compute_loss_weighting_for_anima(weighting_scheme: str, sigmas: torch.Tensor
     Same schemes as SD3 but can add Anima-specific ones if needed in future.
     """
     if weighting_scheme == "sigma_sqrt":
-        weighting = (sigmas**-2.0).float()
+        weighting = (torch.clamp(sigmas, min=1e-3) ** -2.0).float()
     elif weighting_scheme == "cosmap":
         bot = 1 - 2 * sigmas + 2 * sigmas**2
         weighting = 2 / (math.pi * bot)

@@ -233,11 +233,13 @@ def normalize_legacy_anima_glokr_full_matrix_sentinel(config: dict, network_args
     if network_dim != ANIMA_GLOKR_LEGACY_FULL_MATRIX_SENTINEL and network_alpha != ANIMA_GLOKR_LEGACY_FULL_MATRIX_SENTINEL:
         return False
 
+    # Only reset the field(s) that actually carry the legacy sentinel; the other
+    # one is a legitimate user value and must be preserved.
     changed = False
-    if network_dim != ANIMA_GLOKR_FULL_MATRIX_COMPAT_DIM:
+    if network_dim == ANIMA_GLOKR_LEGACY_FULL_MATRIX_SENTINEL:
         config["network_dim"] = ANIMA_GLOKR_FULL_MATRIX_COMPAT_DIM
         changed = True
-    if network_alpha != ANIMA_GLOKR_FULL_MATRIX_COMPAT_DIM:
+    if network_alpha == ANIMA_GLOKR_LEGACY_FULL_MATRIX_SENTINEL:
         config["network_alpha"] = ANIMA_GLOKR_FULL_MATRIX_COMPAT_DIM
         changed = True
     if not parse_boolish(config.get("full_matrix", False)):
@@ -303,7 +305,10 @@ def apply_anima_lycoris_overrides(
                 config["lokr_factor"] = existing_lokr_factor
             elif legacy_factor not in (None, ""):
                 config["lokr_factor"] = legacy_factor
-        lokr_factor = int(config.get("lokr_factor", 8) or 8)
+        try:
+            lokr_factor = int(config.get("lokr_factor", 8) or 8)
+        except (TypeError, ValueError):
+            lokr_factor = 8
         network_args = upsert_network_arg(network_args, "use_scalar", "True" if use_scalar_enabled else None)
         network_args = upsert_network_arg(network_args, "rs_lora", "True" if rs_lora_enabled else None)
         network_args = upsert_network_arg(network_args, "full_matrix", "True" if full_matrix_enabled else None)
@@ -545,7 +550,10 @@ def apply_anima_ui_overrides(config: dict) -> None:
                     config["lokr_factor"] = existing_lokr_factor
                 elif legacy_factor not in (None, ""):
                     config["lokr_factor"] = legacy_factor
-            lokr_factor = int(config.get("lokr_factor", 8) or 8)
+            try:
+                lokr_factor = int(config.get("lokr_factor", 8) or 8)
+            except (TypeError, ValueError):
+                lokr_factor = 8
             config["lokr_factor"] = lokr_factor
             network_args = upsert_network_arg(network_args, "anima_adapter_type", "lokr")
             network_args = upsert_network_arg(network_args, "lokr_factor", lokr_factor)

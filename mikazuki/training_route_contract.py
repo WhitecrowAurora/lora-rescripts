@@ -125,7 +125,11 @@ def _build_capabilities(training_type: str, config: Mapping[str, Any] | None = N
             flags.append("persistent-cache")
         else:
             flags.append("transient-cache")
-        if int(config.get("blocks_to_swap", 0) or 0) > 0:
+        try:
+            blocks_to_swap_count = int(config.get("blocks_to_swap", 0) or 0)
+        except (TypeError, ValueError):
+            blocks_to_swap_count = 0
+        if blocks_to_swap_count > 0:
             flags.append("block-swap")
         summary = "Newbie pipeline ties planning, cache, preview, memory runtime, and save-state contracts together."
         return tuple(flags), summary
@@ -144,7 +148,11 @@ def _build_capabilities(training_type: str, config: Mapping[str, Any] | None = N
             flags.append("pissa")
         if _boolish(config.get("network_swap_to_ram")):
             flags.append("vram-swap-to-ram")
-        if int(config.get("blocks_to_swap", 0) or 0) > 0:
+        try:
+            blocks_to_swap_count = int(config.get("blocks_to_swap", 0) or 0)
+        except (TypeError, ValueError):
+            blocks_to_swap_count = 0
+        if blocks_to_swap_count > 0:
             flags.append("block-swap")
         summary = "Anima route couples adapter normalization, runtime policy, and export metadata through shared Lulynx contracts."
         return tuple(flags), summary
